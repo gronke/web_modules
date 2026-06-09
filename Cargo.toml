@@ -1,0 +1,119 @@
+[package]
+name = "web_modules"
+version = "0.1.0"
+authors = ["Stefan Grönke <stefan@gronke.net>"]
+homepage = "https://github.com/gronke/rust-web_modules"
+repository = "https://github.com/gronke/rust-web_modules"
+documentation = "https://docs.rs/web_modules"
+description = "Pure-Rust, buildless toolchain for ES modules and Web Components"
+categories = ["development-tools", "web-programming"]
+keywords = ["typescript", "esm", "importmap", "web_modules", "buildless"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.82"
+# Leading slashes anchor to the crate root — bare patterns (gitignore semantics) match at any
+# depth and would pull in stray files like examples/tauri/README.md.
+include = ["/src/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
+publish = true
+
+# docs.rs: document the full lean toolchain so the whole API renders. The heavy, opt-in
+# `bundle`/rolldown tree stays out (it's a thin wrapper, described in prose).
+[package.metadata.docs.rs]
+features = ["full"]
+
+[features]
+# Specialised for building web modules + simple web apps: TypeScript, SCSS and
+# Tera are on by default. None of these pull in a server runtime, so a `build.rs`
+# that only enables `default` stays free of axum/tokio.
+default = ["typescript", "scss", "tera"]
+
+# TypeScript / modern-JS → browser JS via oxc (incl. legacy decorators for Lit).
+typescript = ["dep:oxc_allocator", "dep:oxc_parser", "dep:oxc_semantic", "dep:oxc_transformer", "dep:oxc_codegen", "dep:oxc_span"]
+# SCSS → CSS via grass.
+scss = ["dep:grass"]
+# HTML templating (e.g. importmap injection) via Tera.
+tera = ["dep:tera"]
+# Production JS minification via oxc_minifier (reuses the oxc parse/codegen stack).
+minify = ["typescript", "dep:oxc_minifier"]
+# Generate favicons / app icons from a source PNG.
+icons = ["dep:image", "dep:ico"]
+# Emit TypeScript declaration files (.d.ts) via oxc_isolated_declarations.
+dts = ["typescript", "dep:oxc_isolated_declarations"]
+# Read/merge XLIFF localisation files (e.g. lit-localize interchange).
+i18n = ["dep:quick-xml"]
+# Pre-compress emitted assets to `.gz` sidecars (gzip), for static serving with `Content-Encoding`.
+compress = ["dep:flate2"]
+# Axum web-server integration: a `Frontend` router factory that serves the built
+# frontend from baked-in (embedded) assets, or — with `dev` — compiled on the fly.
+# Embedded serving pulls no compiler, so release binaries stay lean. (Other web
+# servers can be added as parallel features later.)
+axum = ["dep:axum", "dep:tokio", "dep:mime_guess", "dep:include_dir"]
+# Dev server on top of `axum`: compile TS/SCSS on the fly, watch the source tree,
+# live-reload the browser.
+dev = ["axum", "typescript", "scss", "dep:notify", "dep:tower-livereload"]
+# The `web-modules` CLI binary (dev / compile / vendor / ci / npm). `npm-utils/cli` powers the
+# `npm` passthrough; it stays behind this opt-in feature so the library path never pulls clap.
+cli = ["dev", "minify", "dep:clap", "npm-utils/cli"]
+# CommonJS→ESM bundling via rolldown (the embedded, oxc-based Rust bundler): bundle an app plus its
+# `node_modules/` (CommonJS and all) into one browser ESM file. Heavy and **opt-in** — the default
+# toolchain stays a buildless, no-bundler ESM workflow; pull this in only when you need CJS→ESM.
+bundle = ["dep:rolldown", "dep:tokio"]
+# Everything in the lean toolchain. The heavy, opt-in `bundle` is intentionally NOT included, so
+# `full` (and `--features full`) builds stay free of the rolldown / second-oxc tree.
+full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli"]
+
+[dependencies]
+# Core — vendoring npm packages + composing import maps + a transitive `node_modules/`
+# install (npm_utils::install, incl. install::from_lockfile for `web-modules ci`).
+npm-utils = "0.5"
+serde_json = "1"
+walkdir = "2"
+semver = "1"
+
+# oxc toolchain (TypeScript transform + minify). Optional; pulled by `typescript`/`minify`.
+oxc_allocator = { version = "0.133", optional = true }
+oxc_parser = { version = "0.133", optional = true }
+oxc_semantic = { version = "0.133", optional = true }
+oxc_transformer = { version = "0.133", optional = true }
+oxc_codegen = { version = "0.133", optional = true }
+oxc_span = { version = "0.133", optional = true }
+oxc_minifier = { version = "0.133", optional = true }
+oxc_isolated_declarations = { version = "0.133", optional = true }
+
+# SCSS + templating.
+grass = { version = "0.13", optional = true }
+tera = { version = "1", optional = true }
+
+# Icons (favicon / app icons) + i18n (XLIFF).
+image = { version = "0.25", default-features = false, features = ["png"], optional = true }
+ico = { version = "0.5", optional = true }
+quick-xml = { version = "0.40", optional = true }
+flate2 = { version = "1", optional = true }
+
+# Axum server integration (embedded serving + dev server) + CLI. Optional; off the
+# build-only path.
+axum = { version = "0.8", optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"], optional = true }
+include_dir = { version = "0.7", optional = true }
+notify = { version = "8", optional = true }
+tower-livereload = { version = "0.10", optional = true }
+mime_guess = { version = "2", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+
+# CommonJS→ESM bundling (the `bundle` feature): the embedded, oxc-based Rust bundler. Heavy
+# (pulls a second oxc + the rolldown tree), so it's optional and off by default.
+rolldown = { version = "1", optional = true }
+
+[[bin]]
+name = "web-modules"
+path = "src/bin/web-modules.rs"
+required-features = ["cli"]
+
+[dev-dependencies]
+tempfile = "3"
+# Drive the axum routers in integration tests without binding a port
+# (`ServiceExt::oneshot` + read the response body). Both are already in the tree via
+# axum, dev-only, and not part of the published crate's dependencies.
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["rt", "macros"] }

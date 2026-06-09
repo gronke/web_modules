@@ -1,0 +1,6 @@
+/target
+/Cargo.lock
+
+# Generated frontend output (vendored modules + build artifacts).
+web_modules/
+dist/

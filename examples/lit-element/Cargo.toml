@@ -1,0 +1,19 @@
+[package]
+name = "lit-element"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[dependencies]
+# `dev` pulls the axum integration (Frontend factory + serve) and the dev server.
+# A lean release build could instead use just `axum`.
+web_modules = { path = "../..", features = ["dev"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# include_dir's macro must be used from a direct dependency (it emits
+# `include_dir::`-qualified paths); same 0.7 line as web-modules, so the `Dir` types unify.
+include_dir = "0.7"
+
+[build-dependencies]
+# Build-time baking only needs the compilers — no axum/tokio.
+web_modules = { path = "../..", default-features = false, features = ["typescript", "scss"] }

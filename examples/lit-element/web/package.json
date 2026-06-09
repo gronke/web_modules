@@ -1,0 +1,15 @@
+{
+  "name": "lit-element-frontend",
+  "private": true,
+  "description": "Browser dependencies for the example, vended at build time by web-modules (see ../build.rs, which reads this with web_modules::vendor::specs_from_package_json). devDependencies are build tooling and are NOT vended.",
+  "dependencies": {
+    "@lit/reactive-element": "^2",
+    "bootstrap": "^5",
+    "lit": "^3",
+    "lit-element": "^4",
+    "lit-html": "^3"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}

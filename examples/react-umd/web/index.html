@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>web-modules · React (classic UMD, no bundler)</title>
+<!-- React 18's prebuilt UMD browser build, vendored as a single file each (see ../src/main.rs)
+     and loaded as classic-script globals: window.React / window.ReactDOM. No import map, no
+     bundler. Order matters — react before react-dom (react-dom reads the React global). -->
+<script src="/web_modules/react/react.js"></script>
+<script src="/web_modules/react-dom/react-dom.js"></script>
+<!-- app.ts is transformed to JS on the fly by web-modules (oxc); it uses the globals above.
+     A module is deferred, so it runs after the two classic scripts have set the globals. -->
+<script type="module" src="/app.js"></script>
+</head>
+<body>
+<main>
+<h1>Classic React (UMD), served by web-modules</h1>
+<p>One file each — <code>react.production.min.js</code> and
+<code>react-dom.production.min.js</code> — extracted from the npm packages and loaded as
+plain <code>&lt;script&gt;</code> globals. No bundler.</p>
+<div id="root"></div>
+</main>
+</body>
+</html>

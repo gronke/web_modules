@@ -1,0 +1,23 @@
+{
+  // Type-checks the TS that web-modules transforms with oxc (oxc strips types without
+  // checking them, so this `tsc --noEmit` pass is what catches type errors). No `jsx` option:
+  // the app uses `React.createElement`, not JSX. The UMD globals are typed via
+  // `typeof import("react")` in app.ts, resolved from @types/react — a type-only query, so
+  // nothing is imported at runtime. `isolatedModules` matches oxc's file-by-file transform.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["web/**/*.ts"],
+  "exclude": ["web/web_modules", "node_modules"]
+}

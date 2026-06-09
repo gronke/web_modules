@@ -1,0 +1,20 @@
+{
+  "name": "react-esm-example-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Type-check (tsc --noEmit) and end-to-end (Playwright) tests for the web-modules react-esm example. The example itself builds and runs with no Node — this is test tooling only. react/react-dom/zustand here are for tsc's type information; the running app uses the rolldown bundle from build.rs.",
+  "scripts": {
+    "test:types": "tsc --noEmit",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "react": "^19",
+    "react-dom": "^19",
+    "typescript": "^5.7.0",
+    "zustand": "^5"
+  }
+}

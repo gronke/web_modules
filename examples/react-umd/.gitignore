@@ -1,0 +1,9 @@
+# Vendored at startup by web-modules (main.rs); never committed.
+web/web_modules/
+
+# Frontend test tooling (Playwright + tsc). package-lock.json IS committed.
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/.last-run.json

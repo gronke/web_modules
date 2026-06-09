@@ -1,0 +1,10 @@
+{
+  "name": "react-esm-frontend",
+  "private": true,
+  "description": "Browser dependencies for the react-esm example. React + react-dom ship CommonJS-only, so they can't be served as native ESM; build.rs installs this tree into node_modules/ with npm-utils, then bundles it CJS->ESM with web-modules' `bundle` feature (rolldown). zustand is a separate dependency that itself imports React, proving a single shared React instance in the bundle.",
+  "dependencies": {
+    "react": "^19",
+    "react-dom": "^19",
+    "zustand": "^5"
+  }
+}

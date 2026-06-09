@@ -1,0 +1,11 @@
+[package]
+name = "react-umd"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# `dev` brings the vendoring core (vendor + Extract::File) and the dev server that serves
+# the web/ tree and transforms web/app.ts to JS on the fly (oxc). No bundler, no rolldown.
+web_modules = { path = "../..", features = ["dev"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

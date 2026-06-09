@@ -1,0 +1,10 @@
+[package]
+name = "compose"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# `dev` pulls the dev server (compile + watch + live-reload) and the `serve` helper.
+web_modules = { path = "../..", features = ["dev"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

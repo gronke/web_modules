@@ -1,0 +1,32 @@
+name: release readiness
+
+# Runs when a signed release tag (v*) is pushed — just before a `cargo publish`. Confirms the
+# crate packages + publishes cleanly (dry-run, no upload) and reports the real MSRV. Kept out of
+# the per-PR CI: the verify build is heavy (it is what used to exhaust the runner's disk there)
+# and only matters at release time. Isolated runner → no shared cache, no zstd needed.
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish-dry-run:
+    name: publish dry-run · MSRV
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: MSRV check (informational — reports the real minimum)
+        continue-on-error: true
+        run: |
+          rustup toolchain install 1.82 --profile minimal
+          cargo +1.82 check -p web_modules --features full
+
+      - name: Package contents
+        run: cargo package -p web_modules --list
+
+      - name: Publish dry-run
+        run: cargo publish -p web_modules --dry-run

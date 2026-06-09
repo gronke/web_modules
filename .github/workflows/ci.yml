@@ -1,0 +1,261 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental codegen on top of the warm `target/` cache below. The Cache size steps report the
+  # registry + target footprint each run, against the 10 GB quota.
+  CARGO_INCREMENTAL: 1
+
+jobs:
+  # The Rust pipeline for everything except tauri: fmt · clippy (incl. the bundle feature) · test ·
+  # build + vendor the examples, then publish the three Playwright example binaries as an artifact
+  # for the `e2e` matrix below. No Node here — the e2e suites run off the prebuilt binaries.
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # The full workspace build (incl. react-esm's rolldown/oxc tree and the opt-in `bundle`
+      # feature) needs more than the runner's default free space. Reclaim ~20 GB of preinstalled
+      # tooling we never use, and make sure zstd is present (actions/cache uses it to compress).
+      - name: Prepare runner (free disk + zstd for actions/cache)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /usr/local/share/boost
+          sudo apt-get update && sudo apt-get install -y zstd
+          df -h /
+
+      # Registry + git + this job's workspace `target/`, warmed on `main` and restored read-only on
+      # PRs. Separate `cargo-test-*` / `cargo-tauri-*` keys (different target dirs) so the test and
+      # tauri jobs never clobber each other's cache.
+      - name: Restore Cargo cache (seeded from main)
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: cargo-test-
+
+      # Format + lint: the whole workspace with `full`, plus the opt-in `bundle` feature
+      # (rolldown), which `full` leaves out.
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Clippy (workspace · full)
+        run: cargo clippy --workspace --all-targets --features full -- -D warnings
+      - name: Clippy (bundle feature · rolldown)
+        run: cargo clippy --features bundle --all-targets -- -D warnings
+
+      # Feature isolation: the bare crate and a few single features must each compile on their
+      # own — catches a feature that only builds because another happens to be enabled. `full`
+      # and `bundle` above cover the union; this guards the minimal sets.
+      - name: Feature-isolation check
+        run: |
+          cargo check -p web_modules --no-default-features
+          for f in axum dev minify i18n; do
+            cargo check -p web_modules --no-default-features --features "$f"
+          done
+
+      # Tests: the whole workspace incl. the network-gated vendor/assembly tests, plus the
+      # bundle feature's network-gated documentary test (install react + rolldown-bundle).
+      - name: Tests (workspace · incl. network-gated)
+        run: cargo test --workspace --features full --tests -- --include-ignored
+      - name: Tests (bundle feature · network)
+        run: cargo test --features bundle --test bundle -- --include-ignored
+
+      # Doctests (the API examples in `///` docs): `--tests` above excludes the `--doc` target,
+      # so run it explicitly. No network-gated doctests, so no `--include-ignored` needed.
+      - name: Doctests (workspace · full)
+        run: cargo test --workspace --features full --doc
+
+      # Build the workspace — react-esm's build.rs pulls rolldown for CommonJS→ESM bundling; the
+      # rest vendor at run time (d3/bootstrap/compose/react-umd) or at build time (lit-element).
+      - name: Build + vendor examples
+        env:
+          WEB_MODULES_VENDOR_ONLY: "1"
+        run: |
+          cargo build --workspace
+          cargo run -p d3
+          cargo run -p bootstrap-scss
+          cargo run -p compose
+          cargo run -p react-umd
+
+      # Hand the three e2e example binaries to the `e2e` matrix below, so those runners never
+      # recompile Rust. They're self-contained: lit-element/react-esm bake the frontend in via
+      # `include_dir!`; react-umd live-serves the checked-out `web/` and transforms TS in-process.
+      # Strip debuginfo — the e2e jobs only need to *run* them — keeping the artifact tiny.
+      - name: Stage + strip example binaries
+        run: |
+          mkdir -p e2e-bins
+          for b in lit-element react-umd react-esm; do
+            cp "target/debug/$b" "e2e-bins/$b"
+            strip "e2e-bins/$b"
+          done
+          ls -lh e2e-bins
+      - name: Upload example binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: example-bins
+          path: e2e-bins/
+          retention-days: 1
+
+      # Report the uncompressed footprint (registry + target) on every run, against the 10 GB quota.
+      - name: Cache size (registry + target)
+        if: ${{ !cancelled() }}
+        run: du -sh ~/.cargo/registry ~/.cargo/git target 2>/dev/null || true
+
+      # Seed this job's cache (registry + workspace target) — on `main` only (PRs restored it
+      # read-only above).
+      - name: Save Cargo cache (main only)
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-test-${{ hashFiles('**/Cargo.toml') }}
+
+  # Per-example Playwright e2e, one parallel job each, off the prebuilt binaries from `build`. Each
+  # suite's playwright.config.ts runs `$E2E_SERVER` (the downloaded binary) instead of `cargo run`.
+  e2e:
+    name: e2e · ${{ matrix.example }}
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [lit-element, react-umd, react-esm]
+    steps:
+      # The checkout provides tests/, playwright config + package.json, and — for react-umd, whose
+      # binary live-serves from a compile-time path — the `web/` sources at the matching location.
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: examples/${{ matrix.example }}/package-lock.json
+
+      - name: Download example binaries
+        uses: actions/download-artifact@v7
+        with:
+          name: example-bins
+          path: e2e-bins
+      - run: chmod +x e2e-bins/*
+
+      # Cache the browser so the three parallel jobs don't each re-download chromium.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('examples/**/package-lock.json') }}
+          restore-keys: playwright-${{ runner.os }}-
+
+      # `npm run test:e2e` starts the app via playwright.config.ts's `webServer`, which uses
+      # $E2E_SERVER (the prebuilt binary, absolute path) — no `cargo run`, no recompile.
+      - name: e2e
+        working-directory: examples/${{ matrix.example }}
+        env:
+          E2E_SERVER: ${{ github.workspace }}/e2e-bins/${{ matrix.example }}
+        run: |
+          npm ci
+          npm run test:types
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-${{ matrix.example }}
+          path: examples/${{ matrix.example }}/playwright-report
+          retention-days: 7
+
+  # The tauri example stays isolated: heavyweight webkit2gtk system deps + an out-of-workspace
+  # crate tree. Verifies it COMPILES (dev-server + the release app embedding the baked
+  # frontendDist) and LIVE-SERVES; launching the GUI needs a display and is left to local use.
+  tauri:
+    name: tauri example
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: examples/tauri
+    steps:
+      - uses: actions/checkout@v6
+
+      # The tauri release build (webkit2gtk + the workspace deps) needs more than the runner's
+      # default free space; reclaim ~20 GB of preinstalled tooling we never use.
+      - name: Prepare runner (free disk)
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /usr/local/share/boost
+          df -h /
+
+      # webkit2gtk + build tooling for tauri, plus zstd for actions/cache.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev \
+            libayatana-appindicator3-dev libxdo-dev libssl-dev \
+            build-essential pkg-config file zstd
+
+      # Registry + git + the tauri crate's own release `target/` (a separate dir from the test job's
+      # workspace target), warmed on `main` and restored read-only here. The free-disk step above
+      # gives the restore headroom.
+      - name: Restore Cargo cache (read-only; seeded from main)
+        uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            examples/tauri/src-tauri/target
+          key: cargo-tauri-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: cargo-tauri-
+
+      - name: Formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+      # Bake `web/` into `frontendDist` (offline). Seed the dir first so tauri-build's codegen
+      # never trips on a missing `frontendDist` during the bake's compile.
+      - name: Bake the frontend (web-modules)
+        run: |
+          mkdir -p dist && printf '<!doctype html>\n' > dist/index.html
+          cargo run --manifest-path src-tauri/Cargo.toml --bin dev-server -- bake dist
+
+      - name: Clippy (all targets)
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Build the release app (embeds the baked frontendDist)
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release
+
+      - name: Live-serve smoke test (no display needed)
+        run: |
+          cargo build --manifest-path src-tauri/Cargo.toml --bin dev-server
+          ./src-tauri/target/debug/dev-server &
+          SRV=$!; trap 'kill $SRV' EXIT
+          curl -s --retry-connrefused --retry 30 --retry-delay 1 http://127.0.0.1:1420/ | grep -q live-clock
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:1420/app.js)" = 200
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:1420/app.ts)" = 404
+
+      # Report the uncompressed footprint on every run (working-directory is examples/tauri).
+      - name: Cache size (registry + tauri target)
+        if: ${{ !cancelled() }}
+        run: du -sh ~/.cargo/registry ~/.cargo/git src-tauri/target 2>/dev/null || true
+
+      # Seed the tauri caches (registry + its release target) — on `main` only; PRs restore read-only.
+      - name: Save Cargo cache (tauri · main only)
+        if: github.ref == 'refs/heads/main'
+        uses: actions/cache/save@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            examples/tauri/src-tauri/target
+          key: cargo-tauri-${{ hashFiles('**/Cargo.toml') }}

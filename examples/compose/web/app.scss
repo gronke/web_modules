@@ -1,0 +1,14 @@
+// Theme Bootstrap by overriding its `!default` SCSS variables, then build Bootstrap from
+// its own SCSS — vendored into this app's web_modules/ by web-modules (which keeps .scss
+// sources). grass compiles it on the fly; no Node, no dart-sass. The dev server's SCSS
+// load paths span every mount, so this resolves against the vendored tree.
+$primary: #6f42c1; // purple
+$secondary: #20c997; // teal
+$enable-shadows: true;
+
+@import "web_modules/bootstrap/scss/bootstrap";
+
+counter-card .card-title {
+  color: $primary;
+  letter-spacing: 0.02em;
+}

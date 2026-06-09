@@ -1,0 +1,13 @@
+# Installed at build time by npm-utils (build.rs); never committed.
+web/node_modules/
+web/.node_modules.marker
+/target
+# Workspace-excluded crate → resolves its own lockfile in CI (like the tauri example).
+Cargo.lock
+
+# Frontend test tooling (Playwright + tsc). package-lock.json IS committed.
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/.last-run.json

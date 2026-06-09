@@ -1,0 +1,17 @@
+{
+  "name": "react-umd-example-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Type-check (tsc --noEmit) and end-to-end (Playwright) tests for the web-modules react-umd example. The example builds and runs with no Node — this is test tooling only. @types/react here type the UMD globals for tsc; the running app uses window.React / window.ReactDOM loaded by index.html.",
+  "scripts": {
+    "test:types": "tsc --noEmit",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "typescript": "^5.7.0"
+  }
+}

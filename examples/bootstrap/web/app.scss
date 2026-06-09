@@ -1,0 +1,20 @@
+// Theme Bootstrap by overriding its SCSS variables, then compile Bootstrap from
+// its own SCSS sources — vendored under web_modules/ by web-modules (which keeps
+// .scss files). grass compiles this on the fly; no Node, no dart-sass.
+//
+// Variable overrides must come *before* the import (Bootstrap's are `!default`).
+$primary: #6f42c1; // purple
+$secondary: #fd7e14; // orange
+$font-size-root: 15px;
+$border-radius: 0.75rem;
+$enable-shadows: true;
+
+@import "web_modules/bootstrap/scss/bootstrap";
+
+// A custom rule layered on top, reusing a Bootstrap Sass variable.
+.brand-banner {
+  background: $primary;
+  color: $white;
+  padding: 1.25rem 1.5rem;
+  border-radius: $border-radius;
+}

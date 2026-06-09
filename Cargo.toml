@@ -117,3 +117,10 @@ tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tokio = { version = "1", features = ["rt", "macros"] }
+
+[workspace]
+members = ["examples/*"]
+# tauri is excluded: its crate is the nested examples/tauri/src-tauri, which declares its own
+# [workspace] (and pulls a heavyweight webkit2gtk tree), so it can't be a workspace member — and
+# examples/tauri/ itself has no Cargo.toml for the glob to load. It has a dedicated CI job.
+exclude = ["examples/tauri"]

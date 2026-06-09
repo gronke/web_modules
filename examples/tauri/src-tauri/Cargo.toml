@@ -1,0 +1,22 @@
+[package]
+name = "tauri-live"
+version = "0.1.0"
+edition = "2021"
+publish = false
+# `cargo tauri dev` / `cargo run` build the app, not the `dev-server` helper bin.
+default-run = "tauri-live"
+build = "build.rs"
+
+# Standalone: this example is EXCLUDED from the web-modules workspace (it pulls a
+# heavyweight webkit2gtk + crate tree), so an empty `[workspace]` makes it its own root.
+[workspace]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+# `dev` = the axum dev server (compile TS/SCSS on the fly + watch + browser live-reload).
+# Its transitive `typescript` + `scss` features also back the production bake in dev-server.
+web_modules = { path = "../../..", features = ["dev"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

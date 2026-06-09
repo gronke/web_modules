@@ -1,0 +1,10 @@
+{
+  "name": "compose-frontend",
+  "private": true,
+  "description": "Composes sibling examples by reference. The local path-deps mount each sibling's *source component* (read by web_modules::vendor::read_package_json, which routes file: deps to Mounts and registry deps to vendoring). Paths are `../../<sibling>/web` because this manifest sits under web/. Third-party runtime deps (lit here; d3 + bootstrap added programmatically in ../src/main.rs) are vended into this app's own web_modules/ for reproducibility — sibling web_modules/ are vended on demand and gitignored, so a composing app owns its vendored assets.",
+  "dependencies": {
+    "counter": "file:../../lit-element/web",
+    "chart": "file:../../d3/web",
+    "lit": "^3"
+  }
+}

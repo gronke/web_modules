@@ -1,0 +1,24 @@
+[package]
+name = "react-esm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+# A workspace member, QA'd like the rest. Its build script installs node_modules and bundles
+# CommonJS→ESM with rolldown (a heavy, second oxc tree) — the only place rolldown is compiled —
+# so a workspace build pulls that tree, by design: the npm→ESM path is the example's whole point.
+
+[dependencies]
+# Lean *static* runtime: just the axum `Frontend` factory + `serve` over the embedded
+# bundle. No `bundle`/rolldown in the running binary — the app is already bundled.
+web_modules = { path = "../..", default-features = false, features = ["axum"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# include_dir's macro must be used from a direct dependency (it emits
+# `include_dir::`-qualified paths); same 0.7 line as web-modules, so the `Dir` types unify.
+include_dir = "0.7"
+
+[build-dependencies]
+# Build-time only: install node_modules (npm-utils, re-exported under `bundle`) + bundle
+# CommonJS→ESM (rolldown). This is the only place rolldown is compiled.
+web_modules = { path = "../..", default-features = false, features = ["bundle"] }

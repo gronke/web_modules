@@ -1,0 +1,20 @@
+[package]
+name = "embedded"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[dependencies]
+# A lean *static* runtime: just the axum `Frontend` factory + `serve` over the baked-in
+# assets. No `dev` feature, so no notify/grass/oxc is linked into the running binary —
+# the whole site is already compiled and embedded.
+web_modules = { path = "../..", default-features = false, features = ["axum"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# include_dir's macro must be used from a direct dependency (it emits
+# `include_dir::`-qualified paths); same 0.7 line as web-modules, so the `Dir` types unify.
+include_dir = "0.7"
+
+[build-dependencies]
+# Build-time bake only: compile TS + SCSS, minify the JS, and write `.gz` sidecars.
+web_modules = { path = "../..", default-features = false, features = ["typescript", "scss", "minify", "compress"] }

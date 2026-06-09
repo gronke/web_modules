@@ -1,0 +1,27 @@
+// Authored SCSS (variables + nesting) compiled to compressed CSS by grass at build time,
+// then gzipped into a `styles.css.gz` sidecar.
+
+$accent: #4f46e5;
+$radius: 0.5rem;
+
+body {
+  font-family: system-ui, sans-serif;
+  margin: 2rem;
+
+  h1 {
+    color: $accent;
+  }
+
+  button {
+    color: #fff;
+    background: $accent;
+    border: 0;
+    padding: 0.6rem 1rem;
+    border-radius: $radius;
+    cursor: pointer;
+
+    &:hover {
+      filter: brightness(1.08);
+    }
+  }
+}

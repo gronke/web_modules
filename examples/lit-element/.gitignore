@@ -1,0 +1,9 @@
+web/web_modules/
+web/index.html
+
+# Frontend test tooling (Playwright + tsc). package-lock.json IS committed.
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/.last-run.json

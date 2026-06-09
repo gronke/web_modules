@@ -1,0 +1,25 @@
+{
+  // Type-checks the TSX that web-modules transforms via rolldown's oxc pass. The bundler
+  // strips/transforms types without checking them, so this `tsc --noEmit` pass is what
+  // catches type errors. `jsx: react-jsx` (the automatic runtime, importing
+  // `react/jsx-runtime`) mirrors exactly what rolldown's JSX transform emits, so what tsc
+  // checks is what gets bundled. `isolatedModules` matches the bundler's file-by-file
+  // transform.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["web/**/*.ts", "web/**/*.tsx"],
+  "exclude": ["web/node_modules", "node_modules"]
+}

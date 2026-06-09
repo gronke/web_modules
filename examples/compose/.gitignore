@@ -1,0 +1,5 @@
+# All generated at startup by src/main.rs from the tracked sources + the mount set.
+web/web_modules/
+web/index.html
+web/importmap.json
+tsconfig.json

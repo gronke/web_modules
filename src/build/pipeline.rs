@@ -23,8 +23,10 @@
 //! # Ok(()) }
 //! ```
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
+use crate::importmap::Importmap;
 use crate::vendor::{self, PackageSpec};
 use crate::{Error, Result};
 
@@ -59,18 +61,38 @@ pub struct Output {
     pub minify: bool,
     /// Write `<file>.gz` sidecars for servable assets. Requires the `compress` feature.
     pub gzip: bool,
+    /// Drop vendored packages the app never imports (import-graph prune). Off by
+    /// default; enable via [`with_prune_unused`](Self::with_prune_unused).
+    pub prune_unused: bool,
 }
 
 impl Output {
     /// The production preset: minify the emitted JS **and** write `.gz` sidecars (both
     /// toggles on). Reach for this — or [`Output::default`] (both off) — since `Output`
     /// is `#[non_exhaustive]` and so can't be built field-by-field from other crates.
-    /// Takes full effect with the `minify` and `compress` features.
+    /// Takes full effect with the `minify` and `compress` features. Leaves `prune_unused`
+    /// off — add it explicitly with [`with_prune_unused`](Self::with_prune_unused).
     pub fn optimized() -> Self {
         Self {
             minify: true,
             gzip: true,
+            prune_unused: false,
         }
+    }
+
+    /// Enable the import-graph prune ("tree-shaking" for the native-ESM vendor): after
+    /// vendoring, delete every vendored package not reachable from the app's imports,
+    /// keeping the embedded output lean. Chain onto any preset, e.g.
+    /// `Output::optimized().with_prune_unused(true)`.
+    ///
+    /// **Caveat — dynamic imports:** only a statically written `import("name")` is
+    /// followed; a package reached *only* through a computed `import(expr)` can't be
+    /// seen and would be pruned. Don't enable this if you load a vendored package by
+    /// computed specifier (or keep it reachable with a static import). Packages with no
+    /// import-map entry (a SCSS load path, a `<script>` global) are never touched.
+    pub fn with_prune_unused(mut self, on: bool) -> Self {
+        self.prune_unused = on;
+        self
     }
 }
 
@@ -105,6 +127,13 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         )));
     }
 
+    // Tree-shake the vendored tree (opt-in): drop packages the app never imports.
+    let importmap = if opts.output.prune_unused {
+        prune_unused(opts.out, opts.mount, importmap, opts.specs)?
+    } else {
+        importmap
+    };
+
     // Emit the import map as a standalone artifact too, so test harnesses (and
     // es-module-shims / an external `<script type="importmap" src>`) can consume it.
     importmap.write_to(&opts.out.join("importmap.json"))?;
@@ -136,36 +165,52 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Bare module specifiers from an emitted module's `import`/`export … from` and
-/// dynamic `import()` statements (covers oxc codegen's output forms).
+/// Module specifiers from an emitted module's `import` / `export … from` and dynamic
+/// `import()`, read from oxc's parser module record. The `build` module is
+/// `typescript`-gated, so oxc is always available here; parsing (rather than a lexical
+/// scan) keeps this robust against specifiers that merely appear inside strings or
+/// comments and against minified spacing.
 fn module_specifiers(js: &str) -> Vec<String> {
-    const PATTERNS: &[&str] = &[
-        "from \"",
-        "from '",
-        "import \"",
-        "import '",
-        "import(\"",
-        "import('",
-    ];
-    let mut specs = Vec::new();
-    for pat in PATTERNS {
-        // Every pattern ends in its quote char; skip defensively if one were empty.
-        let Some(quote) = pat.chars().last() else {
-            continue;
-        };
-        let mut from = 0;
-        while let Some(p) = js[from..].find(pat) {
-            let start = from + p + pat.len();
-            match js[start..].find(quote) {
-                Some(end) => {
-                    specs.push(js[start..start + end].to_string());
-                    from = start + end + 1;
-                }
-                None => break,
+    use oxc_allocator::Allocator;
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    let allocator = Allocator::default();
+    // oxc yields a (possibly partial) module record even on parse errors → best-effort.
+    let record = Parser::new(&allocator, js, SourceType::mjs())
+        .parse()
+        .module_record;
+
+    // Static `import` / `export … from` requests are keyed by specifier.
+    let mut specs: Vec<String> = record
+        .requested_modules
+        .keys()
+        .map(|s| s.to_string())
+        .collect();
+
+    // Dynamic `import(...)`: the record holds the span of the specifier *expression* —
+    // take it when that's a plain string literal, skip computed expressions.
+    for dynamic in &record.dynamic_imports {
+        let span = dynamic.module_request;
+        if let Some(raw) = js.get(span.start as usize..span.end as usize) {
+            if let Some(lit) = string_literal_value(raw) {
+                specs.push(lit);
             }
         }
     }
     specs
+}
+
+/// The inner text of a single-/double-quoted string literal (`"lit"` → `lit`), or
+/// `None` for anything else (e.g. a computed `import(expr)`).
+fn string_literal_value(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    match (bytes.first(), bytes.last()) {
+        (Some(a), Some(b)) if raw.len() >= 2 && (*a == b'"' || *a == b'\'') && a == b => {
+            Some(raw[1..raw.len() - 1].to_string())
+        }
+        _ => None,
+    }
 }
 
 /// A *bare* specifier (resolved via the import map), not a relative/absolute/URL one.
@@ -204,6 +249,124 @@ fn unresolved_imports(
         }
     }
     Ok(out)
+}
+
+/// A browser ES module on disk (`.js`/`.mjs`).
+fn is_js_module(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|x| x.to_str()),
+        Some("js" | "mjs")
+    )
+}
+
+/// The import-map `url`'s owning package: the longest `universe` spec dir that
+/// prefixes the URL's path after `mount` (a scoped `@scope/name` wins over a shorter
+/// match). `None` for a URL outside the vendored mount.
+fn package_of<'a>(url: &str, mount: &str, universe: &[&'a PackageSpec]) -> Option<&'a str> {
+    let rest = url.strip_prefix(mount)?.trim_start_matches('/');
+    universe
+        .iter()
+        .map(|s| s.name())
+        .filter(|dir| rest == *dir || rest.strip_prefix(*dir).is_some_and(|r| r.starts_with('/')))
+        .max_by_key(|dir| dir.len())
+}
+
+/// The vendored packages a JS source imports: its bare specifiers, resolved through
+/// `map`, mapped to their owning package.
+fn packages_in(js: &str, mount: &str, universe: &[&PackageSpec], map: &Importmap) -> Vec<String> {
+    module_specifiers(js)
+        .into_iter()
+        .filter(|s| is_bare(s))
+        .filter_map(|s| map.resolve(&s).map(str::to_string))
+        .filter_map(|url| package_of(&url, mount, universe).map(str::to_string))
+        .collect()
+}
+
+/// Import-graph prune ("tree-shaking" for the native-ESM vendor): walk the bare imports
+/// from the app's emitted modules **through** the vendored packages, then delete every
+/// vendored package — and its import-map entries — that nothing reaches. Package
+/// granularity (a reached package is kept whole).
+/// [`no_imports`](crate::vendor::PackageSpec::no_imports) specs (no import-map entry —
+/// SCSS load paths, `<script>`-loaded globals) are never touched. Returns the rebuilt map.
+fn prune_unused(
+    out: &Path,
+    mount: &str,
+    map: Importmap,
+    specs: &[PackageSpec],
+) -> Result<Importmap> {
+    let vendor_dir = out.join("web_modules");
+    let mount = mount.trim_end_matches('/');
+    // Only entry-having packages may be pruned (others aren't in the JS graph).
+    let universe: Vec<&PackageSpec> = specs.iter().filter(|s| s.has_imports()).collect();
+
+    // Roots: every package the app's own (non-vendored) modules import.
+    let mut reachable: BTreeSet<String> = BTreeSet::new();
+    let mut work: Vec<String> = Vec::new();
+    for entry in walkdir::WalkDir::new(out)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if !is_js_module(path) || path.components().any(|c| c.as_os_str() == "web_modules") {
+            continue;
+        }
+        let js = std::fs::read_to_string(path)?;
+        for pkg in packages_in(&js, mount, &universe, &map) {
+            if reachable.insert(pkg.clone()) {
+                work.push(pkg);
+            }
+        }
+    }
+
+    // Walk the package graph through the vendored code (whole-package scan).
+    while let Some(pkg) = work.pop() {
+        let Some(spec) = universe.iter().find(|s| s.name() == pkg) else {
+            continue;
+        };
+        for entry in walkdir::WalkDir::new(spec.resolved_dest(&vendor_dir))
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            if !is_js_module(entry.path()) {
+                continue;
+            }
+            let js = std::fs::read_to_string(entry.path())?;
+            for dep in packages_in(&js, mount, &universe, &map) {
+                if reachable.insert(dep.clone()) {
+                    work.push(dep);
+                }
+            }
+        }
+    }
+
+    // Delete unreachable entry-having packages from disk.
+    let mut dropped: Vec<&str> = Vec::new();
+    for spec in &universe {
+        if !reachable.contains(spec.name()) {
+            let dest = spec.resolved_dest(&vendor_dir);
+            if dest.exists() {
+                std::fs::remove_dir_all(&dest)?;
+            }
+            dropped.push(spec.name());
+        }
+    }
+    if !dropped.is_empty() {
+        dropped.sort_unstable();
+        println!(
+            "cargo:warning=web-modules: pruned {} unused vendored package(s): {}",
+            dropped.len(),
+            dropped.join(", ")
+        );
+    }
+
+    // Rebuild the import map with only the reachable packages' entries.
+    let mut pruned = Importmap::new();
+    for (specifier, url) in map.iter() {
+        if package_of(url, mount, &universe).is_some_and(|p| reachable.contains(p)) {
+            pruned.insert(specifier, url);
+        }
+    }
+    Ok(pruned)
 }
 
 /// Render `index.html` from a Tera `template`, exposing the import-map script tag
@@ -250,6 +413,30 @@ mod tests {
     }
 
     #[test]
+    fn ast_scanner_ignores_strings_and_comments() {
+        // A string literal and a comment that *look* like imports must not be picked
+        // up; real imports must — including minified, no-space `from"x"` the old
+        // lexical scan would have missed.
+        let js = "import{x}from\"real-pkg\";\n\
+                  const s = \"import 'fake-in-string'\";\n\
+                  // import \"fake-in-comment\";\n\
+                  const d = import(\"dyn-pkg\");";
+        let specs = module_specifiers(js);
+        assert!(
+            specs.contains(&"real-pkg".to_string()),
+            "minified import found"
+        );
+        assert!(
+            specs.contains(&"dyn-pkg".to_string()),
+            "dynamic import found"
+        );
+        assert!(
+            !specs.iter().any(|s| s.contains("fake")),
+            "string/comment look-alikes ignored: {specs:?}"
+        );
+    }
+
+    #[test]
     fn flags_unresolved_app_import_but_skips_vendored() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -271,6 +458,96 @@ mod tests {
             "only the helper import is unresolved; got {unresolved:?}"
         );
         assert!(unresolved[0].1.starts_with("@oxc-project/runtime"));
+    }
+
+    #[test]
+    fn prune_drops_unreachable_keeps_transitive() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path();
+        let vm = out.join("web_modules");
+        // app → lit → lit-html; `unused` is an orphan; `globals` is a no-imports
+        // package (a SCSS load path / <script> global) that must survive untouched.
+        std::fs::write(out.join("app.js"), "import { LitElement } from \"lit\";").unwrap();
+        for (pkg, src) in [
+            ("lit", "import \"lit-html\";\nexport class X {}"),
+            ("lit-html", "export const html = 1;"),
+            ("unused", "export const z = 1;"),
+            ("globals", "export const g = 1;"),
+        ] {
+            std::fs::create_dir_all(vm.join(pkg)).unwrap();
+            std::fs::write(vm.join(pkg).join("index.js"), src).unwrap();
+        }
+
+        let mut map = Importmap::new();
+        map.insert("lit", "/web_modules/lit/index.js");
+        map.insert("lit-html", "/web_modules/lit-html/index.js");
+        map.insert("unused", "/web_modules/unused/index.js");
+        // `globals` is vended with no import-map entry.
+
+        let specs = [
+            PackageSpec::npm("lit", "^3"),
+            PackageSpec::npm("lit-html", "^3"),
+            PackageSpec::npm("unused", "^1"),
+            PackageSpec::npm("globals", "^1").no_imports(),
+        ];
+        let pruned = prune_unused(out, "/web_modules", map, &specs).unwrap();
+
+        assert!(vm.join("lit/index.js").exists(), "app dep kept");
+        assert!(vm.join("lit-html/index.js").exists(), "transitive dep kept");
+        assert!(!vm.join("unused").exists(), "orphan pruned");
+        assert!(
+            vm.join("globals/index.js").exists(),
+            "no-imports package untouched"
+        );
+
+        let keys: Vec<&str> = pruned.iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            keys,
+            vec!["lit", "lit-html"],
+            "map rebuilt to reachable only"
+        );
+    }
+
+    #[test]
+    fn prune_handles_scoped_and_dynamic_imports() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path();
+        let vm = out.join("web_modules");
+        // app statically imports a scoped package and dynamically imports another.
+        std::fs::write(
+            out.join("app.js"),
+            "import { x } from \"@scope/used\";\nconst m = import(\"dynpkg\");",
+        )
+        .unwrap();
+        for pkg in ["@scope/used", "@scope/unused", "dynpkg"] {
+            std::fs::create_dir_all(vm.join(pkg)).unwrap();
+            std::fs::write(vm.join(pkg).join("index.js"), "export const v = 1;").unwrap();
+        }
+
+        let mut map = Importmap::new();
+        map.insert("@scope/used", "/web_modules/@scope/used/index.js");
+        map.insert("@scope/unused", "/web_modules/@scope/unused/index.js");
+        map.insert("dynpkg", "/web_modules/dynpkg/index.js");
+
+        let specs = [
+            PackageSpec::npm("@scope/used", "^1"),
+            PackageSpec::npm("@scope/unused", "^1"),
+            PackageSpec::npm("dynpkg", "^1"),
+        ];
+        let pruned = prune_unused(out, "/web_modules", map, &specs).unwrap();
+
+        assert!(
+            vm.join("@scope/used/index.js").exists(),
+            "scoped static import kept"
+        );
+        assert!(vm.join("dynpkg/index.js").exists(), "dynamic import kept");
+        assert!(
+            !vm.join("@scope/unused").exists(),
+            "unreachable scoped package pruned"
+        );
+        let keys: Vec<&str> = pruned.iter().map(|(k, _)| k).collect();
+        assert!(keys.contains(&"@scope/used") && keys.contains(&"dynpkg"));
+        assert!(!keys.contains(&"@scope/unused"));
     }
 
     #[cfg(feature = "tera")]

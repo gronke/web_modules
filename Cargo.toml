@@ -14,7 +14,7 @@ edition = "2021"
 rust-version = "1.94"
 # Leading slashes anchor to the crate root — bare patterns (gitignore semantics) match at any
 # depth and would pull in stray files like examples/tauri/README.md.
-include = ["/src/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
+include = ["/src/**/*.rs", "/Cargo.toml", "/README.md", "/CHANGELOG.md", "/LICENSE"]
 publish = true
 
 # docs.rs: document the full lean toolchain so the whole API renders. The heavy, opt-in

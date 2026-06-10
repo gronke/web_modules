@@ -203,6 +203,25 @@ impl PackageSpec {
     pub fn name(&self) -> &str {
         &self.dir
     }
+
+    /// The resolved on-disk destination for this spec under `vendor_dir` — where
+    /// [`vendor`] extracts it: a custom [`dest`](Self::dest) (absolute, or relative
+    /// to `vendor_dir`), otherwise `<vendor_dir>/<dir>`.
+    pub fn resolved_dest(&self, vendor_dir: &Path) -> PathBuf {
+        match &self.dest {
+            Some(d) if d.is_absolute() => d.clone(),
+            Some(d) => vendor_dir.join(d),
+            None => vendor_dir.join(&self.dir),
+        }
+    }
+
+    /// Whether this spec contributes import-map entries — i.e. it takes part in the
+    /// JS import graph. `false` for [`no_imports`](Self::no_imports) specs (a SCSS
+    /// load path, a `<script>`-loaded global, a single vended file), which a
+    /// build-time import-graph prune must leave in place.
+    pub fn has_imports(&self) -> bool {
+        !matches!(self.imports, Imports::None)
+    }
 }
 
 /// Build vendoring specs from the `dependencies` of a `package.json` — keep your
@@ -453,11 +472,7 @@ fn vendor_inner(
     std::fs::create_dir_all(vendor_dir)?;
 
     for spec in specs {
-        let dest_dir = match &spec.dest {
-            Some(d) if d.is_absolute() => d.clone(),
-            Some(d) => vendor_dir.join(d),
-            None => vendor_dir.join(&spec.dir),
-        };
+        let dest_dir = spec.resolved_dest(vendor_dir);
         let flat = spec.dir.replace('/', "_");
         let marker = vendor_dir.join(format!(".{flat}.version"));
 

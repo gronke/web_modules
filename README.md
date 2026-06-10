@@ -10,7 +10,7 @@ bundler** at build time. Use it as a **`web-modules` CLI** for everyday developm
 - **Vendor** - resolve and download npm packages into `web_modules/<name>`, targeted or including dependencies.
 - **Transform** - compile and convert source files, minify and process.
 - **Dev server** - serve from source, compile on the fly, watch and live-reload.
-- **Build** - vendor, transform and render an embeddable `dist/`, then bake it into your binary.
+- **Build** - vendor, transform and render an embeddable `dist/`, then bake it into your binary; optionally tree-shake unused vendored packages.
 - **Bundle** *(opt-in)* - fold CommonJS packages and their `node_modules/` into ES modules.
 
 ## Features

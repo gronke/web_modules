@@ -86,6 +86,21 @@ impl Importmap {
                 .any(|k| k.ends_with('/') && specifier.starts_with(k.as_str()))
     }
 
+    /// The URL `specifier` resolves to under this map — the exact key if present,
+    /// otherwise the longest prefix key (ending in `/`) that prefixes it (so
+    /// `lit/decorators.js` resolves via `"lit/"`). The URL counterpart to
+    /// [`resolves`](Self::resolves); `None` when nothing matches.
+    pub fn resolve(&self, specifier: &str) -> Option<&str> {
+        if let Some(url) = self.imports.get(specifier) {
+            return Some(url.as_str());
+        }
+        self.imports
+            .iter()
+            .filter(|(k, _)| k.ends_with('/') && specifier.starts_with(k.as_str()))
+            .max_by_key(|(k, _)| k.len())
+            .map(|(_, v)| v.as_str())
+    }
+
     /// Read an import-map fragment file — a JSON document whose top-level
     /// `"imports"` object has string values.
     pub fn from_json_file(path: &Path) -> Result<Self> {

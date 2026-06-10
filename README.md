@@ -57,7 +57,7 @@ Run `web-modules <command> --help` for flags.
 
 ```toml
 [dependencies]
-web_modules = "0.1"   # Rust 1.82+
+web_modules = "0.1"   # Rust 1.94+
 ```
 
 `typescript`, `scss` and `tera` are on by default; `full` enables everything except `bundle`. For the `build.rs` / runtime API see the **[API docs][docs.rs]**.

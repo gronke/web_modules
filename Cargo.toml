@@ -10,7 +10,8 @@ categories = ["development-tools", "web-programming"]
 keywords = ["typescript", "esm", "importmap", "web_modules", "buildless"]
 license = "MIT"
 edition = "2021"
-rust-version = "1.82"
+# MSRV tracks oxc (the transform/minify toolchain), which raises it as it evolves.
+rust-version = "1.94"
 # Leading slashes anchor to the crate root — bare patterns (gitignore semantics) match at any
 # depth and would pull in stray files like examples/tauri/README.md.
 include = ["/src/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
@@ -71,14 +72,14 @@ walkdir = "2"
 semver = "1"
 
 # oxc toolchain (TypeScript transform + minify). Optional; pulled by `typescript`/`minify`.
-oxc_allocator = { version = "0.133", optional = true }
-oxc_parser = { version = "0.133", optional = true }
-oxc_semantic = { version = "0.133", optional = true }
-oxc_transformer = { version = "0.133", optional = true }
-oxc_codegen = { version = "0.133", optional = true }
-oxc_span = { version = "0.133", optional = true }
-oxc_minifier = { version = "0.133", optional = true }
-oxc_isolated_declarations = { version = "0.133", optional = true }
+oxc_allocator = { version = "0.135", optional = true }
+oxc_parser = { version = "0.135", optional = true }
+oxc_semantic = { version = "0.135", optional = true }
+oxc_transformer = { version = "0.135", optional = true }
+oxc_codegen = { version = "0.135", optional = true }
+oxc_span = { version = "0.135", optional = true }
+oxc_minifier = { version = "0.135", optional = true }
+oxc_isolated_declarations = { version = "0.135", optional = true }
 
 # SCSS + templating.
 grass = { version = "0.13", optional = true }

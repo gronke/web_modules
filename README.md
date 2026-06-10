@@ -1,19 +1,28 @@
-# web-modules
+# web_modules
 
-**Pure-Rust tooling for developing Web Components** — vendor npm packages, transform
+**Pure-Rust tooling for developing Web Components**: vendor npm packages, transform
 TypeScript/SCSS, and serve or embed a native-ESM frontend, with **no Node, no npm and no
 bundler** at build time. Use it as a **`web-modules` CLI** for everyday development, or as a
-**library** from a `build.rs` / at runtime. Built on [`npm-utils`], [oxc] and [`grass`].
+**library** from a `build.rs` / at runtime. Built on [`npm-utils`], [oxc], [`grass`] and [rolldown].
+
+## What it does
+
+- **Vendor** - resolve and download npm packages into `web_modules/<name>`, targeted or including dependencies.
+- **Transform** - compile and convert source files, minify and process.
+- **Dev server** - serve from source, compile on the fly, watch and live-reload.
+- **Build** - vendor, transform and render an embeddable `dist/`, then bake it into your binary.
+- **Bundle** *(opt-in)* - fold CommonJS packages and their `node_modules/` into ES modules.
 
 ## Features
 
-| Capability | What it does |
-|------------|--------------|
-| **Vendor** | resolve + download npm packages into `web_modules/<name>/` + an [import map] (bare specifiers → vended files; npm and GitHub sources; curate the browser set with a `webDependencies` whitelist) |
-| **Transform** | TypeScript → browser JS ([oxc]) and SCSS → CSS ([`grass`]); optional minify, `.d.ts`, XLIFF i18n, and icon generation — *the processors* (full list on [docs.rs]) |
-| **Dev server** | serve a frontend straight from source — compile TS/SCSS on the fly, watch the tree, live-reload the browser |
-| **Build** | vendor + transform + render `index.html` into an embeddable `dist/` from a `build.rs` (`web_modules::build`), then `include_dir!` it into your binary |
-| **Bundle** | fold a CommonJS package + its `node_modules/` into one browser ES module via [rolldown] — for React-class packages that ship only CJS (opt-in) |
+Each is a Cargo `--features` flag:
+
+- **typescript / scss** - compile to browser JS and CSS
+- **tera** - HTML and [import map] templating
+- **minify · dts · i18n · icons** - optional processors
+- **compress** - gzip sidecars for static serving
+- **bundle** - CommonJS to ESM
+- **axum · dev** - serve the frontend, with a live-reload dev server
 
 ## CLI
 
@@ -21,13 +30,26 @@ bundler** at build time. Use it as a **`web-modules` CLI** for everyday developm
 cargo install web_modules --features cli
 ```
 
-| Command | |
-|---------|--|
-| `web-modules dev [roots…]` | dev server with watch + live-reload |
-| `web-modules compile [roots…] --out <dir>` | compile a source tree into an output dir |
-| `web-modules vendor [pkg…] [--manifest <pkg.json>]` | vendor npm packages → `web_modules/` + import map |
-| `web-modules ci [dir]` | install a `package-lock.json`'s exact tree — a pure-Rust `npm ci` |
-| `web-modules npm <args…>` | run an [`npm-utils`] command (`add` / `install` / `upgrade` / …) |
+<!-- regenerate: cargo run -p web_modules --bin web-modules --features cli -- --help -->
+
+```console
+$ web-modules --help
+Buildless web frontend toolchain (no Node)
+
+Usage: web-modules <COMMAND>
+
+Commands:
+  dev      Dev server: compile TS/SCSS on the fly, watch the tree, live-reload
+  compile  Compile source root(s) into an output tree (TS→JS, SCSS→CSS, static files copied)
+  vendor   Vendor npm packages into web_modules/ + an import map
+  ci       Install a package-lock.json's exact tree into node_modules/ — a pure-Rust npm ci
+  npm      Run an npm-utils command (add · install · ci · upgrade · …)
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+```
 
 Run `web-modules <command> --help` for flags.
 
@@ -38,14 +60,21 @@ Run `web-modules <command> --help` for flags.
 web_modules = "0.1"   # Rust 1.82+
 ```
 
-`typescript`, `scss` and `tera` are on by default; opt into `minify`, `axum`, `dev`, `cli`,
-`bundle`, … as needed (`full` enables everything but `bundle`). For the `build.rs` / runtime
-API and the full feature list see the **[API docs][docs.rs]**; for runnable demos see
-**[`examples/`](examples/)**.
+`typescript`, `scss` and `tera` are on by default; `full` enables everything except `bundle`. For the `build.rs` / runtime API see the **[API docs][docs.rs]**.
+
+## Examples
+
+The [`examples/`](examples/) tree is full of runnable demos; `cargo run` and open the browser. A few picks:
+
+- [**lit-element**](examples/lit-element) - a Lit 3 component themed with Bootstrap 5, baked at build time, served by axum.
+- [**d3**](examples/d3) - a bar chart with D3, a non-Lit npm dependency vendored and served as-is.
+- [**react-esm**](examples/react-esm) - React from npm bundled into one browser ES module, entirely in Rust (the `bundle` feature).
+- [**embedded**](examples/embedded) - the whole frontend baked into the binary; no filesystem, no network.
+- [**tauri**](examples/tauri) - a Tauri v2 desktop app, frontend live-served (and release-baked) by web-modules.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
 [import map]: https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap
 [`npm-utils`]: https://github.com/gronke/rust-npm-utils

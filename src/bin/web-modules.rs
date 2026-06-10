@@ -53,26 +53,7 @@ enum Command {
         #[arg(long)]
         minify: bool,
     },
-    /// Run an `npm-utils` command (add · install · ci · upgrade · …).
-    ///
-    /// `web-modules npm add lit@^3` is exactly `cargo npm-utils add lit@^3`.
-    #[command(disable_help_flag = true)]
-    Npm {
-        /// Arguments forwarded verbatim to npm-utils (e.g. `add lit@^3`, `install`, `ci`).
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<OsString>,
-    },
-    /// Install a `package-lock.json`'s exact tree into `node_modules/` — a pure-Rust `npm ci`.
-    ///
-    /// devDependencies included, each tarball's sha512 integrity verified, platform-mismatched
-    /// optional deps skipped, and `node_modules/.bin/` shims created. Installs a project's Node
-    /// test tooling (Playwright, `tsc`) with no npm — only the Node runtime is then needed.
-    Ci {
-        /// Project directory containing `package-lock.json` (default: current dir).
-        #[arg(default_value = ".")]
-        dir: PathBuf,
-    },
-    /// Vendor npm packages into `web_modules/` + an import map.
+    /// Vendor npm packages into web_modules/ + an import map.
     ///
     /// Packages come from positional `name@range` specs and/or the `dependencies` of
     /// `--manifest` package.json(s).
@@ -91,6 +72,25 @@ enum Command {
         manifest: Vec<PathBuf>,
         /// Packages as `name` or `name@range` (e.g. `lit@^3`). Optional when `--manifest` is given.
         packages: Vec<String>,
+    },
+    /// Install a package-lock.json's exact tree into node_modules/ — a pure-Rust npm ci.
+    ///
+    /// devDependencies included, each tarball's sha512 integrity verified, platform-mismatched
+    /// optional deps skipped, and `node_modules/.bin/` shims created. Installs a project's Node
+    /// test tooling (Playwright, `tsc`) with no npm — only the Node runtime is then needed.
+    Ci {
+        /// Project directory containing `package-lock.json` (default: current dir).
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+    },
+    /// Run an npm-utils command (add · install · ci · upgrade · …).
+    ///
+    /// `web-modules npm add lit@^3` is exactly `cargo npm-utils add lit@^3`.
+    #[command(disable_help_flag = true)]
+    Npm {
+        /// Arguments forwarded verbatim to npm-utils (e.g. `add lit@^3`, `install`, `ci`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
 }
 
@@ -189,23 +189,6 @@ async fn main() -> Res {
                 if minify { " (minified)" } else { "" },
             );
         }
-        Command::Npm { args } => {
-            // Delegate to npm-utils' own CLI, so `web-modules npm add lit@^3` is exactly
-            // `npm-utils add lit@^3`. The leading token stands in for argv[0] (clap takes the
-            // displayed program name from npm-utils' own `#[command(name = …)]`).
-            npm_utils::cli::run(std::iter::once(OsString::from("npm-utils")).chain(args))?;
-        }
-        Command::Ci { dir } => {
-            // `npm ci`, in pure Rust — no npm. (npm-utils is a direct dependency, so the bin
-            // calls it without the `bundle`-gated re-export.)
-            let installed =
-                npm_utils::install::from_lockfile(&dir.join("package-lock.json"), &dir)?;
-            println!(
-                "installed {} package(s) → {} (npm ci, in Rust — no npm)",
-                installed.len(),
-                dir.join("node_modules").display()
-            );
-        }
         Command::Vendor {
             out,
             mount,
@@ -222,6 +205,23 @@ async fn main() -> Res {
                 }
                 None => println!("{}", map.to_json()),
             }
+        }
+        Command::Ci { dir } => {
+            // `npm ci`, in pure Rust — no npm. (npm-utils is a direct dependency, so the bin
+            // calls it without the `bundle`-gated re-export.)
+            let installed =
+                npm_utils::install::from_lockfile(&dir.join("package-lock.json"), &dir)?;
+            println!(
+                "installed {} package(s) → {} (npm ci, in Rust — no npm)",
+                installed.len(),
+                dir.join("node_modules").display()
+            );
+        }
+        Command::Npm { args } => {
+            // Delegate to npm-utils' own CLI, so `web-modules npm add lit@^3` is exactly
+            // `npm-utils add lit@^3`. The leading token stands in for argv[0] (clap takes the
+            // displayed program name from npm-utils' own `#[command(name = …)]`).
+            npm_utils::cli::run(std::iter::once(OsString::from("npm-utils")).chain(args))?;
         }
     }
     Ok(())

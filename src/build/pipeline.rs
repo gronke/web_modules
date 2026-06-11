@@ -437,6 +437,29 @@ mod tests {
     }
 
     #[test]
+    fn ast_scanner_follows_reexports() {
+        // `export … from` / `export * from` are module requests too (oxc keeps them in
+        // the parser's `requested_modules`). The prune walks the graph through these, so
+        // a package reached *only* via a re-export must still be seen — pin that here.
+        let js = "export { html } from \"pkg-a\";\n\
+                  export * from \"pkg-b\";\n\
+                  import \"pkg-c\";";
+        let specs = module_specifiers(js);
+        assert!(
+            specs.contains(&"pkg-a".to_string()),
+            "named `export … from` followed: {specs:?}"
+        );
+        assert!(
+            specs.contains(&"pkg-b".to_string()),
+            "star `export * from` followed: {specs:?}"
+        );
+        assert!(
+            specs.contains(&"pkg-c".to_string()),
+            "plain import still found: {specs:?}"
+        );
+    }
+
+    #[test]
     fn flags_unresolved_app_import_but_skips_vendored() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -505,6 +528,43 @@ mod tests {
             keys,
             vec!["lit", "lit-html"],
             "map rebuilt to reachable only"
+        );
+    }
+
+    #[test]
+    fn prune_deletes_custom_dest_at_resolved_path() {
+        // A spec with a custom `dest` lives at a different on-disk path than its name, so
+        // the prune must delete it at its `resolved_dest`, not `<vendor>/<name>`.
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path();
+        let vm = out.join("web_modules");
+        std::fs::write(out.join("app.js"), "import { u } from \"used\";").unwrap();
+        std::fs::create_dir_all(vm.join("used")).unwrap();
+        std::fs::write(vm.join("used/index.js"), "export const u = 1;").unwrap();
+        // `relocated` is vended under web_modules/vendor/relocated, and nothing imports it.
+        std::fs::create_dir_all(vm.join("vendor/relocated")).unwrap();
+        std::fs::write(vm.join("vendor/relocated/index.js"), "export const r = 1;").unwrap();
+
+        let mut map = Importmap::new();
+        map.insert("used", "/web_modules/used/index.js");
+        map.insert("relocated", "/web_modules/relocated/index.js");
+
+        let specs = [
+            PackageSpec::npm("used", "^1"),
+            PackageSpec::npm("relocated", "^1").dest("vendor/relocated"),
+        ];
+        let pruned = prune_unused(out, "/web_modules", map, &specs).unwrap();
+
+        assert!(vm.join("used/index.js").exists(), "reachable package kept");
+        assert!(
+            !vm.join("vendor/relocated").exists(),
+            "unreachable custom-dest package deleted at its resolved_dest"
+        );
+        let keys: Vec<&str> = pruned.iter().map(|(k, _)| k).collect();
+        assert_eq!(
+            keys,
+            vec!["used"],
+            "map rebuilt to the reachable entry only"
         );
     }
 

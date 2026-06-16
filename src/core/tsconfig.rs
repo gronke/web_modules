@@ -5,8 +5,9 @@
 //!
 //! For a mount with specifier `@module/contacts/` and dir `modules/contacts/web/src`,
 //! this emits `"@module/contacts/*": ["./modules/contacts/web/src/*"]` (dir relative
-//! to `base`, typically the workspace root). Callers compose these with any
-//! hand-authored entries (single-file aliases, third-party `node_modules` paths).
+//! to `base`, typically the workspace root). Pair with [`tsconfig_node_modules_paths`]
+//! for the third-party `node_modules` paths (derived from a `package.json`) and merge
+//! both into one `compilerOptions.paths`.
 
 use std::path::Path;
 
@@ -49,6 +50,30 @@ pub fn write_tsconfig_base(mounts: &[Mount], base: &Path, path: &Path) -> Result
     }
     std::fs::write(path, json)?;
     Ok(())
+}
+
+/// Build the `compilerOptions.paths` object resolving each third-party npm package
+/// declared in `package_json` to its `./node_modules/<pkg>` location (plus a `<pkg>/*`
+/// subpath glob). The package set is read via
+/// [`specs_from_package_json`](crate::vendor::specs_from_package_json), so it honors the
+/// `web-modules.webDependencies` whitelist and skips local (`file:`/`workspace:`) deps —
+/// the editor then resolves exactly the packages the build vendors. Compose the result
+/// with [`tsconfig_paths`] (first-party mounts) into one `paths` map.
+///
+/// `node_modules` is assumed to sit beside the `tsconfig.json` (the usual layout), so the
+/// emitted values are `./node_modules/<pkg>`. Keys are sorted for byte-stable output.
+pub fn tsconfig_node_modules_paths(package_json: &Path) -> Result<Value> {
+    let specs = crate::vendor::specs_from_package_json(package_json)?;
+    let mut paths = Map::new();
+    for spec in &specs {
+        let name = spec.name();
+        paths.insert(name.to_string(), json!([format!("./node_modules/{name}")]));
+        paths.insert(
+            format!("{name}/*"),
+            json!([format!("./node_modules/{name}/*")]),
+        );
+    }
+    Ok(Value::Object(paths))
 }
 
 /// `dir` relative to `base` as a `./`-prefixed, forward-slash path. Falls back to
@@ -102,5 +127,49 @@ mod tests {
             written["compilerOptions"]["paths"]["ui/*"],
             json!(["./ui/src/*"])
         );
+    }
+
+    #[test]
+    fn node_modules_paths_from_dependencies() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("package.json");
+        std::fs::write(
+            &pkg,
+            r#"{ "dependencies": { "lit": "^3", "@lit/context": "1.1.6", "jose": "6.2.3" } }"#,
+        )
+        .unwrap();
+        let paths = tsconfig_node_modules_paths(&pkg).unwrap();
+        let obj = paths.as_object().unwrap();
+        assert_eq!(obj["lit"], json!(["./node_modules/lit"]));
+        assert_eq!(obj["lit/*"], json!(["./node_modules/lit/*"]));
+        // Scoped packages are emitted verbatim.
+        assert_eq!(obj["@lit/context"], json!(["./node_modules/@lit/context"]));
+        assert_eq!(
+            obj["@lit/context/*"],
+            json!(["./node_modules/@lit/context/*"])
+        );
+        assert_eq!(obj["jose"], json!(["./node_modules/jose"]));
+        assert_eq!(obj.len(), 6, "3 packages × (bare + /*)");
+    }
+
+    #[test]
+    fn node_modules_paths_honor_webdependencies_whitelist() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path().join("package.json");
+        // `pg` is server-only; the webDependencies whitelist keeps it out of the editor set.
+        std::fs::write(
+            &pkg,
+            r#"{ "dependencies": { "lit": "^3", "pg": "^8" },
+                "web-modules": { "webDependencies": ["lit"] } }"#,
+        )
+        .unwrap();
+        let paths = tsconfig_node_modules_paths(&pkg).unwrap();
+        let obj = paths.as_object().unwrap();
+        assert!(obj.contains_key("lit"));
+        assert!(
+            !obj.contains_key("pg"),
+            "pg is not in webDependencies → no tsconfig path"
+        );
+        assert_eq!(obj.len(), 2, "only lit (bare + /*)");
     }
 }

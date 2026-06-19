@@ -78,7 +78,7 @@ impl Output {
 /// Emits `cargo:rerun-if-changed` for the source dir.
 pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     std::fs::create_dir_all(opts.out)?;
-    let importmap = vendor::vendor(&opts.out.join("web_modules"), opts.mount, opts.specs)?;
+    let mut importmap = vendor::vendor(&opts.out.join("web_modules"), opts.mount, opts.specs)?;
     let transpile = crate::typescript::TranspileOptions {
         minify: opts.output.minify,
         ..Default::default()
@@ -87,6 +87,9 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     #[cfg(feature = "scss")]
     crate::scss::compile_directory(opts.src, opts.out, &[opts.out])?;
     crate::static_files::copy_static(opts.src, opts.out)?;
+
+    // Resolve the runtime helpers the transform emitted (decorator helper, etc.).
+    importmap.extend(vendor_transform_runtime(opts.out, opts.mount)?);
 
     // Fail the build if any emitted module imports a bare specifier the import map
     // can't resolve (a transform runtime helper, a forgotten dependency, …) — so a
@@ -206,6 +209,45 @@ fn unresolved_imports(
     Ok(out)
 }
 
+/// npm `@oxc-project/runtime` range; tracks the `oxc_*` crate version.
+const OXC_RUNTIME_RANGE: &str = "^0.135";
+
+/// Vendor the oxc runtime helpers the transform emitted (e.g. the legacy-decorator
+/// `@oxc-project/runtime/helpers/decorate`) so their bare imports resolve. Scans emitted JS under
+/// `out`; vendors `@oxc-project/runtime` when used, else returns an empty map. `build` calls this.
+pub fn vendor_transform_runtime(out: &Path, mount: &str) -> Result<crate::importmap::Importmap> {
+    let mut uses_runtime = false;
+    for entry in walkdir::WalkDir::new(out)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("js") {
+            continue;
+        }
+        // Vendored modules carry their own imports; only scan our emitted output.
+        if path.components().any(|c| c.as_os_str() == "web_modules") {
+            continue;
+        }
+        let js = std::fs::read_to_string(path)?;
+        if module_specifiers(&js)
+            .iter()
+            .any(|s| is_bare(s) && s.starts_with("@oxc-project/runtime"))
+        {
+            uses_runtime = true;
+            break;
+        }
+    }
+    if !uses_runtime {
+        return Ok(crate::importmap::Importmap::new());
+    }
+    vendor::vendor(
+        &out.join("web_modules"),
+        mount,
+        &[PackageSpec::npm("@oxc-project/runtime", OXC_RUNTIME_RANGE)],
+    )
+}
+
 /// Render `index.html` from a Tera `template`, exposing the import-map script tag
 /// as an `importmap` variable.
 #[cfg(feature = "tera")]
@@ -247,6 +289,36 @@ mod tests {
         assert!(specs.contains(&"bootstrap".to_string()));
         assert!(is_bare("lit") && is_bare("@oxc-project/runtime/helpers/decorate"));
         assert!(!is_bare("./local.js") && !is_bare("/x.js") && !is_bare("https://h/y.js"));
+    }
+
+    #[test]
+    fn vendor_transform_runtime_is_noop_without_helpers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("app.js"),
+            "import { LitElement } from \"lit\";",
+        )
+        .unwrap();
+        // No @oxc-project/runtime import -> nothing vendored, no network.
+        let map = vendor_transform_runtime(dir.path(), "/web_modules").unwrap();
+        assert!(!map.resolves("@oxc-project/runtime/helpers/decorate"));
+    }
+
+    #[test]
+    #[ignore = "network: downloads @oxc-project/runtime from the npm registry"]
+    fn vendor_transform_runtime_resolves_the_decorator_helper() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("el.js"),
+            "import _d from \"@oxc-project/runtime/helpers/decorate\";",
+        )
+        .unwrap();
+        let map = vendor_transform_runtime(dir.path(), "/web_modules").unwrap();
+        assert!(map.resolves("@oxc-project/runtime/helpers/decorate"));
+        assert!(dir
+            .path()
+            .join("web_modules/@oxc-project/runtime/src/helpers/esm/decorate.js")
+            .is_file());
     }
 
     #[test]

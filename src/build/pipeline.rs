@@ -210,7 +210,7 @@ fn unresolved_imports(
 }
 
 /// npm `@oxc-project/runtime` range; tracks the `oxc_*` crate version.
-const OXC_RUNTIME_RANGE: &str = "^0.135";
+const OXC_RUNTIME_RANGE: &str = "^0.137";
 
 /// Vendor the oxc runtime helpers the transform emitted (e.g. the legacy-decorator
 /// `@oxc-project/runtime/helpers/decorate`) so their bare imports resolve. Scans emitted JS under

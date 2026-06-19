@@ -21,11 +21,11 @@ pub fn emit_dts(source: &str, path: &Path) -> Result<String> {
     let source_type = SourceType::from_path(path).unwrap_or_default();
 
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.errors.is_empty() {
+    if parsed.diagnostics.has_errors() {
         return Err(Error::Dts(format!(
             "parse errors in {}: {:?}",
             path.display(),
-            parsed.errors
+            &parsed.diagnostics[..]
         )));
     }
 

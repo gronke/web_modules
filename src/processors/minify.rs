@@ -23,9 +23,9 @@ pub fn minify_str(source: &str, path: &Path) -> Result<String> {
     let source_type = SourceType::from_path(path).unwrap_or_default();
 
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.errors.is_empty() {
+    if parsed.diagnostics.has_errors() {
         let body = parsed
-            .errors
+            .diagnostics
             .iter()
             .map(|e| format!("{e:?}"))
             .collect::<Vec<_>>()

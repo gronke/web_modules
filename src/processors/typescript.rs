@@ -94,11 +94,11 @@ pub fn compile_str_with(source: &str, path: &Path, options: &TranspileOptions) -
     let source_type = SourceType::from_path(path).unwrap_or_default();
 
     let parsed = Parser::new(&allocator, source, source_type).parse();
-    if !parsed.errors.is_empty() {
+    if parsed.diagnostics.has_errors() {
         return Err(Error::TypeScript(render_errors(
             "parse",
             path,
-            &parsed.errors,
+            &parsed.diagnostics[..],
         )));
     }
     let mut program = parsed.program;
@@ -106,11 +106,11 @@ pub fn compile_str_with(source: &str, path: &Path, options: &TranspileOptions) -
     // `with_enum_eval(true)` lets the transformer evaluate TS `enum` member values;
     // oxc panics when lowering an `enum` if the scoping wasn't built with it.
     let semantic = SemanticBuilder::new().with_enum_eval(true).build(&program);
-    if !semantic.errors.is_empty() {
+    if semantic.diagnostics.has_errors() {
         return Err(Error::TypeScript(render_errors(
             "semantic",
             path,
-            &semantic.errors,
+            &semantic.diagnostics[..],
         )));
     }
     let scoping = semantic.semantic.into_scoping();
@@ -118,11 +118,11 @@ pub fn compile_str_with(source: &str, path: &Path, options: &TranspileOptions) -
     let oxc_options = transform_options(options);
     let transformed =
         Transformer::new(&allocator, path, &oxc_options).build_with_scoping(scoping, &mut program);
-    if !transformed.errors.is_empty() {
+    if transformed.diagnostics.has_errors() {
         return Err(Error::TypeScript(render_errors(
             "transform",
             path,
-            &transformed.errors,
+            &transformed.diagnostics[..],
         )));
     }
 

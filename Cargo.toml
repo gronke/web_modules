@@ -77,14 +77,14 @@ walkdir = "2"
 semver = "1"
 
 # oxc toolchain (TypeScript transform + minify). Optional; pulled by `typescript`/`minify`.
-oxc_allocator = { version = "0.135", optional = true }
-oxc_parser = { version = "0.135", optional = true }
-oxc_semantic = { version = "0.135", optional = true }
-oxc_transformer = { version = "0.135", optional = true }
-oxc_codegen = { version = "0.135", optional = true }
-oxc_span = { version = "0.135", optional = true }
-oxc_minifier = { version = "0.135", optional = true }
-oxc_isolated_declarations = { version = "0.135", optional = true }
+oxc_allocator = { version = "0.137", optional = true }
+oxc_parser = { version = "0.137", optional = true }
+oxc_semantic = { version = "0.137", optional = true }
+oxc_transformer = { version = "0.137", optional = true }
+oxc_codegen = { version = "0.137", optional = true }
+oxc_span = { version = "0.137", optional = true }
+oxc_minifier = { version = "0.137", optional = true }
+oxc_isolated_declarations = { version = "0.137", optional = true }
 
 # SCSS + templating.
 grass = { version = "0.13", optional = true }

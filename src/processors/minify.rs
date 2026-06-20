@@ -54,7 +54,7 @@ pub fn minify_str(source: &str, path: &Path) -> Result<String> {
 
 /// Minify every `.js` under `dir` **in place**, returning the count. Mirrors the
 /// [`super::typescript::compile_directory`] convention for the emitted-JS tree of a
-/// release/embedded build. Note this rewrites *every* `.js` it finds — point it at
+/// release/embedded build. Note this rewrites *every* `.js` it finds; point it at
 /// the subtree you want minified (e.g. exclude an already-minified vendored tree).
 pub fn minify_directory(dir: &Path) -> Result<usize> {
     let mut count = 0;

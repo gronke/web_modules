@@ -1,8 +1,8 @@
 //! Build-script helper: **build** a complete static frontend into an output dir for
-//! embedding (`include_dir!`) — vendored `web_modules/`, transformed TypeScript,
+//! embedding (`include_dir!`): vendored `web_modules/`, transformed TypeScript,
 //! compiled SCSS, copied static files, and a rendered `index.html`.
 //!
-//! Call from a consumer `build.rs` (with web-modules as a `build-dependency`):
+//! Call from a consumer `build.rs` (with web_modules as a `build-dependency`):
 //!
 //! ```no_run
 //! use std::path::{Path, PathBuf};
@@ -49,13 +49,13 @@ pub struct BuildOptions<'a> {
     pub output: Output,
 }
 
-/// Output-optimization toggles — "make the output smaller". Each processor applies
-/// what it can (TS minifies; SCSS already emits compressed; static assets gzip-only).
-/// Both default off, so an unset `BuildOptions { .. }` behaves as before.
+/// Output-optimization toggles. Each processor applies what it can: TS minifies,
+/// SCSS already emits compressed, static assets gzip-only. Both default off, so an
+/// unset `BuildOptions { .. }` leaves the output unoptimized.
 #[derive(Clone, Copy, Debug, Default)]
 #[non_exhaustive]
 pub struct Output {
-    /// Minify the emitted JS (via the TS compile's output — see [`crate::typescript`]).
+    /// Minify the emitted JS (via the TS compile's output; see [`crate::typescript`]).
     pub minify: bool,
     /// Write `<file>.gz` sidecars for servable assets. Requires the `compress` feature.
     pub gzip: bool,
@@ -63,7 +63,7 @@ pub struct Output {
 
 impl Output {
     /// The production preset: minify the emitted JS **and** write `.gz` sidecars (both
-    /// toggles on). Reach for this — or [`Output::default`] (both off) — since `Output`
+    /// toggles on). Use this, or [`Output::default`] (both off), since `Output`
     /// is `#[non_exhaustive]` and so can't be built field-by-field from other crates.
     /// Takes full effect with the `minify` and `compress` features.
     pub fn optimized() -> Self {
@@ -102,7 +102,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
             .collect::<Vec<_>>()
             .join("\n");
         return Err(Error::Build(format!(
-            "web-modules: {} unresolved bare import(s) — add them to the vendored \
+            "web-modules: {} unresolved bare import(s) - add them to the vendored \
              specs / import map:\n{details}",
             unresolved.len()
         )));
@@ -257,7 +257,7 @@ fn render_template(template: &Path, importmap: &crate::importmap::Importmap) -> 
     crate::templates::render_file(template, &ctx)
 }
 
-/// Without the `tera` feature a `template` can't be rendered — surface a clear error.
+/// Without the `tera` feature a `template` can't be rendered; surface a clear error.
 #[cfg(not(feature = "tera"))]
 fn render_template(_template: &Path, _importmap: &crate::importmap::Importmap) -> Result<String> {
     Err(Error::Build(

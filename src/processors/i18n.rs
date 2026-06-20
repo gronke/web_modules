@@ -77,7 +77,7 @@ fn parse_xliff_inner(xml: &str) -> std::result::Result<Vec<Unit>, Box<dyn std::e
     Ok(units)
 }
 
-/// Merge XLIFF documents into a `{ id: text }` map — the target if present, else
+/// Merge XLIFF documents into a `{ id: text }` map, the target if present, else
 /// the source. Later documents win on duplicate ids (so module-specific files can
 /// override shared ones).
 pub fn merge_to_map(docs: &[&str]) -> Result<BTreeMap<String, String>> {

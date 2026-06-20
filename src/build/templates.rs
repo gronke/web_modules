@@ -1,4 +1,4 @@
-//! HTML templating via [Tera] — primarily to render an `index.html` shell with
+//! HTML templating via [Tera], primarily to render an `index.html` shell with
 //! the generated import map injected.
 //!
 //! Re-exports [`Context`] so callers set variables without depending on `tera`
@@ -22,7 +22,7 @@ pub use tera::Context;
 use crate::{Error, Result};
 
 /// Render a template string with `context`. Autoescaping is **off** so injected
-/// HTML (an importmap `<script>`, `<link>` tags) is emitted verbatim — use Tera's
+/// HTML (an importmap `<script>`, `<link>` tags) is emitted verbatim; use Tera's
 /// `| escape` filter on any untrusted values you insert.
 pub fn render_str(template: &str, context: &Context) -> Result<String> {
     tera::Tera::one_off(template, context, false).map_err(|e| Error::Template(e.to_string()))

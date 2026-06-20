@@ -1,6 +1,6 @@
 //! TypeScript / modern JS → browser JS via [oxc].
 //!
-//! A **type-stripping + decorator** transform only — no ES downleveling and no
+//! A **type-stripping + decorator** transform only, no ES downleveling and no
 //! bundling. Bare import specifiers are left intact for the browser's import map.
 //! Legacy (experimental) decorators are enabled with the class-field semantics
 //! Lit requires, i.e. the `experimentalDecorators: true` + `useDefineForClassFields:
@@ -33,7 +33,7 @@ pub enum Decorators {
     /// `@customElement`/`@property`/`@state` behave correctly. The default.
     #[default]
     Lit,
-    /// No decorator/class-field tweaks — plain oxc defaults, for non-Lit (or
+    /// No decorator/class-field tweaks: plain oxc defaults, for non-Lit (or
     /// decorator-free) sources.
     Standard,
 }
@@ -54,7 +54,7 @@ pub struct TranspileOptions {
 }
 
 impl TranspileOptions {
-    /// The plain (non-Lit) preset: [`Decorators::Standard`] — standard decorators and
+    /// The plain (non-Lit) preset: [`Decorators::Standard`], standard decorators and
     /// oxc's default *define*-semantics class fields. Use this for codebases that aren't
     /// using Lit's decorator-free `static properties` pattern, e.g. ones that rely on a
     /// subclass `static x = …` field shadowing an inherited getter (which the Lit preset's

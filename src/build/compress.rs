@@ -1,7 +1,7 @@
 //! Pre-compress emitted assets to `.gz` sidecars (gzip) so a static server can serve
 //! them with `Content-Encoding: gzip`.
 //!
-//! Byte-level and **universal** — the compression half of the crate's output
+//! Byte-level and **universal**: the compression half of the crate's output
 //! optimization (the per-type half is [minification](crate::minify)). Pair with
 //! [`server`](crate::server)'s static router, which prefers a `<file>.gz` sidecar when
 //! the client sends `Accept-Encoding: gzip`.

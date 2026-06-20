@@ -1,7 +1,7 @@
 //! Axum integration: serve a frontend from a set of **known roots**.
 //!
-//! A [`Frontend`] is a list of roots — each an embedded `include_dir!` tree or a
-//! filesystem directory — mounted under a URL prefix. The default is **one root at
+//! A [`Frontend`] is a list of roots (each an embedded `include_dir!` tree or a
+//! filesystem directory) mounted under a URL prefix. The default is **one root at
 //! `/`**; you can add several, each under its own prefix.
 //!
 //! - [`Frontend::router`] serves the roots **statically**, as-is (no compiler, no
@@ -11,7 +11,7 @@
 //! - [`Frontend::auto`] picks `dev` in debug builds, `router` in release.
 //!
 //! A request can never resolve to a file outside a known root (the containment in
-//! `super::serving`) — the same boundary the planned processor sandbox will use.
+//! `super::serving`), the same boundary the planned processor sandbox will use.
 //!
 //! ```ignore
 //! use web_modules::{include_dir::{include_dir, Dir}, serve, Frontend};
@@ -76,13 +76,13 @@ pub struct Frontend {
 }
 
 impl Frontend {
-    /// No roots yet — add them with [`mount_embedded`](Self::mount_embedded) /
+    /// No roots yet; add them with [`mount_embedded`](Self::mount_embedded) /
     /// [`mount_dir`](Self::mount_dir).
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// One **embedded** root at `/` (baked `include_dir!` assets — production).
+    /// One **embedded** root at `/` (baked `include_dir!` assets, production).
     pub fn embedded(dir: &'static Dir<'static>) -> Self {
         Self {
             roots: vec![Root::new("", Source::Embedded(dir))],
@@ -96,7 +96,7 @@ impl Frontend {
         }
     }
 
-    /// Add a filesystem source root at `/` (your `.ts`/`.scss` dir for live mode) —
+    /// Add a filesystem source root at `/` (your `.ts`/`.scss` dir for live mode), a
     /// convenience for `mount_dir("/", path)`. Repeatable.
     pub fn source(self, path: impl Into<PathBuf>) -> Self {
         self.mount_dir("/", path)
@@ -116,7 +116,7 @@ impl Frontend {
         self
     }
 
-    /// Static file serving over the roots (embedded or filesystem), as-is — no
+    /// Static file serving over the roots (embedded or filesystem), as-is, no
     /// compiler, no watcher. Most-specific prefix wins; same-prefix ties resolve to
     /// the **first root added**.
     pub fn router(self) -> Router {
@@ -161,8 +161,8 @@ impl Frontend {
     }
 }
 
-/// Static handler: resolve a request against the roots — most-specific prefix first,
-/// same-prefix ties in declaration order — and serve the first match, staying inside
+/// Static handler: resolve a request against the roots (most-specific prefix first,
+/// same-prefix ties in declaration order) and serve the first match, staying inside
 /// each root.
 async fn serve_static(
     State(roots): State<Arc<Vec<Root>>>,

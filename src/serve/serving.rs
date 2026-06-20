@@ -1,5 +1,5 @@
 //! Shared serving primitives: URL-prefix matching, path containment, and content
-//! types — used by both the static ([`server`](crate::server)) and live
+//! types, used by both the static ([`server`](crate::server)) and live
 //! ([`dev`](crate::dev)) routers.
 //!
 //! [`contained_file`] is the **sandbox boundary**: a request can never resolve to a
@@ -24,8 +24,8 @@ pub(crate) fn relative_under(prefix: &str, requested: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Layer 1 (lexical): reject a request path that could traverse out of a root — a
-/// `..` component, an absolute root, or a drive prefix — before it touches the FS.
+/// Layer 1 (lexical): reject a request path that could traverse out of a root (a
+/// `..` component, an absolute root, or a drive prefix) before it touches the FS.
 pub(crate) fn has_traversal(path: &str) -> bool {
     Path::new(path).components().any(|c| {
         matches!(
@@ -36,7 +36,7 @@ pub(crate) fn has_traversal(path: &str) -> bool {
 }
 
 /// Layer 2 (resolved): join `relative` onto `root` and return it only as an existing
-/// file that stays inside `root` once `.`/`..` and symlinks are resolved — so even a
+/// file that stays inside `root` once `.`/`..` and symlinks are resolved, so even a
 /// symlink inside a root cannot point outside it.
 pub(crate) fn contained_file(root: &Path, relative: &str) -> Option<PathBuf> {
     let real = root.join(relative).canonicalize().ok()?;
@@ -53,7 +53,7 @@ pub(crate) fn content_type(path: &str) -> String {
 
 /// Extensions of *source* files the toolchain compiles rather than serves: `.ts`/
 /// `.tsx`/`.mts` → `.js`, `.scss` → `.css`, `.tera` → its rendered target. Such
-/// originals are kept out of HTTP responses — the client only ever gets the compiled
+/// originals are kept out of HTTP responses; the client only ever gets the compiled
 /// output.
 const SOURCE_EXTENSIONS: [&str; 5] = ["ts", "tsx", "mts", "scss", "tera"];
 
@@ -67,7 +67,7 @@ pub(crate) fn is_source_file(path: &str) -> bool {
 
 /// Like [`is_source_file`], but on a resolved [`Path`]. Apply this to the path a request
 /// actually resolved to (after `canonicalize`), so OS-level name folding the request
-/// string didn't reveal — case folding, or a Windows trailing `.`/space — can't smuggle a
+/// string didn't reveal (case folding, or a Windows trailing `.`/space) can't smuggle a
 /// source past the guard.
 pub(crate) fn has_source_extension(path: &Path) -> bool {
     path.extension()

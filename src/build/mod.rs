@@ -1,10 +1,12 @@
-//! Build-time toolchain. The build pipeline — vendor + transform (TypeScript → JS,
-//! SCSS → CSS) + render an `index.html` / import map into an embeddable output dir — is
-//! re-exported as `web_modules::build`. Alongside it live the emit helpers, each behind
-//! its own Cargo feature and also re-exported at the crate root: `bundle`
-//! (CommonJS → ESM via rolldown → `web_modules::bundle`), `compress` (gzip `.gz`
-//! sidecars → `web_modules::compress`) and `templates` (HTML / import-map rendering →
-//! `web_modules::templates`).
+//! Build-time toolchain for a consumer crate's `build.rs`.
+//!
+//! [`build()`] runs the full pipeline: vendor npm packages, compile TypeScript and
+//! SCSS, and render an `index.html` and import map into an embeddable output
+//! directory; [`Output::optimized`] adds minification and gzip for release builds.
+//!
+//! Companion helpers, each re-exported at the crate root: `bundle` folds a CommonJS
+//! app and its `node_modules/` into one browser ES module, `compress` writes gzip
+//! `.gz` sidecars, and `templates` renders Tera templates.
 
 #[cfg(feature = "bundle")]
 pub mod bundle;

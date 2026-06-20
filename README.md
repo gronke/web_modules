@@ -43,7 +43,7 @@ Commands:
   dev      Dev server: compile TS/SCSS on the fly, watch the tree, live-reload
   compile  Compile source root(s) into an output tree (TS→JS, SCSS→CSS, static files copied)
   vendor   Vendor npm packages into web_modules/ + an import map
-  ci       Install a package-lock.json's exact tree into node_modules/ — a pure-Rust npm ci
+  ci       Install a package-lock.json's exact tree into node_modules/ - a pure-Rust npm ci
   npm      Run an npm-utils command (add · install · ci · upgrade · …)
   help     Print this message or the help of the given subcommand(s)
 
@@ -71,7 +71,7 @@ The [`examples/`](examples/) tree is full of runnable demos; `cargo run` and ope
 - [**d3**](examples/d3) - a bar chart with D3, a non-Lit npm dependency vendored and served as-is.
 - [**react-esm**](examples/react-esm) - React from npm bundled into one browser ES module, entirely in Rust (the `bundle` feature).
 - [**embedded**](examples/embedded) - the whole frontend baked into the binary; no filesystem, no network.
-- [**tauri**](examples/tauri) - a Tauri v2 desktop app, frontend live-served (and release-baked) by web-modules.
+- [**tauri**](examples/tauri) - a Tauri v2 desktop app, frontend live-served (and release-baked) by web_modules.
 
 ## License
 

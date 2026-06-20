@@ -1,5 +1,5 @@
 //! `web-modules` CLI: `dev` (dev server), `compile` (compile root(s) to an output dir),
-//! `vendor` (npm → `web_modules/` + import map), `ci` (pure-Rust `npm ci`), and `npm`
+//! `vendor` (vendor npm into `web_modules/` + import map), `ci` (pure-Rust `npm ci`), and `npm`
 //! (delegates to npm-utils' `add`/`install`/`upgrade`/…). Requires the `cli` feature.
 
 use std::ffi::OsString;
@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, Subcommand};
 use web_modules::vendor::{vendor, PackageSpec};
 
-/// This binary's fallible return — `()` by default.
+/// This binary's fallible return, `()` by default.
 type Res<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
 #[derive(Parser)]
@@ -46,7 +46,7 @@ enum Command {
         /// passing more than one root).
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Also compile `.scss` → `.css`.
+        /// Also compile SCSS.
         #[arg(long)]
         scss: bool,
         /// Minify emitted `.js`.
@@ -73,11 +73,11 @@ enum Command {
         /// Packages as `name` or `name@range` (e.g. `lit@^3`). Optional when `--manifest` is given.
         packages: Vec<String>,
     },
-    /// Install a package-lock.json's exact tree into node_modules/ — a pure-Rust npm ci.
+    /// Install a package-lock.json's exact tree into node_modules/ - a pure-Rust npm ci.
     ///
     /// devDependencies included, each tarball's sha512 integrity verified, platform-mismatched
     /// optional deps skipped, and `node_modules/.bin/` shims created. Installs a project's Node
-    /// test tooling (Playwright, `tsc`) with no npm — only the Node runtime is then needed.
+    /// test tooling (Playwright, `tsc`) with no npm - only the Node runtime is then needed.
     Ci {
         /// Project directory containing `package-lock.json` (default: current dir).
         #[arg(default_value = ".")]
@@ -105,7 +105,7 @@ fn resolve_compile_io(
         Some(out) => out,
         None => roots
             .pop()
-            .ok_or("compile: give an output directory — a trailing path or `--out <dir>`")?,
+            .ok_or("compile: give an output directory - a trailing path or `--out <dir>`")?,
     };
     if roots.is_empty() {
         roots.push(PathBuf::from("."));
@@ -113,7 +113,7 @@ fn resolve_compile_io(
     Ok((roots, out))
 }
 
-/// Parse one positional vendor spec: `name`, `name@range`, or `@scope/name@range` — the range
+/// Parse one positional vendor spec: `name`, `name@range`, or `@scope/name@range`; the range
 /// `@` is the last one, so a leading scope `@` is preserved.
 fn parse_spec(p: &str) -> PackageSpec {
     match p.rfind('@') {
@@ -212,7 +212,7 @@ async fn main() -> Res {
             let installed =
                 npm_utils::install::from_lockfile(&dir.join("package-lock.json"), &dir)?;
             println!(
-                "installed {} package(s) → {} (npm ci, in Rust — no npm)",
+                "installed {} package(s) → {} (npm ci, in Rust - no npm)",
                 installed.len(),
                 dir.join("node_modules").display()
             );

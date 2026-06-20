@@ -2,13 +2,13 @@
 //! TypeScript and SCSS on the fly per request (mtime-cached) and live-reloading the
 //! browser when files change.
 //!
-//! Sources are [`Mount`]s — each a URL prefix + a source dir; the default is one at
+//! Sources are [`Mount`]s, each a URL prefix + a source dir; the default is one at
 //! `/`. Resolution is **dir-observation-order-dominant**: most-specific prefix first,
-//! then — among the dirs matching that prefix, **in the order given** — the first that
+//! then (among the dirs matching that prefix, **in the order given**) the first that
 //! can produce the requested *target* wins (compile `foo.{ts,tsx,mts}` → `foo.js`,
 //! `foo.scss` → `foo.css`, else serve a static file). So overlaying several dirs at one
 //! prefix resolves "first dir wins", as a side-effect. An optional embedded fallback (a
-//! baked `include_dir!` tree) supplies whatever the source dirs don't — vendored
+//! baked `include_dir!` tree) supplies whatever the source dirs don't: vendored
 //! `web_modules/`, a baked `index.html`. The watcher watches every source dir
 //! identically and reloads on any change.
 //!
@@ -52,7 +52,7 @@ enum Kind {
 }
 
 /// Build the dev [`Router`] over flat source `roots` (each mounted at `/`, resolved in
-/// order — first dir wins). For prefix-mounted composition use [`dev_router_mounted`].
+/// order, first dir wins). For prefix-mounted composition use [`dev_router_mounted`].
 pub fn dev_router(roots: Vec<PathBuf>) -> Router {
     build_router(roots.into_iter().map(Mount::root).collect(), None)
 }
@@ -139,7 +139,7 @@ fn matching<'a>(state: &'a DevState, requested: &str) -> Vec<(&'a Mount, String)
 
 /// Resolve a request to `(bytes, content-type)`, **dir-observation-order-dominant**:
 /// for each matching mount in order, the first that can produce the requested target
-/// wins — compile a source `.ts`/`.scss`, else serve a static file — then the embedded
+/// wins (compile a source `.ts`/`.scss`, else serve a static file), then the embedded
 /// fallback.
 fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)>, String> {
     for (mount, rel) in matching(state, requested) {

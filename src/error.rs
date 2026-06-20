@@ -2,18 +2,17 @@
 //!
 //! Every fallible public function returns [`Result<T>`] (i.e. `Result<T, Error>`),
 //! so a caller handles **one** error type across vendoring, import-map I/O, and
-//! every processor — instead of the `String`/`Box<dyn Error>`/`io::Error` mix a
-//! multi-backend toolchain would otherwise leak.
+//! every processor.
 //!
 //! Variants carry a human-readable message (oxc/grass diagnostics are already
 //! formatted strings); [`Error::Io`] additionally preserves the underlying
 //! [`std::io::Error`] as its [`source`](std::error::Error::source) so the chain is
-//! intact. The enum is `#[non_exhaustive]` — new variants can be added without a
+//! intact. The enum is `#[non_exhaustive]`, so new variants can be added without a
 //! breaking release.
 
 use std::fmt;
 
-/// Anything that can go wrong inside `web-modules`.
+/// Anything that can go wrong inside `web_modules`.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
@@ -27,7 +26,7 @@ pub enum Error {
     Minify(String),
     /// `.d.ts` declaration-emission failure.
     Dts(String),
-    /// Vendoring failure — semver parsing, registry resolution, download, or extract.
+    /// Vendoring failure: semver parsing, registry resolution, download, or extract.
     Vendor(String),
     /// Import-map parsing or composition failure.
     ImportMap(String),

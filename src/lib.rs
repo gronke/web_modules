@@ -1,36 +1,35 @@
-//! Pure-Rust, buildless toolchain for **ES modules and Web Components** — no Node,
-//! no bundler.
+//! Pure-Rust, buildless toolchain for **ES modules and Web Components**. No Node, no
+//! bundler.
 //!
-//! It revives the unbundled, native-ESM workflow (vendor each npm package into a
-//! `web_modules/` tree + an import map, à la Snowpack) and pairs it with an
-//! on-the-fly transform dev server (à la `@web/dev-server`), implemented entirely
-//! in Rust on top of [`npm-utils`](https://docs.rs/npm-utils), [oxc] and
-//! [`grass`](https://docs.rs/grass). It is **not** a bundler: it emits native ES
-//! modules and leaves bare-specifier resolution to the browser's import map.
+//! It vendors each npm package into a `web_modules/` tree with an import map
+//! (Snowpack-style) and serves them through an on-the-fly transform dev server
+//! (like `@web/dev-server`), built entirely in Rust on
+//! [`npm-utils`](https://docs.rs/npm-utils), [oxc] and [`grass`](https://docs.rs/grass).
+//! It emits native ES modules and leaves bare-specifier resolution to the browser's
+//! import map; it is **not** a bundler.
 //!
 //! # Modules
 //!
 //! **Core** (always on):
-//! - [`vendor`] — resolve, download and extract npm packages into a `web_modules/`
+//! - [`vendor`]: resolve, download and extract npm packages into a `web_modules/`
 //!   tree (via `npm-utils`) and accumulate the import map.
-//! - [`importmap`] — a deterministic import-map composer (build, merge fragments,
+//! - [`importmap`]: a deterministic import-map composer (build, merge fragments,
 //!   render the `<script type="importmap">`).
 //!
-//! **Processors** (`processors`, feature-gated, applied to your source/assets):
-//! - [`typescript`] *(feature `typescript`)* — TypeScript / modern JS → browser JS via
-//!   oxc, with legacy decorators configured for Lit.
-//! - [`scss`] *(feature `scss`)* — SCSS → CSS via grass.
-//! - [`minify`] *(feature `minify`)* — JS minification via oxc_minifier.
-//! - [`dts`] *(`dts`)* — `.d.ts` emission · [`i18n`] *(`i18n`)* — XLIFF merge ·
-//!   [`icons`] *(`icons`)* — favicons from a PNG.
+//! **Processors** (applied to your source and assets):
+//! - [`typescript`]: TypeScript and modern JS → browser JS via oxc, with legacy
+//!   decorators configured for Lit.
+//! - [`scss`]: SCSS → CSS via grass.
+//! - [`minify`]: JS minification via oxc_minifier.
+//! - [`dts`]: `.d.ts` emission. [`i18n`]: XLIFF merge. [`icons`]: favicons from a PNG.
 //!
-//! **Toolchain** (build + serve):
-//! - [`build`] — vendor + transform + render into an output dir.
-//! - `bundle` *(feature `bundle`)* — bundle an app plus its `node_modules/` (CommonJS and all)
-//!   into one browser ESM file via rolldown, for React-class packages that ship only CommonJS.
-//! - [`templates`] *(feature `tera`)* — HTML templating (importmap injection).
-//! - [`server`] / [`dev`] *(features `axum` / `dev`)* — serve embedded, or compile on
-//!   the fly with file-watching + live-reload.
+//! **Toolchain** (build and serve):
+//! - [`build`]: vendor, transform and render into an output dir.
+//! - `bundle`: fold an app plus its `node_modules/` (CommonJS and all) into one
+//!   browser ESM file via rolldown, for React-class packages that ship only CommonJS.
+//! - [`templates`]: HTML templating (importmap injection).
+//! - [`server`] / [`dev`]: serve embedded assets, or compile on the fly with
+//!   file-watching and live-reload.
 //!
 //! [oxc]: https://oxc.rs
 
@@ -80,8 +79,8 @@ pub use build::compress;
 #[cfg(feature = "tera")]
 pub use build::templates;
 
-/// Re-export of [`npm_utils`] as `web_modules::npm` — the vendoring + transitive `node_modules`
-/// install engine — behind the `npm` feature. Lets consumers reach the npm API without a separate
+/// Re-export of [`npm_utils`] as `web_modules::npm`, the vendoring + transitive `node_modules`
+/// install engine, behind the `npm` feature. Lets consumers reach the npm API without a separate
 /// `npm-utils` dependency: install a tree with `web_modules::npm::install::node_modules`, then
 /// bundle it via `web_modules::bundle` (enable the `bundle` feature too).
 #[cfg(feature = "npm")]
@@ -100,7 +99,7 @@ pub use serve::server;
 pub use serve::server::{serve, Frontend};
 
 /// Re-export of the `include_dir` crate for the [`include_dir::Dir`] type. Use the
-/// `include_dir` crate **directly** for the `include_dir!` macro — it emits
+/// `include_dir` crate **directly** for the `include_dir!` macro; it emits
 /// `include_dir::`-qualified paths that don't resolve through a re-export.
 #[cfg(feature = "axum")]
 pub use include_dir;

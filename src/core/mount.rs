@@ -6,11 +6,11 @@
 //! They are independent in general, so a host that composes many crate-provided
 //! `web/` trees can serve each under its own prefix and resolve cross-tree imports.
 //!
-//! The crate stays agnostic about *how* the mount set is assembled — a caller may
-//! discover it from a directory scan, a Cargo dependency graph, or hard-code it —
+//! The crate stays agnostic about *how* the mount set is assembled (a caller may
+//! discover it from a directory scan, a Cargo dependency graph, or hard-code it),
 //! and uses the one set to drive serving ([`dev`](crate::dev)), the runtime import
 //! map ([`Importmap::from_mounts`](crate::importmap::Importmap::from_mounts)), and the
-//! editor's TypeScript resolution ([`tsconfig`](crate::tsconfig)) — one source of
+//! editor's TypeScript resolution ([`tsconfig`](crate::tsconfig)): one source of
 //! truth, so the three never drift.
 
 use std::path::{Path, PathBuf};
@@ -52,7 +52,7 @@ impl Mount {
         }
     }
 
-    /// Mount `dir` at the site root (`/`) with **no** import specifier — for the
+    /// Mount `dir` at the site root (`/`) with **no** import specifier, for the
     /// shell whose files are referenced by absolute URL, not a bare specifier.
     pub fn root(dir: impl Into<PathBuf>) -> Self {
         Self {
@@ -67,7 +67,7 @@ impl Mount {
     /// (specifier/url segment) is the manifest's `name` if present, else the dir's
     /// basename; the served root is `<dir>/<web-modules.root>` when the manifest
     /// declares that field, else `dir` itself. Chain [`specifier`](Self::specifier) /
-    /// [`url`](Self::url) to override the name — a caller-given name wins (npm's
+    /// [`url`](Self::url) to override the name; a caller-given name wins (npm's
     /// `file:`/alias rule: **given ＞ package.json `name` ＞ dir basename**).
     pub fn from_dir(dir: impl Into<PathBuf>) -> Self {
         let dir = dir.into();

@@ -6,8 +6,8 @@
 //! (a per-package version/ref marker + a cross-process lock), so a second build with
 //! unchanged specs does no extraction.
 //!
-//! For the common case — an npm package whose browser assets are vended and whose
-//! import-map entries are **auto-derived from its `package.json`** — a spec is just
+//! For the common case (an npm package whose browser assets are vended and whose
+//! import-map entries are **auto-derived from its `package.json`**), a spec is just
 //! [`PackageSpec::npm`]:
 //!
 //! ```no_run
@@ -24,7 +24,7 @@
 //! The builder also covers the awkward cases a real app hits: a *full* package
 //! staged into a sibling `node_modules/` as a SCSS load path, a *single file*
 //! extracted and renamed (a sprite, a font), a *GitHub* (non-npm) source, or a
-//! caller-supplied keep-filter — see [`PackageSpec`] and [`Extract`].
+//! caller-supplied keep-filter. See [`PackageSpec`] and [`Extract`].
 
 use std::path::{Path, PathBuf};
 
@@ -51,14 +51,14 @@ enum Source {
 /// How a package's archive is extracted into its destination directory.
 pub enum Extract {
     /// Keep browser assets (`.js`/`.mjs`/`.css`/`.scss`, dropping `src`/`node`/
-    /// `development` trees) — the default. Files referenced by the package's
+    /// `development` trees). The default. Files referenced by the package's
     /// `package.json` exports are kept too, even under `src/`.
     BrowserAssets,
-    /// Extract the **entire** archive (no filter) — e.g. a full package staged
+    /// Extract the **entire** archive (no filter), e.g. a full package staged
     /// into a `node_modules/` tree to serve as a SCSS `@use`/`@import` load path.
     Full,
     /// Extract a single file `from` (path inside the package) to `to` (relative
-    /// to the destination dir), renaming as needed — e.g. one sprite or font.
+    /// to the destination dir), renaming as needed, e.g. one sprite or font.
     /// Does **not** clear the destination, so several `File` specs can target a
     /// shared directory.
     File { from: String, to: String },
@@ -154,7 +154,7 @@ impl PackageSpec {
         self
     }
 
-    /// Extract somewhere other than `<vendor_dir>/<dir>/` — e.g. a sibling
+    /// Extract somewhere other than `<vendor_dir>/<dir>/`, e.g. a sibling
     /// `node_modules/`. A relative path is resolved against `vendor_dir`.
     pub fn dest(mut self, dest: impl Into<PathBuf>) -> Self {
         self.dest = Some(dest.into());
@@ -173,7 +173,7 @@ impl PackageSpec {
         self
     }
 
-    /// Provide explicit import-map entries — `(specifier, path)` where `path` is
+    /// Provide explicit import-map entries: `(specifier, path)` where `path` is
     /// relative to `<mount>/<dir>/` (use `""` for a prefix specifier like
     /// `("lit/", "")`). Replaces auto-derivation.
     pub fn imports<I, K, V>(mut self, entries: I) -> Self
@@ -197,7 +197,7 @@ impl PackageSpec {
         self
     }
 
-    /// The identifying name for this spec — the package or repo name unless
+    /// The identifying name for this spec, the package or repo name unless
     /// overridden via [`dir`](Self::dir). Handy for filtering specs sourced from a
     /// `package.json` before overriding a few programmatically.
     pub fn name(&self) -> &str {
@@ -205,21 +205,21 @@ impl PackageSpec {
     }
 }
 
-/// Build vendoring specs from the `dependencies` of a `package.json` — keep your
+/// Build vendoring specs from the `dependencies` of a `package.json`. Keep your
 /// browser dependencies in a real `package.json` next to your sources and vendor
 /// them with Rust. Registry ranges are preserved verbatim (`^3`, `~1.2`, …); a
 /// `github:owner/repo#ref` or git URL becomes a [git](PackageSpec::git) spec; and
 /// local protocols (`file:`/`link:`/`workspace:`/`portal:`) are skipped. Each entry
 /// defaults to browser-asset extraction with an auto-derived import map.
 ///
-/// Only `dependencies` is read — `devDependencies` (build/test tooling such as
+/// Only `dependencies` is read; `devDependencies` (build/test tooling such as
 /// `typescript` or `@playwright/test`) are **not** vended. To include other
 /// sections, use [`specs_from_package_json_sections`].
 ///
 /// # `webDependencies` whitelist
 ///
 /// When `dependencies` also carries server-only packages, narrow the browser vend
-/// with a `webDependencies` whitelist under the `web-modules` key — the convention
+/// with a `webDependencies` whitelist under the `web-modules` key, the convention
 /// [@pika/web] / Snowpack introduced for exactly this (*"useful if your entire
 /// dependencies object is too large or contains unrelated, server-only packages"*):
 ///
@@ -284,7 +284,7 @@ pub fn specs_from_package_json(path: &Path) -> Result<Vec<PackageSpec>> {
 /// Like [`specs_from_package_json`], but read the named dependency `sections`
 /// (e.g. `&["dependencies", "devDependencies"]`). The first section to name a
 /// package wins; later duplicates are dropped. The `webDependencies` whitelist is
-/// **not** applied — that is [`specs_from_package_json`]'s browser-vend rule.
+/// **not** applied; that is [`specs_from_package_json`]'s browser-vend rule.
 pub fn specs_from_package_json_sections(
     path: &Path,
     sections: &[&str],
@@ -328,7 +328,7 @@ fn dep_to_spec(name: &str, value: &str) -> Option<PackageSpec> {
 }
 
 /// A `package.json` value pointing at a local path rather than a registry/git
-/// source — nothing to vendor.
+/// source; nothing to vendor.
 fn is_local_protocol(value: &str) -> bool {
     ["file:", "link:", "workspace:", "portal:"]
         .iter()
@@ -337,7 +337,7 @@ fn is_local_protocol(value: &str) -> bool {
 
 /// Read a `package.json`'s `dependencies`, splitting them: registry ranges → vendoring
 /// [`PackageSpec`]s (kept verbatim; `github:` → git specs), and **local path-deps**
-/// (`file:`/`link:`/`./`/`../`) → [`Mount`]s — the target dir, named by the dependency
+/// (`file:`/`link:`/`./`/`../`) → [`Mount`]s, the target dir, named by the dependency
 /// **key** (npm's `file:` rule), honoring the target's `web-modules.root`. Other
 /// protocols (`workspace:`/`portal:`/`npm:`) are skipped. Use this to compose sibling
 /// dirs straight from a manifest; [`specs_from_package_json`] is the vend-only subset.
@@ -391,7 +391,7 @@ fn is_unsupported_protocol(value: &str) -> bool {
         .any(|p| value.starts_with(p))
 }
 
-/// Parse a GitHub dependency value into `(owner/repo, ref)` — the npm
+/// Parse a GitHub dependency value into `(owner/repo, ref)`: the npm
 /// `github:owner/repo#ref` shorthand or a `git+https://github.com/owner/repo(.git)#ref`
 /// URL. The ref defaults to `HEAD` (the default branch) when absent. Returns `None`
 /// for a plain registry range.
@@ -419,7 +419,7 @@ fn parse_github_dep(value: &str) -> Option<(String, String)> {
 }
 
 /// Default selection: keep browser assets (`.js`/`.mjs`/`.css`) **plus `.scss`
-/// sources** — so packages like Bootstrap can be themed from their SCSS — while
+/// sources** (so packages like Bootstrap can be themed from their SCSS) while
 /// dropping TypeScript sources and the node-only / development build trees some
 /// packages ship.
 pub fn keep_browser_assets(rel: &str) -> Option<String> {
@@ -594,7 +594,7 @@ fn extract_archive(
 
 /// Per-package keep-filter for [`Extract::BrowserAssets`]. When `pkg` is `Some`,
 /// also keep `package.json` and every file the `exports`/`module`/`main` reference
-/// — even under `src/` — then fall back to the browser-asset heuristic.
+/// (even under `src/`), then fall back to the browser-asset heuristic.
 fn keep_for(pkg: Option<PackageJson>) -> impl Fn(&str) -> Option<String> {
     let referenced = pkg
         .as_ref()
@@ -612,8 +612,8 @@ fn keep_for(pkg: Option<PackageJson>) -> impl Fn(&str) -> Option<String> {
     }
 }
 
-/// Whether `rel` is covered by an `exports` target: an exact file, or — for a
-/// pattern directory (ending `/`) — any `.js`/`.mjs` beneath it.
+/// Whether `rel` is covered by an `exports` target: an exact file, or any
+/// `.js`/`.mjs` under a pattern directory (one ending `/`).
 fn path_covered(rel: &str, target: &str) -> bool {
     if target.ends_with('/') {
         rel.starts_with(target) && (rel.ends_with(".js") || rel.ends_with(".mjs"))

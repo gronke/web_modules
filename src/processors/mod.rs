@@ -1,4 +1,4 @@
-//! Feature-gated processors applied to your source tree and assets — TypeScript,
+//! Feature-gated processors applied to your source tree and assets: TypeScript,
 //! SCSS, minification, `.d.ts` emission, XLIFF i18n, and icon generation. Each sits
 //! behind its matching Cargo feature and is re-exported at the crate root (e.g.
 //! `web_modules::scss`), so callers never reference `processors` directly.

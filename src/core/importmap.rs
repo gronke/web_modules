@@ -1,6 +1,6 @@
 //! A small, deterministic [import map] composer.
 //!
-//! Keys are module specifiers — bare (`"lit"`) or prefix (`"lit/"`) — and values
+//! Keys are module specifiers (bare `"lit"` or prefix `"lit/"`), and values
 //! are URLs the browser resolves them to. Backed by a [`BTreeMap`] so repeated
 //! builds emit byte-identical output (stable diffs, cache-friendly).
 //!
@@ -54,7 +54,7 @@ impl Importmap {
     }
 
     /// Merge `other` into `self`; on key conflicts `other` wins (call order is
-    /// precedence — merge more specific fragments last).
+    /// precedence: merge more specific fragments last).
     pub fn extend(&mut self, other: Importmap) -> &mut Self {
         self.imports.extend(other.imports);
         self
@@ -76,7 +76,7 @@ impl Importmap {
     }
 
     /// Whether `specifier` resolves under this map: an exact key, or a prefix key
-    /// (ending in `/`) that prefixes the specifier — e.g. `"lit/"` resolves
+    /// (ending in `/`) that prefixes the specifier, e.g. `"lit/"` resolves
     /// `lit/decorators.js`.
     pub fn resolves(&self, specifier: &str) -> bool {
         self.imports.contains_key(specifier)
@@ -86,7 +86,7 @@ impl Importmap {
                 .any(|k| k.ends_with('/') && specifier.starts_with(k.as_str()))
     }
 
-    /// Read an import-map fragment file — a JSON document whose top-level
+    /// Read an import-map fragment file: a JSON document whose top-level
     /// `"imports"` object has string values.
     pub fn from_json_file(path: &Path) -> Result<Self> {
         let bytes = fs::read(path)?;
@@ -169,7 +169,7 @@ impl Doc<'_> {
 /// Escape JSON for embedding in an HTML `<script>` element. Script data can only be
 /// terminated by `</`, so neutralising `<` (plus `>`/`&` by convention) as `\uXXXX`
 /// stops an untrusted specifier/URL from closing the tag. These are valid JSON string
-/// escapes — a browser decodes them back, so the parsed import map is unchanged. Used
+/// escapes; a browser decodes them back, so the parsed import map is unchanged. Used
 /// only for the inline tag; the standalone `importmap.json` is served as JSON.
 fn escape_for_script(json: &str) -> String {
     json.replace('<', "\\u003c")

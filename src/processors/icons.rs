@@ -1,6 +1,6 @@
 //! Generate favicons and app icons from a source PNG, via [`image`] + [`ico`].
 //!
-//! Pure-Rust raster scaling — no ImageMagick/sharp. Source images are decoded as
+//! Pure-Rust raster scaling, no ImageMagick/sharp. Source images are decoded as
 //! PNG (the only `image` codec enabled).
 
 use std::path::{Path, PathBuf};
@@ -59,7 +59,7 @@ fn png_inner(
 /// plus a few chainable overrides, then [`IconOptions::generate`]d.
 ///
 /// A configurable source + destination layer over the [`favicon`]/[`png`] primitives that
-/// also emits the matching `<link>` tags and the manifest icon list — composed once, then
+/// also emits the matching `<link>` tags and the manifest icon list, composed once, then
 /// rendered, like an import map.
 #[derive(Clone, Debug)]
 pub struct IconOptions {

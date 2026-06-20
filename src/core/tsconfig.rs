@@ -1,4 +1,4 @@
-//! Generate TypeScript `tsconfig` `paths` from a set of [`Mount`]s — the editor /
+//! Generate TypeScript `tsconfig` `paths` from a set of [`Mount`]s: the editor /
 //! `tsc` side of import resolution, co-generated from the **same** mount set as the
 //! runtime [`Importmap`](crate::importmap::Importmap::from_mounts) so the two can't
 //! drift.
@@ -56,7 +56,7 @@ pub fn write_tsconfig_base(mounts: &[Mount], base: &Path, path: &Path) -> Result
 /// declared in `package_json` to its `./node_modules/<pkg>` location (plus a `<pkg>/*`
 /// subpath glob). The package set is read via
 /// [`specs_from_package_json`](crate::vendor::specs_from_package_json), so it honors the
-/// `web-modules.webDependencies` whitelist and skips local (`file:`/`workspace:`) deps —
+/// `web-modules.webDependencies` whitelist and skips local (`file:`/`workspace:`) deps;
 /// the editor then resolves exactly the packages the build vendors. Compose the result
 /// with [`tsconfig_paths`] (first-party mounts) into one `paths` map.
 ///

@@ -439,6 +439,15 @@ pub fn keep_browser_assets(rel: &str) -> Option<String> {
 /// Resolve + download + extract every spec into `vendor_dir`, returning the
 /// composed [`Importmap`] with URLs rooted at `mount` (e.g. `"/web_modules"`).
 /// Cache-guarded per package; import-map entries follow each spec's strategy.
+///
+/// # Build scripts
+///
+/// When called from a build script (detected via the `OUT_DIR` environment
+/// variable), each vendored destination is emitted as a `cargo:rerun-if-changed`
+/// input. Cargo then re-runs the build script — re-vendoring the files — if a
+/// destination is later deleted or modified, so a wiped vendored asset (e.g.
+/// `node_modules/bootstrap`) self-heals on the next build instead of silently
+/// surfacing as a runtime failure for the missing file.
 pub fn vendor(vendor_dir: &Path, mount: &str, specs: &[PackageSpec]) -> Result<Importmap> {
     vendor_inner(vendor_dir, mount, specs).map_err(|e| Error::Vendor(e.to_string()))
 }
@@ -458,6 +467,18 @@ fn vendor_inner(
             Some(d) => vendor_dir.join(d),
             None => vendor_dir.join(&spec.dir),
         };
+
+        // Build-script integration: declare the vendored destination as a
+        // `rerun-if-changed` input so Cargo re-runs the build script — and thus
+        // re-vendors — when this directory is deleted or its contents change.
+        // Without it, wiping a vendored asset (e.g. `node_modules/bootstrap`)
+        // leaves a "successful" build whose dev server then fails at runtime on
+        // the now-missing file. Gated on a build-script context (`OUT_DIR` is
+        // set) so plain library / CLI callers don't emit stray cargo directives.
+        if std::env::var_os("OUT_DIR").is_some() {
+            println!("cargo:rerun-if-changed={}", dest_dir.display());
+        }
+
         let flat = spec.dir.replace('/', "_");
         let marker = vendor_dir.join(format!(".{flat}.version"));
 
@@ -802,6 +823,25 @@ mod tests {
             .extract(Extract::Full)
             .no_imports();
         assert!(import_entries(&spec, "/web_modules", Path::new("/x")).is_empty());
+    }
+
+    #[test]
+    fn missing_destination_invalidates_cache() {
+        // A vendored asset whose marker still records the right version but whose
+        // destination was deleted (e.g. someone wiped `node_modules/`) must be
+        // treated as stale, so the next `vendor()` re-extracts it. This is the
+        // invariant the build-script `rerun-if-changed` emission relies on to
+        // self-heal a removed asset instead of leaving a silent runtime failure.
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join(".bootstrap.version");
+        cache::write_marker(&marker, "5.3.8").unwrap();
+        assert!(cache::marker_matches(&marker, "5.3.8"));
+
+        let dest = tmp.path().join("bootstrap"); // never created
+        assert!(
+            !is_up_to_date(&marker, "5.3.8", &dest, &Extract::Full),
+            "a missing destination must invalidate the cache even when the marker matches",
+        );
     }
 
     #[test]

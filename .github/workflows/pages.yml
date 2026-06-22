@@ -1,0 +1,79 @@
+# Dogfood: build the examples/gh-pages demo with this repo's own `web-modules build` action and
+# publish it to GitHub Pages on every push to main — proving the action end-to-end.
+#
+# One-time setup: repo Settings → Pages → Source: "GitHub Actions".
+#
+# Uses `from-source: true` because the prebuilt binary (with the `build` subcommand) doesn't exist
+# until the first `v*` tag triggers release-binaries.yml. After that first release, drop
+# `from-source` (and the cargo cache step) so this downloads the binary instead of compiling.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# The canonical least-privilege set for a Pages deploy.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never run two Pages deploys at once; let a newer push supersede an in-flight older one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # Cache cargo so the from-source `full` build of web-modules isn't recompiled when the crate
+      # source + lock are unchanged. Remove this once the action downloads the prebuilt binary.
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/web-modules
+            ~/.cargo/.crates2.json
+            ~/.cargo/.crates.toml
+          key: web-modules-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'src/**/*.rs') }}
+          restore-keys: web-modules-${{ runner.os }}-
+
+      # A project page is served at https://<owner>.github.io/<repo>/, so root the import map there.
+      - name: Resolve mount
+        id: mount
+        run: echo "value=/${{ github.event.repository.name }}/web_modules" >> "$GITHUB_OUTPUT"
+
+      # Build examples/gh-pages → dist/ with the root composite action (built from source for now).
+      - name: Build the demo
+        uses: ./
+        with:
+          from-source: "true"
+          src: examples/gh-pages
+          manifest: examples/gh-pages
+          template: examples/gh-pages/index.html.tera
+          mount: ${{ steps.mount.outputs.value }}
+          minify: "true"
+
+      # enablement: true turns the repo's Pages on (Source = GitHub Actions) via the API on the
+      # first run, so no manual Settings → Pages step is needed (the job already has pages: write).
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v5

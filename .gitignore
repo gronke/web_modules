@@ -1,5 +1,7 @@
 /target
-/Cargo.lock
+
+# Cargo.lock IS committed: the crate ships a `web-modules` binary, and the release-binaries workflow
+# + the GitHub Action's from-source install build with `--locked` for reproducibility.
 
 # Generated frontend output (vendored modules + build artifacts).
 web_modules/

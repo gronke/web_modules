@@ -66,37 +66,48 @@ web_modules = "0.2"   # Rust 1.94+
 
 ## GitHub Actions
 
-Build a deployable `dist/` - and optionally publish it to GitHub Pages - straight from `web-modules build`, with no Node on the runner.
+A composite action builds a deployable `dist/` (vendor + transform + render, with the import map injected) — **no Node on the runner**. It downloads a prebuilt `web-modules` binary for the runner's OS/arch (Linux x86_64/arm64, macOS arm64), or compiles from this action's source with `from-source: true`. The action is **build-only**; compose it with the official actions to publish.
 
-**Build to a directory.** The composite action vendors, transforms and renders into `dist/`:
-
-```yaml
-- uses: actions/checkout@v4
-- uses: gronke/rust-web_modules@v0
-  with:
-    packages: "lit@^3 bootstrap@^5"   # and/or: manifest: web (a dir) or web/package.json
-    template: web/index.html.tera     # or an inline `html:`; omit for a minimal default
-    minify: true
-- run: ls dist                        # ready to upload anywhere
-```
-
-**Deploy to Pages.** The reusable workflow builds, then deploys with the privileges Pages needs:
+**Build a dist artifact:**
 
 ```yaml
 jobs:
-  pages:
-    uses: gronke/rust-web_modules/.github/workflows/deploy-pages.yml@v0
-    permissions:
-      pages: write
-      id-token: write
-    with:
-      packages: "lit@^3 bootstrap@^5"
-      template: web/index.html.tera
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: gronke/rust-web_modules@v0
+        with:
+          packages: "lit@^3 bootstrap@^5"   # and/or: manifest: web (a dir) or web/package.json
+          template: web/index.html.tera     # or inline `html:`; omit for a minimal default
+          minify: true
+      - uses: actions/upload-artifact@v4
+        with: { name: site, path: dist }
 ```
 
-Enable it once under *Settings → Pages → Source: GitHub Actions*. A **project** page is served under `/<repo>/`, so the workflow auto-sets `mount: /<repo>/web_modules`; keep entry scripts **relative** (`./app.js`) so they resolve under that subpath (the default `html` already does). For a user/org `*.github.io` page served at the root, pass `mount: /web_modules`.
+**Deploy to GitHub Pages** — grant the Pages permissions + environment on the job, then build and publish with the standard actions:
 
-Both take the build options as inputs; the action also reads them from `WEB_MODULES_*` environment variables (the opt-in **`env`** feature, which the action enables - so `cargo install web_modules --features cli,env` if you want the same locally). `gzip` needs the `compress` feature, which the action installs. Run `web-modules build --help` for the full flag/variable list.
+```yaml
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions: { pages: write, id-token: write }
+    environment: { name: github-pages, url: "${{ steps.deploy.outputs.page_url }}" }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: gronke/rust-web_modules@v0
+        with:
+          packages: "lit@^3 bootstrap@^5"
+          template: web/index.html.tera
+          mount: /my-repo/web_modules        # project page is served under /<repo>/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v5
+        with: { path: dist }
+      - id: deploy
+        uses: actions/deploy-pages@v5
+```
+
+Enable Pages once under *Settings → Pages → Source: GitHub Actions*. A **project** page is served under `/<repo>/`, so pass `mount: /<repo>/web_modules` and keep entry scripts **relative** (`./app.js`); a user/org `*.github.io` page serves at the root (default `mount: /web_modules`). Inputs can also come from `WEB_MODULES_*` env vars. This repo dogfoods the action — [`examples/gh-pages/`](examples/gh-pages) is built and deployed to Pages by [`.github/workflows/pages.yml`](.github/workflows/pages.yml). Run `web-modules build --help` for every flag.
 
 ## Examples
 

@@ -1,0 +1,69 @@
+# Build and publish the `web-modules` CLI binary for each supported target on a release tag, so the
+# `web-modules build` GitHub Action (root action.yml) can download a prebuilt binary instead of
+# compiling from source. Native runners only — no cross-compilation. (release.yml runs the separate
+# crates.io publish dry-run on the same tag.)
+name: release-binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create/update the GitHub Release and upload the binaries
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      # One native runner per target — Intel macOS is intentionally omitted.
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, runner: ubuntu-latest }
+          - { target: aarch64-unknown-linux-gnu, runner: ubuntu-24.04-arm }
+          - { target: aarch64-apple-darwin, runner: macos-14 }
+    steps:
+      - uses: actions/checkout@v6
+
+      # Build the full lean toolchain (cli + env + compress + icons/dts/i18n/npm/dev; only the heavy
+      # `bundle`/rolldown is excluded) in release mode, reproducibly — `--locked` uses the committed
+      # Cargo.lock. Native build: the runner's host == the target, so no `--target` / cross-compile.
+      # GitHub-hosted runners ship a recent stable Rust (≥ the crate's 1.94 MSRV).
+      - name: Build
+        run: cargo build --release --locked --bin web-modules --features full
+
+      # Stage as web-modules-<target> + a sha256 sidecar (the action verifies it on download;
+      # sha256sum on Linux, shasum on macOS — both emit "<hash>  <file>", and the action reads $1).
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="web-modules-${{ matrix.target }}"
+          cp target/release/web-modules "$asset"
+          strip "$asset" || true
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$asset" > "$asset.sha256"
+          else
+            shasum -a 256 "$asset" > "$asset.sha256"
+          fi
+          ls -lh "$asset" "$asset.sha256"
+
+      # Attach to the Release for this tag via the GitHub CLI (`gh`, preinstalled on every runner) —
+      # an official first-party tool invoked from a run step, so no third-party action is needed.
+      # Matrix jobs run concurrently: the first `gh release create` makes the release, the rest hit
+      # "already exists" (ignored); each then uploads its own assets (`--clobber` makes re-runs safe).
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          gh release create "$tag" --title "$tag" --generate-notes --verify-tag \
+            || echo "release $tag already exists; uploading assets"
+          gh release upload "$tag" \
+            "web-modules-${{ matrix.target }}" \
+            "web-modules-${{ matrix.target }}.sha256" \
+            --clobber

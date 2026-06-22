@@ -59,7 +59,7 @@ cli = ["dev", "minify", "dep:clap", "npm-utils/cli"]
 # variables (clap's `env`). Off by default so a plain `--features cli` install stays minimal — clap's
 # env codegen is only compiled when asked for. `clap?/env` flips the feature on only if clap is
 # already enabled (it is, via `cli`'s `dep:clap`), so `--features env` alone never pulls a bin-less
-# clap. Pair with `cli`; the GitHub Action installs `--features cli,env`.
+# clap. Pair with `cli` — it's part of `full`, which the released binary is built with.
 env = ["clap?/env"]
 # Re-export `npm-utils` as `web_modules::npm`. `npm-utils` is always compiled (the core `vendor`
 # path needs it); this flag only exposes the public re-export, so consumers can reach the npm API
@@ -133,7 +133,8 @@ tokio = { version = "1", features = ["rt", "macros"] }
 
 [workspace]
 members = ["examples/*"]
-# tauri is excluded: its crate is the nested examples/tauri/src-tauri, which declares its own
-# [workspace] (and pulls a heavyweight webkit2gtk tree), so it can't be a workspace member — and
-# examples/tauri/ itself has no Cargo.toml for the glob to load. It has a dedicated CI job.
-exclude = ["examples/tauri"]
+# Excluded from the `examples/*` glob — each lacks a Cargo.toml the glob would otherwise fail to load:
+# - tauri: a nested crate at examples/tauri/src-tauri with its own [workspace] (and a heavyweight
+#   webkit2gtk tree), so it can't be a workspace member; it has a dedicated CI job.
+# - gh-pages: a pure-frontend demo (TS/SCSS/HTML), built by `web-modules build` in pages.yml, not cargo.
+exclude = ["examples/tauri", "examples/gh-pages"]

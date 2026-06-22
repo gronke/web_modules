@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>web_modules · GitHub Pages demo</title>
+<!-- Entry script + stylesheet are RELATIVE so the page loads under the project-page subpath
+     (https://<owner>.github.io/<repo>/). `{{ importmap }}` injects the generated import map, which
+     carries the absolute, subpath-aware /<repo>/web_modules/... URLs for bare specifiers like `lit`. -->
+<link rel="stylesheet" href="./styles.css">
+{{ importmap | safe }}
+<script type="module" src="./app.js"></script>
+</head>
+<body>
+<hello-card></hello-card>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "web-modules-gh-pages-demo",
+  "private": true,
+  "description": "Minimal demo built by `web-modules build` and deployed to GitHub Pages by .github/workflows/pages.yml — dogfoods the project's own GitHub Action. lit's sub-packages are listed explicitly because vendoring is not transitive: lit's own modules import `@lit/reactive-element`, `lit-html` and `lit-element` as bare specifiers, so each must be vendored to land in the import map.",
+  "dependencies": {
+    "@lit/reactive-element": "^2",
+    "lit": "^3",
+    "lit-element": "^4",
+    "lit-html": "^3"
+  }
+}

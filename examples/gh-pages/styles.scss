@@ -1,0 +1,55 @@
+// Compiled to /styles.css by `web-modules build` (grass) — SCSS variables + nesting exercise the
+// stylesheet half of the pipeline.
+$accent: #6f42c1;
+$ink: #1a1a2e;
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: linear-gradient(135deg, lighten($accent, 36%), #ffffff 70%);
+  color: $ink;
+}
+
+hello-card .card {
+  max-width: 34rem;
+  margin: 1.5rem;
+  padding: 2.5rem;
+  text-align: center;
+
+  h1 {
+    margin: 0 0 0.75rem;
+    color: $accent;
+    letter-spacing: 0.02em;
+  }
+
+  .lede {
+    opacity: 0.82;
+    line-height: 1.6;
+  }
+
+  code {
+    padding: 0.1em 0.35em;
+    border-radius: 0.3em;
+    background: rgba($accent, 0.12);
+    color: darken($accent, 10%);
+  }
+
+  button {
+    margin-top: 1.75rem;
+    padding: 0.6rem 1.5rem;
+    border: 0;
+    border-radius: 0.5rem;
+    background: $accent;
+    color: #fff;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.15s ease;
+
+    &:hover {
+      background: darken($accent, 8%);
+    }
+  }
+}

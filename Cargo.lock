@@ -1558,9 +1558,9 @@ dependencies = [
 
 [[package]]
 name = "npm-utils"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d8790d258e64d6e13cd63da248bf8778fc6e1537d69f1920461232856a8e4ae0"
+checksum = "db9a9a00b5c3cfb6270ace045a1bb7c3e5960c11cc6a3cdec2b6e374e4093a68"
 dependencies = [
  "base64",
  "clap",
@@ -1569,6 +1569,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tar",
+ "time",
  "ureq",
  "zip",
 ]
@@ -3511,6 +3512,7 @@ dependencies = [
  "powerfmt",
  "serde_core",
  "time-core",
+ "time-macros",
 ]
 
 [[package]]
@@ -3518,6 +3520,16 @@ name = "time-core"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+
+[[package]]
+name = "time-macros"
+version = "0.2.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71c652a3727a9cbb9a02f707f530b618ce00d0ccd762009c8c23bd191df3c17d"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
 
 [[package]]
 name = "tinystr"

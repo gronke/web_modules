@@ -134,7 +134,7 @@ jobs:
 
       # Cache the browser so the three parallel jobs don't each re-download chromium.
       - name: Cache Playwright browsers
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ hashFiles('examples/**/package-lock.json') }}

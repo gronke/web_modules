@@ -2,8 +2,8 @@
 name = "web_modules"
 version = "0.3.0"
 authors = ["Stefan Grönke <stefan@gronke.net>"]
-homepage = "https://github.com/gronke/rust-web_modules"
-repository = "https://github.com/gronke/rust-web_modules"
+homepage = "https://github.com/gronke/web_modules"
+repository = "https://github.com/gronke/web_modules"
 documentation = "https://docs.rs/web_modules"
 description = "Pure-Rust, buildless toolchain for ES modules and Web Components"
 categories = ["development-tools", "web-programming"]

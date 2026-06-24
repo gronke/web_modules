@@ -105,7 +105,7 @@ jobs:
           gh release upload "$tag" SHA256SUMS --clobber
 
   # After the prebuilt binaries + SHA256SUMS are published, (re)create the major tag (e.g. v0) at the
-  # highest stable release in its line, so `uses: gronke/rust-web_modules@v0` tracks the newest 0.x.
+  # highest stable release in its line, so `uses: gronke/web_modules@v0` tracks the newest 0.x.
   # `v0` is intentionally left OUTSIDE the tag-signing ruleset (create/delete allowed, unsigned), so
   # the default GITHUB_TOKEN can manage it; there is no GitHub *Release* named `v0`. Skipped for
   # prereleases. A GITHUB_TOKEN push never re-triggers workflows, so this can't loop.

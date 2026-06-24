@@ -1,6 +1,6 @@
 # web_modules
 
-[![CI](https://github.com/gronke/rust-web_modules/actions/workflows/ci.yml/badge.svg)](https://github.com/gronke/rust-web_modules/actions/workflows/ci.yml)
+[![CI](https://github.com/gronke/web_modules/actions/workflows/ci.yml/badge.svg)](https://github.com/gronke/web_modules/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/web_modules.svg)](https://crates.io/crates/web_modules)
 [![docs.rs](https://img.shields.io/docsrs/web_modules)](https://docs.rs/web_modules)
 [![License: MIT](https://img.shields.io/crates/l/web_modules)](LICENSE)
@@ -81,7 +81,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: gronke/rust-web_modules@v0
+      - uses: gronke/web_modules@v0
         with:
           packages: "lit@^3 bootstrap@^5"   # and/or: manifest: web (a dir) or web/package.json
           template: web/index.html.tera     # or inline `html:`; omit for a minimal default
@@ -100,7 +100,7 @@ jobs:
     environment: { name: github-pages, url: "${{ steps.deploy.outputs.page_url }}" }
     steps:
       - uses: actions/checkout@v7
-      - uses: gronke/rust-web_modules@v0
+      - uses: gronke/web_modules@v0
         with:
           packages: "lit@^3 bootstrap@^5"
           template: web/index.html.tera

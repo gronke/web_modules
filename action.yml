@@ -12,7 +12,7 @@
 #       environment: { name: github-pages, url: "${{ steps.pages.outputs.page_url }}" }
 #       steps:
 #         - uses: actions/checkout@v7
-#         - uses: gronke/rust-web_modules@v0
+#         - uses: gronke/web_modules@v0
 #           with: { packages: "lit@^3", mount: /your-repo/web_modules }
 #         - uses: actions/configure-pages@v6
 #         - uses: actions/upload-pages-artifact@v5
@@ -22,10 +22,10 @@
 #
 # By default the action DOWNLOADS a prebuilt `web-modules` binary matching the runner's OS/arch
 # (Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64/arm64) from the GitHub Releases of
-# gronke/rust-web_modules. On other platforms, or to build a specific source tree, set
+# gronke/web_modules. On other platforms, or to build a specific source tree, set
 # `from-source: true` (compiles with cargo).
 #
-# Lives at the repo root for the clean `uses: gronke/rust-web_modules@v0`; it is NOT packaged into the
+# Lives at the repo root for the clean `uses: gronke/web_modules@v0`; it is NOT packaged into the
 # crate (Cargo.toml's explicit `include` lists only src/Cargo.toml/README/LICENSE). The caller checks
 # out its own repo first; this action builds from that working directory.
 name: web-modules build
@@ -110,7 +110,7 @@ runs:
         ACTION_REF: ${{ github.action_ref }} # the ref the caller pinned: v0.3.1 / v0 / branch / SHA
       run: |
         set -euo pipefail
-        repo="gronke/rust-web_modules"
+        repo="gronke/web_modules"
 
         if [ "$FROM_SOURCE" = "true" ]; then
           # Build from the action's own checked-out source ($GITHUB_ACTION_PATH). `--locked` uses the

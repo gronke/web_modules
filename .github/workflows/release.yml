@@ -12,6 +12,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least-privilege: the dry-run only reads the repo (package + publish --dry-run to crates.io); no write.
+permissions:
+  contents: read
+
 jobs:
   publish-dry-run:
     name: publish dry-run · MSRV

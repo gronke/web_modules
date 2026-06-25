@@ -8,6 +8,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Least-privilege default: every job here only reads the repo. Lint/test/build need no write, and the
+# e2e artifact up/download uses the job's runtime token, which works under a read-only GITHUB_TOKEN.
+permissions:
+  contents: read
+
 jobs:
   # The Rust pipeline for everything except tauri: fmt · clippy (incl. the bundle feature) · test ·
   # build + vendor the examples, then publish the three Playwright example binaries as an artifact

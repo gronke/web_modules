@@ -95,9 +95,11 @@ impl From<DecoratorsArg> for Decorators {
 #[cfg(feature = "cli")]
 #[derive(clap::Args, Clone, Debug, Default)]
 pub struct TypescriptConfig {
-    /// Decorator lowering: `lit` (default) or `standard`.
-    #[arg(long = "typescript-decorators", value_enum, default_value = "lit")]
-    pub decorators: DecoratorsArg,
+    /// Decorator lowering: `lit` or `standard`. Left unset (no clap default) so an explicit
+    /// `--typescript-decorators` is distinguishable from a `package.json` block value; the
+    /// built-in default (`lit`) is applied during config resolution.
+    #[arg(long = "typescript-decorators", value_enum)]
+    pub decorators: Option<DecoratorsArg>,
 }
 
 #[cfg(feature = "cli")]

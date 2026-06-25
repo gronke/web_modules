@@ -57,10 +57,26 @@ macro_rules! feature_args {
             /// Resolve whether this processor runs: `--no-<name>` wins, then `--<name>`,
             /// then `default_on` (which `--no-default-features` suppresses).
             pub fn enabled(&self, default_on: bool, no_default_features: bool) -> bool {
+                self.enabled_with(None, default_on, no_default_features)
+            }
+
+            /// Like [`enabled`](Self::enabled), but a `block` override — a processor toggle
+            /// read from a `package.json` `web-modules` block — sits between the flags and the
+            /// compiled-in default: `--no-<name>` > `--<name>` > `block` >
+            /// (`default_on && !no_default_features`). So an explicit flag still wins, but the
+            /// block beats the (possibly `--no-default-features`-suppressed) built-in default.
+            pub fn enabled_with(
+                &self,
+                block: Option<bool>,
+                default_on: bool,
+                no_default_features: bool,
+            ) -> bool {
                 if self.$off {
                     false
                 } else if self.$on {
                     true
+                } else if let Some(b) = block {
+                    b
                 } else {
                     default_on && !no_default_features
                 }

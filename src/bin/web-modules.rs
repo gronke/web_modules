@@ -11,9 +11,10 @@
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
+use serde_json::Value;
 use web_modules::vendor::{vendor, PackageSpec};
 
 /// This binary's fallible return, `()` by default.
@@ -41,9 +42,9 @@ enum Command {
     Dev {
         /// Source root(s), merged (first match wins). Defaults to the cwd.
         roots: Vec<PathBuf>,
-        /// Address to bind.
-        #[arg(long, default_value = "127.0.0.1:8080")]
-        addr: SocketAddr,
+        /// Address to bind (default 127.0.0.1:8080).
+        #[arg(long)]
+        addr: Option<SocketAddr>,
         #[command(flatten)]
         compiler: CompilerConfig,
     },
@@ -58,23 +59,20 @@ enum Command {
     Build {
         /// Source root(s), merged (first match wins). Defaults to the cwd.
         roots: Vec<PathBuf>,
-        /// Output directory (required).
+        /// Output directory. Required — from `--out`, or `web-modules.out` in package.json.
         #[arg(long)]
-        out: PathBuf,
-        /// URL prefix the vendored modules are served at. Under a GitHub *project* page (served at
-        /// `/<repo>/`) pass `/<repo>/web_modules`.
-        #[cfg_attr(
-            feature = "env",
-            arg(long, env = "WEB_MODULES_MOUNT", default_value = "/web_modules")
-        )]
-        #[cfg_attr(not(feature = "env"), arg(long, default_value = "/web_modules"))]
-        mount: String,
+        out: Option<PathBuf>,
+        /// URL prefix the vendored modules are served at (default `/web_modules`). Under a GitHub
+        /// *project* page (served at `/<repo>/`) pass `/<repo>/web_modules`.
+        #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_MOUNT"))]
+        #[cfg_attr(not(feature = "env"), arg(long))]
+        mount: Option<String>,
         /// Fallback inline `index.html` (used only when the tree has no `index.html`); `{importmap}`
         /// is replaced with the import-map `<script>`. Keep entry scripts RELATIVE (`./app.js`).
-        /// Ignored when `--template` is given.
-        #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_HTML", default_value_t = DEFAULT_HTML.to_owned()))]
-        #[cfg_attr(not(feature = "env"), arg(long, default_value_t = DEFAULT_HTML.to_owned()))]
-        html: String,
+        /// Ignored when `--template` is given. Defaults to a minimal `<script src=./app.js>` shell.
+        #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_HTML"))]
+        #[cfg_attr(not(feature = "env"), arg(long))]
+        html: Option<String>,
         /// Fallback Tera template file for `index.html`, rendered with an `importmap` variable,
         /// instead of `--html` (same fallback rule: used only when the tree has no `index.html`).
         #[cfg_attr(feature = "env", arg(long, env = "WEB_MODULES_TEMPLATE"))]
@@ -179,21 +177,27 @@ struct ResolvedCompiler {
 }
 
 impl CompilerConfig {
-    /// Fold each processor's toggle against its compiled-in default and `--no-default-features`
-    /// (typescript/scss/tera default on; minify/gzip default off).
-    fn resolve(&self) -> ResolvedCompiler {
+    /// Resolve each processor toggle + config, layering a `package.json` `web-modules` block under
+    /// the CLI flags: `--no-<name>` > `--<name>` > block > (`default_on && !--no-default-features`).
+    /// typescript/scss/tera default on; minify/gzip default off.
+    fn resolve_with(&self, cfg: &PkgConfig) -> ResolvedCompiler {
         let nd = self.no_default_features;
         ResolvedCompiler {
-            typescript: self.typescript.enabled(true, nd),
-            scss: self.scss.enabled(true, nd),
-            tera: self.tera.enabled(true, nd),
-            minify: self.minify.enabled(false, nd),
+            typescript: self.typescript.enabled_with(cfg.typescript, true, nd),
+            scss: self.scss.enabled_with(cfg.scss, true, nd),
+            tera: self.tera.enabled_with(cfg.tera, true, nd),
+            minify: self.minify.enabled_with(cfg.minify, false, nd),
             #[cfg(feature = "compress")]
-            gzip: self.gzip.enabled(false, nd),
+            gzip: self.gzip.enabled_with(cfg.gzip, false, nd),
             #[cfg(not(feature = "compress"))]
             gzip: false,
-            ts_decorators: self.typescript.config.decorators.into(),
-            extra_scss_load_paths: self.scss.config.load_paths.clone(),
+            ts_decorators: resolve_decorators(self.typescript.config.decorators, cfg.ts_decorators),
+            // Additive: CLI `--scss-load-path`s first, then the block's `scss.loadPaths`.
+            extra_scss_load_paths: {
+                let mut paths = self.scss.config.load_paths.clone();
+                paths.extend(cfg.scss_load_paths.iter().cloned());
+                paths
+            },
         }
     }
 }
@@ -268,6 +272,177 @@ fn build_vendor_specs(
     Ok(specs)
 }
 
+/// The decoded `web-modules` block from a project's `package.json`. Every field is optional so
+/// config resolution can layer it **under** the CLI/env values and **over** the built-in defaults.
+/// `Vec` fields are empty when the key is absent (the same "empty == unset" rule the CLI uses).
+#[derive(Debug, Default)]
+struct PkgConfig {
+    roots: Vec<PathBuf>,
+    out: Option<PathBuf>,
+    mount: Option<String>,
+    html: Option<String>,
+    template: Option<PathBuf>,
+    packages: Vec<String>,
+    minify: Option<bool>,
+    gzip: Option<bool>,
+    typescript: Option<bool>,
+    scss: Option<bool>,
+    tera: Option<bool>,
+    ts_decorators: Option<web_modules::typescript::Decorators>,
+    scss_load_paths: Vec<PathBuf>,
+}
+
+/// Load the `web-modules` config block from `package.json` in the current directory.
+fn load_pkg_config() -> Res<(PkgConfig, Option<PathBuf>)> {
+    load_pkg_config_at(Path::new("."))
+}
+
+/// Load + parse `<dir>/package.json`'s `web-modules` block. Returns the parsed config plus the
+/// package.json path (which `build` uses to auto-vendor the project's `dependencies`):
+/// - no file        → `(default, None)` — zero-config, not an error
+/// - file, no block → `(default, Some(path))` — still drives auto-vendor
+/// - malformed JSON / wrong-typed key → `Err` (naming the offending key)
+fn load_pkg_config_at(dir: &Path) -> Res<(PkgConfig, Option<PathBuf>)> {
+    let path = dir.join("package.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((PkgConfig::default(), None));
+        }
+        Err(e) => return Err(format!("{}: {e}", path.display()).into()),
+    };
+    let json: Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
+    match json.get("web-modules") {
+        Some(block) => Ok((parse_block(block)?, Some(path))),
+        None => Ok((PkgConfig::default(), Some(path))),
+    }
+}
+
+/// Hand-parse the `web-modules` object (matching `vendor.rs`'s `serde_json::Value` style — the
+/// crate carries no serde-derive). Unknown keys are ignored so a newer config file stays loadable
+/// by an older binary; `webDependencies` / `root` are owned by the vendoring / mount code and
+/// intentionally skipped here (no double-handling).
+fn parse_block(block: &Value) -> Res<PkgConfig> {
+    let obj = block
+        .as_object()
+        .ok_or("package.json: `web-modules` must be an object")?;
+    let mut cfg = PkgConfig::default();
+    for (key, val) in obj {
+        match key.as_str() {
+            "roots" => cfg.roots = path_array(val, "web-modules.roots")?,
+            "out" => cfg.out = Some(PathBuf::from(as_string(val, "web-modules.out")?)),
+            "mount" => cfg.mount = Some(as_string(val, "web-modules.mount")?),
+            "html" => cfg.html = Some(as_string(val, "web-modules.html")?),
+            "template" => {
+                cfg.template = Some(PathBuf::from(as_string(val, "web-modules.template")?));
+            }
+            "packages" => cfg.packages = string_array(val, "web-modules.packages")?,
+            "minify" => cfg.minify = Some(as_bool(val, "web-modules.minify")?),
+            "gzip" => cfg.gzip = Some(as_bool(val, "web-modules.gzip")?),
+            "typescript" => {
+                cfg.typescript = Some(processor_enabled(val, "web-modules.typescript")?);
+                if let Some(d) = val.as_object().and_then(|o| o.get("decorators")) {
+                    cfg.ts_decorators = Some(parse_decorators(d)?);
+                }
+            }
+            "scss" => {
+                cfg.scss = Some(processor_enabled(val, "web-modules.scss")?);
+                if let Some(lp) = val.as_object().and_then(|o| o.get("loadPaths")) {
+                    cfg.scss_load_paths = path_array(lp, "web-modules.scss.loadPaths")?;
+                }
+            }
+            "tera" => cfg.tera = Some(processor_enabled(val, "web-modules.tera")?),
+            // Owned elsewhere (vendoring / mount) — read on the package.json content, not here.
+            "webDependencies" | "root" => {}
+            _ => {}
+        }
+    }
+    Ok(cfg)
+}
+
+/// A processor key is `false`/`true` (disable/enable) or an object (presence enables + configures).
+fn processor_enabled(val: &Value, ctx: &str) -> Res<bool> {
+    match val {
+        Value::Bool(b) => Ok(*b),
+        Value::Object(_) => Ok(true),
+        _ => Err(format!("{ctx} must be a boolean or an object").into()),
+    }
+}
+
+fn parse_decorators(val: &Value) -> Res<web_modules::typescript::Decorators> {
+    use web_modules::typescript::Decorators;
+    match as_string(val, "web-modules.typescript.decorators")?.as_str() {
+        "lit" => Ok(Decorators::Lit),
+        "standard" => Ok(Decorators::Standard),
+        other => Err(format!(
+            "web-modules.typescript.decorators must be \"lit\" or \"standard\", got {other:?}"
+        )
+        .into()),
+    }
+}
+
+fn as_string(val: &Value, ctx: &str) -> Res<String> {
+    val.as_str()
+        .map(str::to_string)
+        .ok_or_else(|| format!("{ctx} must be a string").into())
+}
+
+fn as_bool(val: &Value, ctx: &str) -> Res<bool> {
+    val.as_bool()
+        .ok_or_else(|| format!("{ctx} must be a boolean").into())
+}
+
+fn string_array(val: &Value, ctx: &str) -> Res<Vec<String>> {
+    let arr = val
+        .as_array()
+        .ok_or_else(|| format!("{ctx} must be an array of strings"))?;
+    arr.iter()
+        .map(|e| {
+            e.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| format!("{ctx} entries must be strings").into())
+        })
+        .collect()
+}
+
+fn path_array(val: &Value, ctx: &str) -> Res<Vec<PathBuf>> {
+    Ok(string_array(val, ctx)?
+        .into_iter()
+        .map(PathBuf::from)
+        .collect())
+}
+
+/// CLI value (Some) wins, else the block, else the built-in default. (env folds into the CLI Some.)
+fn pick<T>(cli: Option<T>, block: Option<T>, default: T) -> T {
+    cli.or(block).unwrap_or(default)
+}
+
+/// A non-empty CLI Vec wins, else the block Vec — an empty CLI Vec means "unset" (matching the
+/// positional `roots`/`--package` contract that `roots_or_cwd` relies on).
+fn pick_vec<T>(cli: Vec<T>, block: Vec<T>) -> Vec<T> {
+    if cli.is_empty() {
+        block
+    } else {
+        cli
+    }
+}
+
+/// `--typescript-decorators` (if passed) wins, else the block, else the built-in default (`Lit`).
+fn resolve_decorators(
+    cli: Option<web_modules::typescript::DecoratorsArg>,
+    block: Option<web_modules::typescript::Decorators>,
+) -> web_modules::typescript::Decorators {
+    cli.map(Into::into).or(block).unwrap_or_default()
+}
+
+/// `build`'s output dir — required, from `--out` (or `WEB_MODULES_OUT`) or `web-modules.out`.
+fn resolve_out(cli: Option<PathBuf>, block: Option<PathBuf>) -> Res<PathBuf> {
+    cli.or(block).ok_or_else(|| {
+        "build: an output dir is required - pass --out <dir> or set web-modules.out".into()
+    })
+}
+
 #[tokio::main]
 async fn main() -> Res {
     match Cli::parse().command {
@@ -276,8 +451,13 @@ async fn main() -> Res {
             addr,
             compiler,
         } => {
-            let config = compiler.resolve().into_dev_config();
-            web_modules::dev::serve_with(roots_or_cwd(roots), addr, config).await?;
+            // Config from a `web-modules` block in ./package.json (flags only — dev never vendors).
+            let (cfg, _pkg_path) = load_pkg_config()?;
+            let config = compiler.resolve_with(&cfg).into_dev_config();
+            let roots = roots_or_cwd(pick_vec(roots, cfg.roots));
+            let addr =
+                addr.unwrap_or_else(|| "127.0.0.1:8080".parse().expect("valid default addr"));
+            web_modules::dev::serve_with(roots, addr, config).await?;
         }
         Command::Build {
             roots,
@@ -289,14 +469,30 @@ async fn main() -> Res {
             packages,
             compiler,
         } => {
-            // `build` vendors only when given packages/manifest; otherwise it compiles a
-            // non-vendored tree statically (empty spec set, no error).
-            let specs = build_vendor_specs(&packages, &manifest, false)?;
-            let resolved = compiler.resolve();
+            // Config from a `web-modules` block in ./package.json, layered under the CLI/env args.
+            let (cfg, pkg_path) = load_pkg_config()?;
+            let resolved = compiler.resolve_with(&cfg);
             let (minify, gzip) = (resolved.minify, resolved.gzip);
             let output = web_modules::build::Output::new(minify, gzip);
             let processors = resolved.into_processors();
-            let roots = roots_or_cwd(roots);
+
+            // Auto-vendor: the discovered package.json acts as an implicit `--manifest`, so its
+            // `dependencies` (honoring `web-modules.webDependencies`) are vendored. Explicit
+            // `--manifest`/`--package` come first and win on a name clash (dedupe keeps the first);
+            // with nothing to vendor, `build` stays static-only.
+            let mut manifests = manifest;
+            if let Some(path) = &pkg_path {
+                manifests.push(path.clone());
+            }
+            let packages = pick_vec(packages, cfg.packages);
+            let specs = build_vendor_specs(&packages, &manifests, false)?;
+
+            let roots = roots_or_cwd(pick_vec(roots, cfg.roots));
+            let out = resolve_out(out, cfg.out)?;
+            let mount = pick(mount, cfg.mount, "/web_modules".to_string());
+            let html = pick(html, cfg.html, DEFAULT_HTML.to_string());
+            let template = template.or(cfg.template);
+
             web_modules::build::build(&web_modules::build::BuildOptions {
                 specs: &specs,
                 roots: &roots,
@@ -366,7 +562,7 @@ mod tests {
     fn resolve_build(extra: &[&str]) -> ResolvedCompiler {
         let argv: Vec<&str> = [&["web-modules", "build", "--out", "out"][..], extra].concat();
         match Cli::try_parse_from(argv).unwrap().command {
-            Command::Build { compiler, .. } => compiler.resolve(),
+            Command::Build { compiler, .. } => compiler.resolve_with(&PkgConfig::default()),
             _ => panic!("expected Build"),
         }
     }
@@ -414,10 +610,23 @@ mod tests {
     }
 
     #[test]
-    fn build_requires_out() {
-        assert!(
-            Cli::try_parse_from(["web-modules", "build", "web"]).is_err(),
-            "--out is required"
+    fn build_out_required_from_cli_or_block() {
+        // `--out` is no longer clap-required (a `web-modules.out` block entry can supply it), so a
+        // bare `build web` now PARSES — the requirement moved to resolution.
+        assert!(Cli::try_parse_from(["web-modules", "build", "web"]).is_ok());
+        // Neither source → error; either alone → that value; CLI wins over the block.
+        assert!(resolve_out(None, None).is_err());
+        assert_eq!(
+            resolve_out(Some("d".into()), None).unwrap(),
+            PathBuf::from("d")
+        );
+        assert_eq!(
+            resolve_out(None, Some("b".into())).unwrap(),
+            PathBuf::from("b")
+        );
+        assert_eq!(
+            resolve_out(Some("d".into()), Some("b".into())).unwrap(),
+            PathBuf::from("d")
         );
     }
 
@@ -461,10 +670,13 @@ mod tests {
                 ..
             } => {
                 assert_eq!(roots, [PathBuf::from("web"), PathBuf::from("shared")]);
-                assert_eq!(out, PathBuf::from("dist"));
-                assert_eq!(mount, "/repo/web_modules");
+                assert_eq!(out, Some(PathBuf::from("dist")));
+                assert_eq!(mount.as_deref(), Some("/repo/web_modules"));
                 assert_eq!(packages, ["lit@^3", "@lit/context@^1"]);
-                assert!(compiler.resolve().minify, "--minify opts in");
+                assert!(
+                    compiler.resolve_with(&PkgConfig::default()).minify,
+                    "--minify opts in"
+                );
             }
             _ => panic!("expected Build"),
         }
@@ -506,5 +718,206 @@ mod tests {
             resolve_build(&["--typescript-decorators", "standard"]).ts_decorators,
             Decorators::Standard
         );
+    }
+
+    #[test]
+    fn build_unset_scalars_are_none() {
+        let cli = Cli::try_parse_from(["web-modules", "build"]).unwrap();
+        match cli.command {
+            Command::Build {
+                roots,
+                out,
+                packages,
+                ..
+            } => {
+                // `out` and the positionals have no env backing, so they're reliably unset here.
+                // (mount/html/template are env-backed; their None-ness would race with the
+                // env-setting test under `--features env`, so it's covered there instead.)
+                assert!(out.is_none(), "no --out and no default ⇒ None");
+                assert!(roots.is_empty() && packages.is_empty());
+            }
+            _ => panic!("expected Build"),
+        }
+    }
+
+    // ---- package.json `web-modules` block loader ----
+
+    fn write_pkg(json: &str) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("package.json"), json).unwrap();
+        dir
+    }
+
+    #[test]
+    fn loads_absent_file_as_empty() {
+        let dir = tempfile::tempdir().unwrap(); // no package.json
+        let (cfg, path) = load_pkg_config_at(dir.path()).unwrap();
+        assert!(path.is_none());
+        assert!(cfg.out.is_none() && cfg.roots.is_empty() && cfg.scss.is_none());
+    }
+
+    #[test]
+    fn parses_full_block() {
+        use web_modules::typescript::Decorators;
+        let dir = write_pkg(
+            r#"{ "web-modules": {
+                "roots": ["web", "shared"], "out": "dist", "mount": "/m",
+                "html": "<x>", "template": "shell.html.tera", "packages": ["lit@^3"],
+                "minify": true, "gzip": false,
+                "typescript": { "decorators": "standard" },
+                "scss": { "loadPaths": ["styles"] },
+                "tera": false
+            } }"#,
+        );
+        let (cfg, path) = load_pkg_config_at(dir.path()).unwrap();
+        assert!(path.is_some());
+        assert_eq!(cfg.roots, [PathBuf::from("web"), PathBuf::from("shared")]);
+        assert_eq!(cfg.out, Some(PathBuf::from("dist")));
+        assert_eq!(cfg.mount.as_deref(), Some("/m"));
+        assert_eq!(cfg.html.as_deref(), Some("<x>"));
+        assert_eq!(cfg.template, Some(PathBuf::from("shell.html.tera")));
+        assert_eq!(cfg.packages, ["lit@^3"]);
+        assert_eq!(cfg.minify, Some(true));
+        assert_eq!(cfg.gzip, Some(false));
+        assert_eq!(cfg.typescript, Some(true)); // object form enables
+        assert_eq!(cfg.ts_decorators, Some(Decorators::Standard));
+        assert_eq!(cfg.scss, Some(true));
+        assert_eq!(cfg.scss_load_paths, [PathBuf::from("styles")]);
+        assert_eq!(cfg.tera, Some(false)); // bool form disables
+    }
+
+    #[test]
+    fn processor_bool_disables_object_enables() {
+        let off = write_pkg(r#"{"web-modules":{"scss":false}}"#);
+        let (cfg, _) = load_pkg_config_at(off.path()).unwrap();
+        assert_eq!(cfg.scss, Some(false));
+        assert!(cfg.scss_load_paths.is_empty());
+
+        let on = write_pkg(r#"{"web-modules":{"scss":{"loadPaths":["a","b"]}}}"#);
+        let (cfg, _) = load_pkg_config_at(on.path()).unwrap();
+        assert_eq!(cfg.scss, Some(true));
+        assert_eq!(
+            cfg.scss_load_paths,
+            [PathBuf::from("a"), PathBuf::from("b")]
+        );
+    }
+
+    #[test]
+    fn malformed_block_errors() {
+        for bad in [
+            r#"{"web-modules": []}"#,                                  // not an object
+            r#"{"web-modules": {"mount": 5}}"#,                        // wrong scalar type
+            r#"{"web-modules": {"scss": 3}}"#,                         // processor not bool/object
+            r#"{"web-modules": {"typescript": {"decorators": "x"}}}"#, // bad enum
+            r#"{ not json "#,                                          // malformed JSON
+        ] {
+            let dir = write_pkg(bad);
+            assert!(
+                load_pkg_config_at(dir.path()).is_err(),
+                "should reject: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn ignores_webdeps_and_root_returns_path() {
+        // The block's vendoring/mount keys are owned elsewhere — the loader skips them, and a
+        // package.json with no flag keys still yields its path (so `build` can auto-vendor deps).
+        let dir = write_pkg(
+            r#"{ "dependencies": {"lit": "^3"},
+                 "web-modules": { "webDependencies": ["lit"], "root": "./src" } }"#,
+        );
+        let (cfg, path) = load_pkg_config_at(dir.path()).unwrap();
+        assert!(path.is_some());
+        assert!(cfg.roots.is_empty() && cfg.out.is_none() && cfg.scss.is_none());
+    }
+
+    // ---- resolution layering ----
+
+    fn build_compiler(extra: &[&str]) -> CompilerConfig {
+        let argv: Vec<&str> = [&["web-modules", "build", "--out", "o"][..], extra].concat();
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Build { compiler, .. } => compiler,
+            _ => panic!("expected Build"),
+        }
+    }
+
+    #[test]
+    fn pick_and_pick_vec_precedence() {
+        assert_eq!(pick(Some("a"), Some("b"), "c"), "a");
+        assert_eq!(pick(None, Some("b"), "c"), "b");
+        assert_eq!(pick(None::<&str>, None, "c"), "c");
+        assert_eq!(pick_vec(vec!["a"], vec!["b"]), ["a"]);
+        assert_eq!(pick_vec(Vec::<&str>::new(), vec!["b"]), ["b"]);
+    }
+
+    #[test]
+    fn resolve_decorators_precedence() {
+        use web_modules::typescript::{Decorators, DecoratorsArg};
+        assert_eq!(
+            resolve_decorators(Some(DecoratorsArg::Standard), Some(Decorators::Lit)),
+            Decorators::Standard // CLI wins
+        );
+        assert_eq!(
+            resolve_decorators(None, Some(Decorators::Standard)),
+            Decorators::Standard // block
+        );
+        assert_eq!(resolve_decorators(None, None), Decorators::Lit); // default
+    }
+
+    #[test]
+    fn toggle_folds_block_under_cli() {
+        let scss_off = PkgConfig {
+            scss: Some(false),
+            ..Default::default()
+        };
+        let scss_on = PkgConfig {
+            scss: Some(true),
+            ..Default::default()
+        };
+        // block disables, no flag → off; `--scss` beats block-off.
+        assert!(!build_compiler(&[]).resolve_with(&scss_off).scss);
+        assert!(build_compiler(&["--scss"]).resolve_with(&scss_off).scss);
+        // block enables, `--no-scss` beats block-on.
+        assert!(!build_compiler(&["--no-scss"]).resolve_with(&scss_on).scss);
+        // `--no-default-features` suppresses the default, but a block `scss:true` re-enables;
+        // `--no-default-features` alone leaves scss off.
+        assert!(
+            build_compiler(&["--no-default-features"])
+                .resolve_with(&scss_on)
+                .scss
+        );
+        assert!(
+            !build_compiler(&["--no-default-features"])
+                .resolve_with(&PkgConfig::default())
+                .scss
+        );
+    }
+
+    #[test]
+    fn scss_load_paths_concat_cli_then_block() {
+        let block = PkgConfig {
+            scss_load_paths: vec![PathBuf::from("b")],
+            ..Default::default()
+        };
+        let r = build_compiler(&["--scss-load-path", "a"]).resolve_with(&block);
+        assert_eq!(
+            r.extra_scss_load_paths,
+            [PathBuf::from("a"), PathBuf::from("b")]
+        );
+    }
+
+    #[cfg(feature = "env")]
+    #[test]
+    fn build_env_fills_option() {
+        // With the `env` feature, clap fills `WEB_MODULES_MOUNT` straight into the `Option`,
+        // so env sits above the package.json block automatically.
+        std::env::set_var("WEB_MODULES_MOUNT", "/from-env");
+        let parsed = Cli::try_parse_from(["web-modules", "build"]);
+        std::env::remove_var("WEB_MODULES_MOUNT");
+        match parsed.unwrap().command {
+            Command::Build { mount, .. } => assert_eq!(mount.as_deref(), Some("/from-env")),
+            _ => panic!("expected Build"),
+        }
     }
 }

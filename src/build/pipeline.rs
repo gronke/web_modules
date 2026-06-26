@@ -2,7 +2,24 @@
 //! embedding (`include_dir!`): vendored `web_modules/`, transformed TypeScript,
 //! compiled SCSS, copied static files, and a rendered `index.html`.
 //!
-//! Call from a consumer `build.rs` (with web_modules as a `build-dependency`):
+//! Call from a consumer `build.rs` (with web_modules as a `build-dependency`). The fluent
+//! [`Build`](crate::Build) builder is the recommended entry:
+//!
+//! ```no_run
+//! use std::path::PathBuf;
+//! use web_modules::Build;
+//!
+//! # fn main() -> web_modules::Result<()> {
+//! let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("dist");
+//! Build::new()
+//!     .root("web")
+//!     .vendor("lit@^3")
+//!     .out(out)
+//!     .run()?;
+//! # Ok(()) }
+//! ```
+//!
+//! [`build`] over a [`BuildOptions`] is the borrowed low-level form the builder wraps:
 //!
 //! ```no_run
 //! use std::path::PathBuf;

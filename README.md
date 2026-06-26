@@ -66,7 +66,21 @@ Options:
 web_modules = "0.3"   # Rust 1.94+
 ```
 
-`typescript`, `scss` and `tera` are on by default; `full` enables everything except `bundle`. For the `build.rs` / runtime API see the **[API docs][docs.rs]**.
+`typescript`, `scss` and `tera` are on by default; `full` enables everything except `bundle`.
+
+The fluent `Build` and `Dev` builders are the entry points — `Build` from a `build.rs` (bake a `dist/`), `Dev` for a live-reload server:
+
+```rust
+use web_modules::{Build, Dev};
+
+// build.rs — vendor lit, compile web/, write dist/
+Build::new().root("web").vendor("lit@^3").out("dist").minify(true).run()?;
+
+// a live-reload dev server (the `dev` feature)
+Dev::new().root("web").serve("127.0.0.1:8080".parse()?).await?;
+```
+
+Both layer over the lower-level `build(&BuildOptions { … })` / `dev::serve_with`, still public for fine-grained use. For the full `build.rs` / runtime API see the **[API docs][docs.rs]**.
 
 ## GitHub Actions
 

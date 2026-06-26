@@ -61,7 +61,7 @@ macro_rules! feature_args {
             }
 
             /// Like [`enabled`](Self::enabled), but a `block` override — a processor toggle
-            /// read from a `package.json` `web-modules` block — sits between the flags and the
+            /// read from a `package.json` `web_modules` block — sits between the flags and the
             /// compiled-in default: `--no-<name>` > `--<name>` > `block` >
             /// (`default_on && !no_default_features`). So an explicit flag still wins, but the
             /// block beats the (possibly `--no-default-features`-suppressed) built-in default.

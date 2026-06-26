@@ -56,7 +56,7 @@ pub fn write_tsconfig_base(mounts: &[Mount], base: &Path, path: &Path) -> Result
 /// declared in `package_json` to its `./node_modules/<pkg>` location (plus a `<pkg>/*`
 /// subpath glob). The package set is read via
 /// [`specs_from_package_json`](crate::vendor::specs_from_package_json), so it honors the
-/// `web-modules.webDependencies` whitelist and skips local (`file:`/`workspace:`) deps;
+/// `web_modules.webDependencies` whitelist and skips local (`file:`/`workspace:`) deps;
 /// the editor then resolves exactly the packages the build vendors. Compose the result
 /// with [`tsconfig_paths`] (first-party mounts) into one `paths` map.
 ///
@@ -160,7 +160,7 @@ mod tests {
         std::fs::write(
             &pkg,
             r#"{ "dependencies": { "lit": "^3", "pg": "^8" },
-                "web-modules": { "webDependencies": ["lit"] } }"#,
+                "web_modules": { "webDependencies": ["lit"] } }"#,
         )
         .unwrap();
         let paths = tsconfig_node_modules_paths(&pkg).unwrap();

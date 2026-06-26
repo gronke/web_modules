@@ -59,7 +59,7 @@ enum Command {
     Build {
         /// Source root(s), merged (first match wins). Defaults to the cwd.
         roots: Vec<PathBuf>,
-        /// Output directory. Defaults to `dist`, or `web-modules.out` in package.json.
+        /// Output directory. Defaults to `dist`, or `web_modules.out` in package.json.
         #[arg(long)]
         out: Option<PathBuf>,
         /// URL prefix the vendored modules are served at (default `/web_modules`). Under a GitHub
@@ -177,7 +177,7 @@ struct ResolvedCompiler {
 }
 
 impl CompilerConfig {
-    /// Resolve each processor toggle + config, layering a `package.json` `web-modules` block under
+    /// Resolve each processor toggle + config, layering a `package.json` `web_modules` block under
     /// the CLI flags: `--no-<name>` > `--<name>` > block > (`default_on && !--no-default-features`).
     /// typescript/scss/tera default on; minify/gzip default off.
     fn resolve_with(&self, cfg: &PkgConfig) -> ResolvedCompiler {
@@ -272,7 +272,7 @@ fn build_vendor_specs(
     Ok(specs)
 }
 
-/// The decoded `web-modules` block from a project's `package.json`. Every field is optional so
+/// The decoded `web_modules` block from a project's `package.json`. Every field is optional so
 /// config resolution can layer it **under** the CLI/env values and **over** the built-in defaults.
 /// `Vec` fields are empty when the key is absent (the same "empty == unset" rule the CLI uses).
 #[derive(Debug, Default)]
@@ -291,12 +291,12 @@ struct PkgConfig {
     scss_load_paths: Vec<PathBuf>,
 }
 
-/// Load the `web-modules` config block from `package.json` in the current directory.
+/// Load the `web_modules` config block from `package.json` in the current directory.
 fn load_pkg_config() -> Res<(PkgConfig, Option<PathBuf>)> {
     load_pkg_config_at(Path::new("."))
 }
 
-/// Load + parse `<dir>/package.json`'s `web-modules` block. Returns the parsed config plus the
+/// Load + parse `<dir>/package.json`'s `web_modules` block. Returns the parsed config plus the
 /// package.json path (which `build` uses to auto-vendor the project's `dependencies`):
 /// - no file        → `(default, None)` — zero-config, not an error
 /// - file, no block → `(default, Some(path))` — still drives auto-vendor
@@ -312,43 +312,43 @@ fn load_pkg_config_at(dir: &Path) -> Res<(PkgConfig, Option<PathBuf>)> {
     };
     let json: Value =
         serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    match json.get("web-modules") {
+    match json.get("web_modules") {
         Some(block) => Ok((parse_block(block)?, Some(path))),
         None => Ok((PkgConfig::default(), Some(path))),
     }
 }
 
-/// Hand-parse the `web-modules` object (matching `vendor.rs`'s `serde_json::Value` style — the
+/// Hand-parse the `web_modules` object (matching `vendor.rs`'s `serde_json::Value` style — the
 /// crate carries no serde-derive). Unknown keys are ignored so a newer config file stays loadable
 /// by an older binary; `webDependencies` / `root` are owned by the vendoring / mount code and
 /// intentionally skipped here (no double-handling).
 fn parse_block(block: &Value) -> Res<PkgConfig> {
     let obj = block
         .as_object()
-        .ok_or("package.json: `web-modules` must be an object")?;
+        .ok_or("package.json: `web_modules` must be an object")?;
     let mut cfg = PkgConfig::default();
     for (key, val) in obj {
         match key.as_str() {
-            "roots" => cfg.roots = path_array(val, "web-modules.roots")?,
-            "out" => cfg.out = Some(PathBuf::from(as_string(val, "web-modules.out")?)),
-            "mount" => cfg.mount = Some(as_string(val, "web-modules.mount")?),
-            "html" => cfg.html = Some(as_string(val, "web-modules.html")?),
+            "roots" => cfg.roots = path_array(val, "web_modules.roots")?,
+            "out" => cfg.out = Some(PathBuf::from(as_string(val, "web_modules.out")?)),
+            "mount" => cfg.mount = Some(as_string(val, "web_modules.mount")?),
+            "html" => cfg.html = Some(as_string(val, "web_modules.html")?),
             "template" => {
-                cfg.template = Some(PathBuf::from(as_string(val, "web-modules.template")?));
+                cfg.template = Some(PathBuf::from(as_string(val, "web_modules.template")?));
             }
-            "packages" => cfg.packages = string_array(val, "web-modules.packages")?,
-            "minify" => cfg.minify = Some(as_bool(val, "web-modules.minify")?),
-            "gzip" => cfg.gzip = Some(as_bool(val, "web-modules.gzip")?),
+            "packages" => cfg.packages = string_array(val, "web_modules.packages")?,
+            "minify" => cfg.minify = Some(as_bool(val, "web_modules.minify")?),
+            "gzip" => cfg.gzip = Some(as_bool(val, "web_modules.gzip")?),
             "typescript" => {
-                cfg.typescript = Some(processor_enabled(val, "web-modules.typescript")?)
+                cfg.typescript = Some(processor_enabled(val, "web_modules.typescript")?)
             }
             "scss" => {
-                cfg.scss = Some(processor_enabled(val, "web-modules.scss")?);
+                cfg.scss = Some(processor_enabled(val, "web_modules.scss")?);
                 if let Some(lp) = val.as_object().and_then(|o| o.get("loadPaths")) {
-                    cfg.scss_load_paths = path_array(lp, "web-modules.scss.loadPaths")?;
+                    cfg.scss_load_paths = path_array(lp, "web_modules.scss.loadPaths")?;
                 }
             }
-            "tera" => cfg.tera = Some(processor_enabled(val, "web-modules.tera")?),
+            "tera" => cfg.tera = Some(processor_enabled(val, "web_modules.tera")?),
             // Owned elsewhere (vendoring / mount) — read on the package.json content, not here.
             "webDependencies" | "root" => {}
             _ => {}
@@ -420,7 +420,7 @@ async fn main() -> Res {
             addr,
             compiler,
         } => {
-            // Config from a `web-modules` block in ./package.json (flags only — dev never vendors).
+            // Config from a `web_modules` block in ./package.json (flags only — dev never vendors).
             let (cfg, _pkg_path) = load_pkg_config()?;
             let config = compiler.resolve_with(&cfg).into_dev_config();
             let roots = roots_or_cwd(pick_vec(roots, cfg.roots));
@@ -438,7 +438,7 @@ async fn main() -> Res {
             packages,
             compiler,
         } => {
-            // Config from a `web-modules` block in ./package.json, layered under the CLI/env args.
+            // Config from a `web_modules` block in ./package.json, layered under the CLI/env args.
             let (cfg, pkg_path) = load_pkg_config()?;
             let resolved = compiler.resolve_with(&cfg);
             let (minify, gzip) = (resolved.minify, resolved.gzip);
@@ -446,7 +446,7 @@ async fn main() -> Res {
             let processors = resolved.into_processors();
 
             // Auto-vendor: the discovered package.json acts as an implicit `--manifest`, so its
-            // `dependencies` (honoring `web-modules.webDependencies`) are vendored. Explicit
+            // `dependencies` (honoring `web_modules.webDependencies`) are vendored. Explicit
             // `--manifest`/`--package` come first and win on a name clash (dedupe keeps the first);
             // with nothing to vendor, `build` stays static-only.
             let mut manifests = manifest;
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn build_out_defaults_to_dist() {
-        // `--out` wins, then `web-modules.out`, then the `dist` convention.
+        // `--out` wins, then `web_modules.out`, then the `dist` convention.
         let dist = PathBuf::from("dist");
         assert_eq!(pick(None::<PathBuf>, None, dist.clone()), dist);
         assert_eq!(
@@ -703,7 +703,7 @@ mod tests {
         }
     }
 
-    // ---- package.json `web-modules` block loader ----
+    // ---- package.json `web_modules` block loader ----
 
     fn write_pkg(json: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn parses_full_block() {
         let dir = write_pkg(
-            r#"{ "web-modules": {
+            r#"{ "web_modules": {
                 "roots": ["web", "shared"], "out": "dist", "mount": "/m",
                 "html": "<x>", "template": "shell.html.tera", "packages": ["lit@^3"],
                 "minify": true, "gzip": false,
@@ -749,12 +749,12 @@ mod tests {
 
     #[test]
     fn processor_bool_disables_object_enables() {
-        let off = write_pkg(r#"{"web-modules":{"scss":false}}"#);
+        let off = write_pkg(r#"{"web_modules":{"scss":false}}"#);
         let (cfg, _) = load_pkg_config_at(off.path()).unwrap();
         assert_eq!(cfg.scss, Some(false));
         assert!(cfg.scss_load_paths.is_empty());
 
-        let on = write_pkg(r#"{"web-modules":{"scss":{"loadPaths":["a","b"]}}}"#);
+        let on = write_pkg(r#"{"web_modules":{"scss":{"loadPaths":["a","b"]}}}"#);
         let (cfg, _) = load_pkg_config_at(on.path()).unwrap();
         assert_eq!(cfg.scss, Some(true));
         assert_eq!(
@@ -766,9 +766,9 @@ mod tests {
     #[test]
     fn malformed_block_errors() {
         for bad in [
-            r#"{"web-modules": []}"#,           // not an object
-            r#"{"web-modules": {"mount": 5}}"#, // wrong scalar type
-            r#"{"web-modules": {"scss": 3}}"#,  // processor not bool/object
+            r#"{"web_modules": []}"#,           // not an object
+            r#"{"web_modules": {"mount": 5}}"#, // wrong scalar type
+            r#"{"web_modules": {"scss": 3}}"#,  // processor not bool/object
             r#"{ not json "#,                   // malformed JSON
         ] {
             let dir = write_pkg(bad);
@@ -785,7 +785,7 @@ mod tests {
         // package.json with no flag keys still yields its path (so `build` can auto-vendor deps).
         let dir = write_pkg(
             r#"{ "dependencies": {"lit": "^3"},
-                 "web-modules": { "webDependencies": ["lit"], "root": "./src" } }"#,
+                 "web_modules": { "webDependencies": ["lit"], "root": "./src" } }"#,
         );
         let (cfg, path) = load_pkg_config_at(dir.path()).unwrap();
         assert!(path.is_some());

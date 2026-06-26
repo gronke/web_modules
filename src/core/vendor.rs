@@ -219,13 +219,13 @@ impl PackageSpec {
 /// # `webDependencies` whitelist
 ///
 /// When `dependencies` also carries server-only packages, narrow the browser vend
-/// with a `webDependencies` whitelist under the `web-modules` key, the convention
+/// with a `webDependencies` whitelist under the `web_modules` key, the convention
 /// [@pika/web] / Snowpack introduced for exactly this (*"useful if your entire
 /// dependencies object is too large or contains unrelated, server-only packages"*):
 ///
 /// ```json
 /// { "dependencies": { "lit": "^3", "pg": "^8" },
-///   "web-modules": { "webDependencies": ["lit"] } }
+///   "web_modules": { "webDependencies": ["lit"] } }
 /// ```
 ///
 /// Only the listed names are vended (in order; versions still come from
@@ -237,18 +237,18 @@ pub fn specs_from_package_json(path: &Path) -> Result<Vec<PackageSpec>> {
     let bytes = std::fs::read(path)?;
     let json: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| Error::Vendor(format!("{}: {e}", path.display())))?;
-    // `web-modules.webDependencies`: an @pika/web-style whitelist of dependency
+    // `web_modules.webDependencies`: an @pika/web-style whitelist of dependency
     // names to vend (versions taken from `dependencies`). Absent → vend all of
     // `dependencies`.
     let Some(whitelist) = json
-        .get("web-modules")
+        .get("web_modules")
         .and_then(|v| v.get("webDependencies"))
     else {
         return specs_from_package_json_sections(path, &["dependencies"]);
     };
     let whitelist = whitelist.as_array().ok_or_else(|| {
         Error::Vendor(format!(
-            "{}: web-modules.webDependencies must be an array of dependency names",
+            "{}: web_modules.webDependencies must be an array of dependency names",
             path.display()
         ))
     })?;
@@ -258,7 +258,7 @@ pub fn specs_from_package_json(path: &Path) -> Result<Vec<PackageSpec>> {
     for entry in whitelist {
         let Some(name) = entry.as_str() else {
             return Err(Error::Vendor(format!(
-                "{}: web-modules.webDependencies entries must be strings",
+                "{}: web_modules.webDependencies entries must be strings",
                 path.display()
             )));
         };
@@ -270,7 +270,7 @@ pub fn specs_from_package_json(path: &Path) -> Result<Vec<PackageSpec>> {
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
                 Error::Vendor(format!(
-                    "{}: web-modules.webDependencies lists `{name}`, not found in dependencies",
+                    "{}: web_modules.webDependencies lists `{name}`, not found in dependencies",
                     path.display()
                 ))
             })?;
@@ -338,7 +338,7 @@ fn is_local_protocol(value: &str) -> bool {
 /// Read a `package.json`'s `dependencies`, splitting them: registry ranges → vendoring
 /// [`PackageSpec`]s (kept verbatim; `github:` → git specs), and **local path-deps**
 /// (`file:`/`link:`/`./`/`../`) → [`Mount`]s, the target dir, named by the dependency
-/// **key** (npm's `file:` rule), honoring the target's `web-modules.root`. Other
+/// **key** (npm's `file:` rule), honoring the target's `web_modules.root`. Other
 /// protocols (`workspace:`/`portal:`/`npm:`) are skipped. Use this to compose sibling
 /// dirs straight from a manifest; [`specs_from_package_json`] is the vend-only subset.
 pub fn read_package_json(path: &Path) -> Result<(Vec<PackageSpec>, Vec<Mount>)> {
@@ -919,7 +919,7 @@ mod tests {
             &p,
             r#"{
                 "dependencies": { "lit": "^3", "lit-html": "^3", "pg": "^8" },
-                "web-modules": { "webDependencies": ["lit", "lit-html"] }
+                "web_modules": { "webDependencies": ["lit", "lit-html"] }
             }"#,
         )
         .unwrap();
@@ -938,7 +938,7 @@ mod tests {
         let p = dir.path().join("package.json");
         std::fs::write(
             &p,
-            r#"{"dependencies":{"lit":"^3"},"web-modules":{"webDependencies":["lit","nope"]}}"#,
+            r#"{"dependencies":{"lit":"^3"},"web_modules":{"webDependencies":["lit","nope"]}}"#,
         )
         .unwrap();
         let Err(err) = specs_from_package_json(&p) else {
@@ -956,7 +956,7 @@ mod tests {
         let p = dir.path().join("package.json");
         std::fs::write(
             &p,
-            r#"{"dependencies":{"lit":"^3"},"web-modules":{"webDependencies":[]}}"#,
+            r#"{"dependencies":{"lit":"^3"},"web_modules":{"webDependencies":[]}}"#,
         )
         .unwrap();
         assert!(specs_from_package_json(&p).unwrap().is_empty());
@@ -968,7 +968,7 @@ mod tests {
         let p = dir.path().join("package.json");
         std::fs::write(
             &p,
-            r#"{"dependencies":{"lit":"^3"},"web-modules":{"webDependencies":{"lit":"^3"}}}"#,
+            r#"{"dependencies":{"lit":"^3"},"web_modules":{"webDependencies":{"lit":"^3"}}}"#,
         )
         .unwrap();
         assert!(specs_from_package_json(&p).is_err(), "object form rejected");
@@ -998,7 +998,7 @@ mod tests {
         std::fs::create_dir_all(sib.join("pub")).unwrap();
         std::fs::write(
             sib.join("package.json"),
-            r#"{"name":"sibling","web-modules":{"root":"./pub"}}"#,
+            r#"{"name":"sibling","web_modules":{"root":"./pub"}}"#,
         )
         .unwrap();
         let p = tmp.path().join("package.json");

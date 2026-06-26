@@ -65,7 +65,7 @@ impl Mount {
 
     /// Build a mount from a directory that may carry a `package.json`: the name
     /// (specifier/url segment) is the manifest's `name` if present, else the dir's
-    /// basename; the served root is `<dir>/<web-modules.root>` when the manifest
+    /// basename; the served root is `<dir>/<web_modules.root>` when the manifest
     /// declares that field, else `dir` itself. Chain [`specifier`](Self::specifier) /
     /// [`url`](Self::url) to override the name; a caller-given name wins (npm's
     /// `file:`/alias rule: **given ＞ package.json `name` ＞ dir basename**).
@@ -78,7 +78,7 @@ impl Mount {
             Some(json) => {
                 let name = json.get("name").and_then(Value::as_str).map(str::to_string);
                 let root = json
-                    .get("web-modules")
+                    .get("web_modules")
                     .and_then(|v| v.get("root"))
                     .and_then(Value::as_str)
                     .map(|r| dir.join(r.trim_start_matches("./")));
@@ -174,7 +174,7 @@ mod tests {
         std::fs::create_dir_all(comp.join("src")).unwrap();
         std::fs::write(
             comp.join("package.json"),
-            r#"{"name":"@acme/widgets","web-modules":{"root":"./src"}}"#,
+            r#"{"name":"@acme/widgets","web_modules":{"root":"./src"}}"#,
         )
         .unwrap();
         let m = Mount::from_dir(&comp);

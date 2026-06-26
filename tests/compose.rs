@@ -22,12 +22,12 @@ fn examples() -> PathBuf {
 fn from_dir_precedence_given_over_manifest_over_basename() {
     let tmp = tempfile::tempdir().unwrap();
 
-    // (1) package.json `name` + `web-modules.root`: name → specifier, root → served dir.
+    // (1) package.json `name` + `web_modules.root`: name → specifier, root → served dir.
     let scoped = tmp.path().join("scoped");
     std::fs::create_dir_all(scoped.join("src")).unwrap();
     std::fs::write(
         scoped.join("package.json"),
-        r#"{"name":"@acme/widgets","web-modules":{"root":"./src"}}"#,
+        r#"{"name":"@acme/widgets","web_modules":{"root":"./src"}}"#,
     )
     .unwrap();
     let m = Mount::from_dir(&scoped);

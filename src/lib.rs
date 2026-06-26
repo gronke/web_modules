@@ -68,8 +68,9 @@ pub use processors::typescript;
 pub mod cli_config;
 
 /// Shared fluent-builder methods (the `source_builder_methods!` macro) stamped onto the
-/// [`Build`] and [`Dev`] builders. Compiled with `typescript`, which both builders need.
-#[cfg(feature = "typescript")]
+/// [`Build`] and [`Dev`] builders. Compiled with the `builder` feature alongside `typescript`,
+/// which supplies the `Processors` set both builders configure.
+#[cfg(all(feature = "builder", feature = "typescript"))]
 mod builder_shared;
 
 // Build-time toolchain, grouped under `build/`: the `build` pipeline plus the emit
@@ -83,8 +84,8 @@ mod builder_shared;
 ))]
 pub mod build;
 
-/// The fluent build builder, at the crate root alongside [`Frontend`].
-#[cfg(feature = "typescript")]
+/// The fluent build builder (feature `builder`), at the crate root alongside [`Frontend`].
+#[cfg(all(feature = "builder", feature = "typescript"))]
 pub use build::Build;
 
 #[cfg(feature = "bundle")]
@@ -108,8 +109,8 @@ mod serve;
 #[cfg(feature = "dev")]
 pub use serve::dev;
 
-/// The fluent dev-server builder, at the crate root alongside [`Frontend`].
-#[cfg(feature = "dev")]
+/// The fluent dev-server builder (feature `builder`), at the crate root alongside [`Frontend`].
+#[cfg(all(feature = "builder", feature = "dev"))]
 pub use serve::dev::Dev;
 
 #[cfg(feature = "axum")]

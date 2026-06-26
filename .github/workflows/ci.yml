@@ -57,9 +57,12 @@ jobs:
       - name: Feature-isolation check
         run: |
           cargo check -p web_modules --no-default-features
-          for f in axum dev minify i18n; do
+          for f in axum dev minify i18n builder; do
             cargo check -p web_modules --no-default-features --features "$f"
           done
+          # the fluent builders (gated on `builder`) paired with the features that supply the structs
+          cargo check -p web_modules --no-default-features --features "typescript builder"
+          cargo check -p web_modules --no-default-features --features "dev builder"
 
       # Tests: the whole workspace incl. the network-gated vendor/assembly tests, plus the
       # bundle feature's network-gated documentary test (install react + rolldown-bundle).

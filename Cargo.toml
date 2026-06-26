@@ -26,7 +26,7 @@ features = ["full"]
 # Specialised for building web modules + simple web apps: TypeScript, SCSS and
 # Tera are on by default. None of these pull in a server runtime, so a `build.rs`
 # that only enables `default` stays free of axum/tokio.
-default = ["typescript", "scss", "tera"]
+default = ["typescript", "scss", "tera", "builder"]
 
 # TypeScript / modern-JS → browser JS via oxc (incl. legacy decorators for Lit).
 typescript = ["dep:oxc_allocator", "dep:oxc_parser", "dep:oxc_semantic", "dep:oxc_transformer", "dep:oxc_codegen", "dep:oxc_span"]
@@ -72,10 +72,15 @@ npm = []
 # toolchain stays a buildless, no-bundler ESM workflow; pull this in only when you need CJS→ESM.
 # Independent of `npm`: pair with `npm` (→ `web_modules::npm`) for the install→bundle pipeline.
 bundle = ["dep:rolldown", "dep:tokio"]
+# Fluent `web_modules::Build` / `Dev` builders — the promoted, developer-facing entry that wraps the
+# `BuildOptions` / `build()` and dev-server structs underneath. On by default; opt out for the bare
+# struct API. Dependency-free; the builders are present only alongside the features that supply the
+# structs they wrap (`typescript` for `Build`, `dev` for `Dev`).
+builder = []
 # Everything in the lean toolchain (incl. `env`, so CI's `--features full` lint/test covers the
 # env-gated CLI arms). The heavy, opt-in `bundle` is intentionally NOT included, so `full` (and
 # `--features full`) builds stay free of the rolldown / second-oxc tree.
-full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm"]
+full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm", "builder"]
 
 [dependencies]
 # Core — vendoring npm packages + composing import maps + a transitive `node_modules/`

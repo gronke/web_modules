@@ -68,7 +68,7 @@ web_modules = "0.3"   # Rust 1.94+
 
 `typescript`, `scss` and `tera` are on by default; `full` enables everything except `bundle`.
 
-The fluent `Build` and `Dev` builders are the entry points — `Build` from a `build.rs` (bake a `dist/`), `Dev` for a live-reload server:
+The fluent `Build` and `Dev` builders (feature `builder`, on by default) are the promoted entry points — `Build` from a `build.rs` (bake a `dist/`), `Dev` for a live-reload server:
 
 ```rust
 use web_modules::{Build, Dev};

@@ -24,8 +24,9 @@ mod pipeline;
 pub use pipeline::*;
 
 // The fluent builder over `build()` / `BuildOptions`, re-exported at the crate root as
-// `web_modules::Build` (and `web_modules::build::Build`).
-#[cfg(feature = "typescript")]
+// `web_modules::Build` (and `web_modules::build::Build`). Behind the `builder` feature so the bare
+// struct API can be used without it.
+#[cfg(all(feature = "builder", feature = "typescript"))]
 mod builder;
-#[cfg(feature = "typescript")]
+#[cfg(all(feature = "builder", feature = "typescript"))]
 pub use builder::Build;

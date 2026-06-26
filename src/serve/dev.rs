@@ -35,6 +35,7 @@ use super::serving::{
     relative_under,
 };
 use crate::build::Processors;
+#[cfg(feature = "builder")]
 use crate::builder_shared::source_builder_methods;
 use crate::mount::Mount;
 
@@ -63,14 +64,17 @@ pub type DevConfig = Processors;
 /// `scss_load_path(s)`) come from [`source_builder_methods!`](crate::builder_shared); the
 /// terminals are [`serve`](Self::serve) and [`router`](Self::router). For prefix-mounted
 /// composition (several dirs under different URL prefixes), use [`Frontend`](crate::Frontend).
+#[cfg(feature = "builder")]
 #[derive(Clone, Debug, Default)]
 pub struct Dev {
     roots: Vec<PathBuf>,
     processors: Processors,
 }
 
+#[cfg(feature = "builder")]
 source_builder_methods!(Dev);
 
+#[cfg(feature = "builder")]
 impl Dev {
     /// A new builder with no roots and all processors on (Lit decorators).
     pub fn new() -> Self {

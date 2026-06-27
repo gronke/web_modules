@@ -50,8 +50,8 @@ macro_rules! source_builder_methods {
             }
 
             /// Decorator lowering for the TypeScript transform (default
-            /// [`Decorators::Lit`](crate::typescript::Decorators::Lit)).
-            pub fn decorators(mut self, decorators: crate::typescript::Decorators) -> Self {
+            /// [`Decorators::Lit`](crate::Decorators::Lit)).
+            pub fn decorators(mut self, decorators: crate::Decorators) -> Self {
                 self.processors.ts_decorators = decorators;
                 self
             }

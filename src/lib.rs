@@ -48,6 +48,10 @@ pub use core::{importmap, mount, static_files, tsconfig, vendor};
 /// vendor/import-map core and the build/serve toolchain.
 mod processors;
 
+/// The decorator-lowering mode (`web_modules::Decorators`), always available so the build
+/// [`Processors`](build::Processors) set can carry it regardless of which processors are compiled.
+pub use processors::Decorators;
+
 #[cfg(feature = "dts")]
 pub use processors::dts;
 #[cfg(feature = "i18n")]
@@ -68,24 +72,18 @@ pub use processors::typescript;
 pub mod cli_config;
 
 /// Shared fluent-builder methods (the `source_builder_methods!` macro) stamped onto the
-/// [`Build`] and [`Dev`] builders. Compiled with the `builder` feature alongside `typescript`,
-/// which supplies the `Processors` set both builders configure.
-#[cfg(all(feature = "builder", feature = "typescript"))]
+/// [`Build`] and [`Dev`] builders, behind the `builder` feature.
+#[cfg(feature = "builder")]
 mod builder_shared;
 
-// Build-time toolchain, grouped under `build/`: the `build` pipeline plus the emit
-// helpers `bundle` / `compress` / `templates`, each re-exported at its historical crate
-// root path. The `build` module exists whenever any of its members' features is enabled.
-#[cfg(any(
-    feature = "typescript",
-    feature = "bundle",
-    feature = "compress",
-    feature = "tera"
-))]
+// Build-time toolchain, grouped under `build/`: the `build` pipeline plus the emit helpers
+// `bundle` / `compress` / `templates`, each re-exported at its historical crate root path. The
+// pipeline depends only on the always-on vendor/import-map core — each source processor (TypeScript,
+// SCSS, Tera, gzip) applies only when its feature is on — so the module is always available.
 pub mod build;
 
 /// The fluent build builder (feature `builder`), at the crate root alongside [`Frontend`].
-#[cfg(all(feature = "builder", feature = "typescript"))]
+#[cfg(feature = "builder")]
 pub use build::Build;
 
 #[cfg(feature = "bundle")]

@@ -57,11 +57,13 @@ jobs:
       - name: Feature-isolation check
         run: |
           cargo check -p web_modules --no-default-features
-          for f in axum dev minify i18n builder; do
+          for f in axum dev minify i18n builder scss tera; do
             cargo check -p web_modules --no-default-features --features "$f"
           done
-          # the fluent builders (gated on `builder`) paired with the features that supply the structs
+          # the processor-agnostic build pipeline + the fluent builders (gated on `builder`) paired
+          # with the features that supply the structs (incl. a TypeScript-free SCSS-only build)
           cargo check -p web_modules --no-default-features --features "typescript builder"
+          cargo check -p web_modules --no-default-features --features "scss builder"
           cargo check -p web_modules --no-default-features --features "dev builder"
 
       # Tests: the whole workspace incl. the network-gated vendor/assembly tests, plus the

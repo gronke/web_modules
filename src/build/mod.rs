@@ -18,15 +18,16 @@ pub mod templates;
 // The pipeline itself needs the TypeScript toolchain; its public items (`build()`,
 // `Output`, …) are re-exported as `web_modules::build::*` (kept in `pipeline.rs` so the
 // `build` facade module isn't named after a child of the same name).
-#[cfg(feature = "typescript")]
+// The pipeline depends only on the always-on core (vendor / import map / static-file copy); each
+// source processor (TypeScript, SCSS, Tera, gzip) applies only behind its own feature, so the
+// pipeline itself is always compiled.
 mod pipeline;
-#[cfg(feature = "typescript")]
 pub use pipeline::*;
 
 // The fluent builder over `build()` / `BuildOptions`, re-exported at the crate root as
 // `web_modules::Build` (and `web_modules::build::Build`). Behind the `builder` feature so the bare
 // struct API can be used without it.
-#[cfg(all(feature = "builder", feature = "typescript"))]
+#[cfg(feature = "builder")]
 mod builder;
-#[cfg(all(feature = "builder", feature = "typescript"))]
+#[cfg(feature = "builder")]
 pub use builder::Build;

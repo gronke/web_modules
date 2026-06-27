@@ -77,10 +77,11 @@ pub struct Processors {
     /// Render `*.tera` to their stripped targets (`index.html.tera` → `index.html`).
     /// Default on.
     pub tera: bool,
-    /// Decorator lowering for the TypeScript transform. Defaults to [`Decorators::Lit`].
+    /// Decorator lowering for the TypeScript transform. Defaults to [`Decorators::Lit`];
+    /// inert unless the `typescript` processor runs.
     ///
-    /// [`Decorators::Lit`]: crate::typescript::Decorators::Lit
-    pub ts_decorators: crate::typescript::Decorators,
+    /// [`Decorators::Lit`]: crate::Decorators::Lit
+    pub ts_decorators: crate::Decorators,
     /// Extra SCSS `@use`/`@import` load paths, on top of the source roots and `out`.
     pub extra_scss_load_paths: Vec<PathBuf>,
 }
@@ -91,7 +92,7 @@ impl Default for Processors {
             typescript: true,
             scss: true,
             tera: true,
-            ts_decorators: crate::typescript::Decorators::Lit,
+            ts_decorators: crate::Decorators::Lit,
             extra_scss_load_paths: Vec::new(),
         }
     }
@@ -166,6 +167,10 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         paths
     };
 
+    // TypeScript transform options — only when the `typescript` processor is compiled in. Without
+    // it, `build` doesn't touch `.ts` files at all: they're skipped like any source file (never
+    // transformed, never copied raw), exactly as `dev` serves a tree with TS off.
+    #[cfg(feature = "typescript")]
     let transpile = crate::typescript::TranspileOptions {
         minify: opts.output.minify,
         decorators: opts.processors.ts_decorators,
@@ -175,6 +180,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     // Compile each root last-to-first, so the FIRST root wins a path conflict (it is
     // written last, overwriting) — the order the dev server overlays roots in.
     for root in opts.roots.iter().rev() {
+        #[cfg(feature = "typescript")]
         if opts.processors.typescript {
             crate::typescript::compile_directory_with(root, opts.out, &transpile)?;
         }
@@ -574,6 +580,31 @@ mod tests {
             out.join("index.html").exists(),
             "fallback index.html written"
         );
+    }
+
+    #[cfg(feature = "scss")]
+    #[test]
+    fn build_without_typescript_skips_ts_and_compiles_scss() {
+        // The pipeline is processor-agnostic: with the TypeScript processor off, `.ts` files are
+        // ignored (never transformed, never copied raw) while SCSS still compiles. (Mirrors the
+        // compile-time `typescript`-off path the feature gate produces.)
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.ts"), "export const x: number = 1;").unwrap();
+        std::fs::write(src.join("styles.scss"), "a { b { color: red } }").unwrap();
+
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors = Processors {
+            typescript: false,
+            ..Processors::default()
+        };
+        build(&o).unwrap();
+
+        assert!(out.join("styles.css").exists(), "SCSS still compiled");
+        assert!(!out.join("app.js").exists(), "no JS emitted with TS off");
+        assert!(!out.join("app.ts").exists(), "`.ts` source not copied raw");
     }
 
     #[cfg(feature = "tera")]

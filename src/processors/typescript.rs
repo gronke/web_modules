@@ -24,19 +24,10 @@ use walkdir::WalkDir;
 
 use crate::{Error, Result};
 
-/// Decorator handling for the transform.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Decorators {
-    /// Legacy (experimental) decorators with Lit's class-field semantics
-    /// (`experimentalDecorators: true` + `useDefineForClassFields: false`), so
-    /// `@customElement`/`@property`/`@state` behave correctly. The default.
-    #[default]
-    Lit,
-    /// No decorator/class-field tweaks: plain oxc defaults, for non-Lit (or
-    /// decorator-free) sources.
-    Standard,
-}
+/// Decorator handling for the transform. Defined in the always-compiled [`processors`](super)
+/// module so the build `Processors` set can carry it without the `typescript` feature; re-exported
+/// here as `web_modules::typescript::Decorators` for the transform that consumes it.
+pub use super::Decorators;
 
 /// Knobs for [`compile_str_with`] / [`compile_directory_with`]. `Default` is the
 /// Lit preset, so the zero-config [`compile_str`] / [`compile_directory`] keep the

@@ -229,6 +229,13 @@ fn matching<'a>(state: &'a DevState, requested: &str) -> Vec<(&'a Mount, String)
 /// else compile a source `.ts`/`.scss`, else serve a static file — then the embedded
 /// fallback.
 fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)>, String> {
+    // Reject list: never serve config / secret / source-code paths (see `reject`). Checked on the
+    // request string here, and on the resolved file below, so case-folding / a trailing dot can't
+    // smuggle a rejected file past.
+    if state.config.reject.rejects(requested) {
+        crate::reject::warn_rejected(requested);
+        return Ok(None);
+    }
     for (mount, rel) in matching(state, requested) {
         // `/foo.html` (any rendered target) ← render `foo.html.tera` from this dir, the live
         // counterpart of the build pipeline's tree-wide `.tera`. Checked **first** so a `.tera`
@@ -275,6 +282,14 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)
         // OS can open a source the request didn't reveal (`app.SCSS`, `app.scss.`).
         if !rel.is_empty() && !is_source_file(&rel) {
             if let Some(path) = contained_file(mount.dir(), &rel) {
+                // Re-check the resolved file *name* (the fold-prone part; not the absolute path,
+                // whose parent dirs are out of our control) so OS case-folding / a trailing dot
+                // can't smuggle a rejected file past the lexical check above.
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if state.config.reject.rejects(name) {
+                    crate::reject::warn_rejected(&rel);
+                    return Ok(None);
+                }
                 if !has_source_extension(&path) {
                     let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
                     return Ok(Some((bytes, content_type(&rel))));
@@ -403,6 +418,28 @@ mod tests {
             fallback: None,
             config: Arc::new(config),
         }
+    }
+
+    #[test]
+    fn dev_rejects_config_and_dotfiles() {
+        // The default (all-presets) reject list 404s config / secret / dotfile paths even though
+        // the files exist on disk; legitimate assets still serve.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.html"), b"<x>").unwrap();
+        std::fs::write(root.join("package.json"), b"{}").unwrap();
+        std::fs::write(root.join(".env"), b"S=1").unwrap();
+        let state = state(vec![Mount::root(root)]);
+        assert!(resolve(&state, "index.html").unwrap().is_some());
+        assert!(
+            resolve(&state, "package.json").unwrap().is_none(),
+            "config manifest rejected"
+        );
+        assert!(
+            resolve(&state, ".env").unwrap().is_none(),
+            "dotfile rejected"
+        );
     }
 
     #[test]

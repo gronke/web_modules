@@ -10,6 +10,7 @@
 
 pub mod importmap;
 pub mod mount;
+pub mod reject;
 pub mod static_files;
 pub mod tsconfig;
 pub mod vendor;

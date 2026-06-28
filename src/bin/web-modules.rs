@@ -162,6 +162,14 @@ struct CompilerConfig {
     #[cfg(feature = "compress")]
     #[command(flatten)]
     gzip: web_modules::compress::GzipArgs,
+    /// Reject preset selection — a comma list with `all` / `none` and `!name`, e.g. `all`
+    /// (default), `all,!config`, `source,hidden`. Keeps matching paths out of the output / serving.
+    #[arg(long = "reject-preset", default_value = "all", value_name = "PRESETS")]
+    reject_preset: String,
+    /// Explicit reject patterns (`*.ext` / `name/` / `name`) — a full replace of the presets.
+    /// Repeatable.
+    #[arg(long = "reject-list", value_name = "PATTERN")]
+    reject_list: Vec<String>,
 }
 
 /// The resolved toggles + tuning, independent of which features were compiled in — what `build`
@@ -198,6 +206,15 @@ impl CompilerConfig {
                 paths.extend(cfg.scss_load_paths.iter().cloned());
                 paths
             },
+        }
+    }
+
+    /// The reject list from `--reject-list` (a full replace) or else `--reject-preset`.
+    fn reject(&self) -> Res<web_modules::reject::Reject> {
+        if self.reject_list.is_empty() {
+            web_modules::reject::Reject::parse_presets(&self.reject_preset).map_err(Into::into)
+        } else {
+            Ok(web_modules::reject::Reject::from_list(&self.reject_list))
         }
     }
 }
@@ -398,7 +415,8 @@ async fn main() -> Res {
         } => {
             // Config from a `web_modules` block in ./package.json (flags only — dev never vendors).
             let (cfg, _pkg_path) = load_pkg_config()?;
-            let config = compiler.resolve_with(&cfg).into_processors();
+            let mut config = compiler.resolve_with(&cfg).into_processors();
+            config.reject = compiler.reject()?;
             let roots = roots_or_cwd(pick_vec(roots, cfg.roots));
             let addr =
                 addr.unwrap_or_else(|| "127.0.0.1:8080".parse().expect("valid default addr"));
@@ -419,7 +437,8 @@ async fn main() -> Res {
             let resolved = compiler.resolve_with(&cfg);
             let (minify, gzip) = (resolved.minify, resolved.gzip);
             let output = web_modules::build::Output::new(minify, gzip);
-            let processors = resolved.into_processors();
+            let mut processors = resolved.into_processors();
+            processors.reject = compiler.reject()?;
 
             // Auto-vendor: the discovered package.json acts as an implicit `--manifest`, so its
             // `dependencies` (honoring `web_modules.webDependencies`) are vendored. Explicit

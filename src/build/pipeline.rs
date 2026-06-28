@@ -84,6 +84,9 @@ pub struct Processors {
     pub ts_decorators: crate::Decorators,
     /// Extra SCSS `@use`/`@import` load paths, on top of the source roots and `out`.
     pub extra_scss_load_paths: Vec<PathBuf>,
+    /// Paths to keep out of the output and out of serving — config / secrets / source-code.
+    /// Defaults to all presets. See [`Reject`](crate::reject::Reject).
+    pub reject: crate::reject::Reject,
 }
 
 impl Default for Processors {
@@ -94,6 +97,7 @@ impl Default for Processors {
             tera: true,
             ts_decorators: crate::Decorators::Lit,
             extra_scss_load_paths: Vec::new(),
+            reject: crate::reject::Reject::all(),
         }
     }
 }
@@ -190,7 +194,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         }
         // Carry across everything the processors don't transform (HTML, images, JSON, …);
         // sources (`.ts`/`.scss`/`.tera`) are skipped by `copy_static`.
-        crate::static_files::copy_static(root, opts.out)?;
+        crate::static_files::copy_static(root, opts.out, &opts.processors.reject)?;
     }
 
     // Resolve the runtime helpers the transform emitted (decorator helper, etc.) — even a

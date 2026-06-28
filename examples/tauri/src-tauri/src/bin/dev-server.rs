@@ -37,8 +37,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Compile + copy `web/` into a static dir Tauri can embed as `frontendDist`. Dependency-free,
 /// so there is nothing to vendor — the three web-modules primitives suffice.
 fn bake(web: &Path, out: &Path) -> web_modules::Result<()> {
-    web_modules::typescript::compile_directory(web, out)?; // *.ts   -> *.js
-    web_modules::scss::compile_directory(web, out, &[out])?; // *.scss -> *.css
-    web_modules::static_files::copy_static(web, out)?; // index.html + other static files
+    // Compile *.ts -> *.js and *.scss -> *.css, then copy the remaining static files
+    // (index.html, …). The default reject list keeps config / secret files out of the output.
+    web_modules::typescript::compile_directory(web, out)?;
+    web_modules::scss::compile_directory(web, out, &[out])?;
+    web_modules::static_files::copy_static(web, out, &web_modules::reject::Reject::all())?;
     Ok(())
 }

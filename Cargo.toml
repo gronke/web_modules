@@ -11,7 +11,7 @@ keywords = ["typescript", "esm", "importmap", "web_modules", "buildless"]
 license = "MIT"
 edition = "2021"
 # MSRV tracks oxc (the transform/minify toolchain), which raises it as it evolves.
-rust-version = "1.94"
+rust-version = "1.95"
 # Leading slashes anchor to the crate root — bare patterns (gitignore semantics) match at any
 # depth and would pull in stray files like examples/tauri/README.md.
 include = ["/src/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]

@@ -18,6 +18,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - `build` is the static counterpart of `dev`: positional `[ROOTS]…`, `--out` (default `dist`), vendoring only when given packages/manifests.
 - Processor-agnostic pipeline — `build()` / `BuildOptions` / `Processors` need no `typescript`; `DevConfig` aliases `Processors`.
 - npm-utils 0.5.3 (native TLS roots, stricter sha512 integrity, hardened extraction); drop grass's clap CLI from the default build.
+- The minimum supported Rust version is 1.95 (tracks the oxc transform toolchain).
 
 ### Removed
 

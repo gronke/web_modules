@@ -75,6 +75,23 @@ macro_rules! source_builder_methods {
                     .extend(paths.into_iter().map(Into::into));
                 self
             }
+
+            /// Select which reject [`Presets`](crate::reject::Presets) keep paths out of the
+            /// output and out of serving (default: [`Presets::ALL`](crate::reject::Presets::ALL)).
+            /// Replaces the current selection; compose with the bitwise operators, e.g.
+            /// `Presets::ALL & !Presets::CONFIG`. Add individual patterns on top with
+            /// [`reject`](Self::reject).
+            pub fn reject_preset(mut self, presets: crate::reject::Presets) -> Self {
+                self.processors.reject = presets.into();
+                self
+            }
+
+            /// Reject one extra pattern (`*.ext`, `name/`, or an exact `name`) on top of the
+            /// selected [`presets`](Self::reject_preset). Case-insensitive. Repeatable.
+            pub fn reject(mut self, pattern: impl AsRef<str>) -> Self {
+                self.processors.reject.add(pattern);
+                self
+            }
         }
     };
 }

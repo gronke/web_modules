@@ -41,7 +41,7 @@ pub use error::{Error, Result};
 // use `web_modules::vendor` etc. — the `core` module itself is private.
 mod core;
 pub use core::mount::Mount;
-pub use core::{importmap, mount, static_files, tsconfig, vendor};
+pub use core::{importmap, mount, reject, static_files, tsconfig, vendor};
 
 /// Feature-gated source/asset processors, each re-exported at the crate root (e.g.
 /// `web_modules::scss`). Grouped to separate "what we apply to your source" from the

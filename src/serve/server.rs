@@ -40,6 +40,7 @@ use super::serving::{
     contained_file, content_type, has_source_extension, has_traversal, is_source_file,
     relative_under,
 };
+use crate::reject::{Presets, Reject};
 
 /// The backing of a served root: assets baked into the binary, or a directory read
 /// from the filesystem at runtime.
@@ -73,6 +74,9 @@ impl Root {
 #[derive(Default)]
 pub struct Frontend {
     roots: Vec<Root>,
+    /// Paths refused by the static router (config / secrets / source). Default: all presets.
+    /// See [`Reject`](crate::reject::Reject). (The [`dev`](Self::dev) path uses all presets.)
+    reject: Reject,
 }
 
 impl Frontend {
@@ -86,13 +90,31 @@ impl Frontend {
     pub fn embedded(dir: &'static Dir<'static>) -> Self {
         Self {
             roots: vec![Root::new("", Source::Embedded(dir))],
+            ..Self::default()
         }
+    }
+
+    /// Select which reject [`Presets`] the static router refuses (default:
+    /// [`Presets::ALL`]). Replaces the current selection; compose with the bitwise
+    /// operators, e.g. `Presets::ALL & !Presets::CONFIG`. Add individual patterns on top
+    /// with [`reject`](Self::reject).
+    pub fn reject_preset(mut self, presets: Presets) -> Self {
+        self.reject = presets.into();
+        self
+    }
+
+    /// Reject one extra pattern (`*.ext`, `name/`, or an exact `name`) on top of the
+    /// selected [`presets`](Self::reject_preset). Case-insensitive. Repeatable.
+    pub fn reject(mut self, pattern: impl AsRef<str>) -> Self {
+        self.reject.add(pattern);
+        self
     }
 
     /// One **filesystem** root at `/`, served as-is at runtime.
     pub fn dir(path: impl Into<PathBuf>) -> Self {
         Self {
             roots: vec![Root::new("", Source::Dir(path.into()))],
+            ..Self::default()
         }
     }
 
@@ -122,7 +144,7 @@ impl Frontend {
     pub fn router(self) -> Router {
         Router::new()
             .fallback(serve_static)
-            .with_state(Arc::new(self.roots))
+            .with_state(Arc::new((self.roots, self.reject)))
     }
 
     /// Compile TS/SCSS on the fly + watch the **filesystem** roots, live-reloading the
@@ -165,10 +187,11 @@ impl Frontend {
 /// same-prefix ties in declaration order) and serve the first match, staying inside
 /// each root.
 async fn serve_static(
-    State(roots): State<Arc<Vec<Root>>>,
+    State(state): State<Arc<(Vec<Root>, Reject)>>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
+    let (roots, reject) = &*state;
     let raw = uri.path().trim_start_matches('/');
     let requested = if raw.is_empty() || raw.ends_with('/') {
         format!("{raw}index.html")
@@ -176,6 +199,12 @@ async fn serve_static(
         raw.to_string()
     };
     if has_traversal(&requested) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    // Reject list: refuse config / secret / source paths (checked on the request string here;
+    // the resolved file is re-checked in the filesystem branch below).
+    if reject.rejects(&requested) {
+        crate::reject::warn_rejected(&requested);
         return StatusCode::NOT_FOUND.into_response();
     }
     let gzip_ok = accepts_gzip(&headers);
@@ -219,9 +248,15 @@ async fn serve_static(
                 }
                 if let Some(file) = contained_file(path, &rel) {
                     // Re-check the *resolved* path, not just the request string: a
-                    // case-insensitive or name-folding FS can open a source the request
-                    // didn't reveal (`app.SCSS`, or `app.scss.` on Windows), which the
-                    // lexical `is_source_file` guard above misses.
+                    // case-insensitive or name-folding FS can open a source/rejected file the
+                    // request didn't reveal (`app.SCSS`, or `secret.php.` on Windows), which the
+                    // lexical guards above miss. Check the file name (the fold-prone part), not the
+                    // absolute path whose parent dirs are out of our control.
+                    let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if reject.rejects(name) {
+                        crate::reject::warn_rejected(&rel);
+                        continue;
+                    }
                     if !has_source_extension(&file) {
                         return match std::fs::read(&file) {
                             Ok(bytes) => ([(header::CONTENT_TYPE, ct)], bytes).into_response(),

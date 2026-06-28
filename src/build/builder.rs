@@ -190,6 +190,20 @@ mod tests {
     }
 
     #[test]
+    fn reject_preset_and_pattern_compose_on_processors() {
+        use crate::reject::Presets;
+        let b = Build::new()
+            .root("web")
+            .reject_preset(Presets::ALL & !Presets::CONFIG)
+            .reject(".htpasswd");
+        let r = &b.processors.reject;
+        assert!(r.rejects("app.ts"), "source preset still on");
+        assert!(r.rejects(".env"), "hidden preset still on");
+        assert!(!r.rejects("package.json"), "config preset dropped");
+        assert!(r.rejects(".htpasswd"), "extra pattern added on top");
+    }
+
+    #[test]
     fn vendor_parses_specs() {
         let b = Build::new().vendor("lit@^3").vendor("@lit/context@^1");
         let names: Vec<&str> = b.specs.iter().map(PackageSpec::name).collect();

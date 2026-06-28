@@ -77,10 +77,13 @@ bundle = ["dep:rolldown", "dep:tokio"]
 # struct API. Dependency-free; the builders are present only alongside the features that supply the
 # structs they wrap (`typescript` for `Build`, `dev` for `Dev`).
 builder = []
+# Emit `tracing::warn!` for paths dropped by the reject list (built output / serving / bundling).
+# Off by default (no `tracing` dep on the lean path); a no-op without a subscriber when on.
+tracing = ["dep:tracing"]
 # Everything in the lean toolchain (incl. `env`, so CI's `--features full` lint/test covers the
 # env-gated CLI arms). The heavy, opt-in `bundle` is intentionally NOT included, so `full` (and
 # `--features full`) builds stay free of the rolldown / second-oxc tree.
-full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm", "builder"]
+full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm", "builder", "tracing"]
 
 [dependencies]
 # Core — vendoring npm packages + composing import maps + a transitive `node_modules/`
@@ -125,6 +128,10 @@ clap = { version = "4", features = ["derive"], optional = true }
 # CommonJS→ESM bundling (the `bundle` feature): the embedded, oxc-based Rust bundler. Heavy
 # (pulls a second oxc + the rolldown tree), so it's optional and off by default.
 rolldown = { version = "1", optional = true }
+
+# Structured logging for reject-list drops (the `tracing` feature). Library-only usage — no
+# subscriber pulled — so consumers wire their own. `default-features = false` keeps it lean.
+tracing = { version = "0.1", default-features = false, features = ["std"], optional = true }
 
 [[bin]]
 name = "web-modules"

@@ -4128,6 +4128,7 @@ dependencies = [
  "tokio",
  "tower",
  "tower-livereload",
+ "tracing",
  "walkdir",
 ]
 

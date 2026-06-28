@@ -90,6 +90,28 @@ jobs:
           cargo run -p compose
           cargo run -p react-umd
 
+      # Dogfood the gh-pages demo through this checkout's own compiler, mirroring the inputs pages.yml
+      # feeds the released binary (vendor the manifest, render the template, mount under a subpath,
+      # minify). Building from source surfaces a CLI or pipeline regression here in PR CI, not only
+      # when the Pages deploy runs on main. Asserts the compiled targets land and that the raw sources
+      # and the config manifest (kept out by reject's `config` preset) never do.
+      - name: Build the gh-pages demo (dogfood)
+        run: |
+          out="$RUNNER_TEMP/gh-pages-dist"
+          cargo run --features full --bin web-modules -- build examples/gh-pages \
+            --out "$out" \
+            --manifest examples/gh-pages/package.json \
+            --template examples/gh-pages/index.html.tera \
+            --mount /web_modules \
+            --minify
+          test -f "$out/index.html" && test -f "$out/app.js" && test -f "$out/styles.css"
+          test -d "$out/web_modules"
+          grep -q '<script type="importmap">' "$out/index.html"
+          # The config manifest and the raw sources must never reach the output.
+          test ! -e "$out/package.json"
+          test ! -e "$out/app.ts"
+          test ! -e "$out/styles.scss"
+
       # Hand the three e2e example binaries to the `e2e` matrix below, so those runners never
       # recompile Rust. They're self-contained: lit-element/react-esm bake the frontend in via
       # `include_dir!`; react-umd live-serves the checked-out `web/` and transforms TS in-process.

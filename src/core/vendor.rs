@@ -467,7 +467,7 @@ fn vendor_inner(
     vendor_dir: &Path,
     mount: &str,
     specs: &[PackageSpec],
-) -> std::result::Result<Importmap, Box<dyn std::error::Error>> {
+) -> std::result::Result<Importmap, Box<dyn std::error::Error + Send + Sync>> {
     let mount = mount.trim_end_matches('/');
     let mut map = Importmap::new();
     std::fs::create_dir_all(vendor_dir)?;
@@ -512,16 +512,18 @@ fn vendor_inner(
 
         if !is_up_to_date(&marker, &cache_key, &dest_dir, &spec.extract) {
             let lock = vendor_dir.join(format!(".{flat}.lock"));
-            cache::with_lock(&lock)(|| -> std::result::Result<(), Box<dyn std::error::Error>> {
-                // Re-check inside the lock: a concurrent build may have just done it.
-                if is_up_to_date(&marker, &cache_key, &dest_dir, &spec.extract) {
-                    return Ok(());
-                }
-                let bytes = download::fetch(&archive_url)?;
-                extract_archive(&bytes, is_git, &spec.extract, &dest_dir)?;
-                cache::write_marker(&marker, &cache_key)?;
-                Ok(())
-            })?;
+            cache::with_lock(&lock)(
+                || -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                    // Re-check inside the lock: a concurrent build may have just done it.
+                    if is_up_to_date(&marker, &cache_key, &dest_dir, &spec.extract) {
+                        return Ok(());
+                    }
+                    let bytes = download::fetch(&archive_url)?;
+                    extract_archive(&bytes, is_git, &spec.extract, &dest_dir)?;
+                    cache::write_marker(&marker, &cache_key)?;
+                    Ok(())
+                },
+            )?;
         }
 
         for (specifier, url) in import_entries(spec, mount, &dest_dir) {
@@ -553,7 +555,7 @@ fn extract_archive(
     is_git: bool,
     extract: &Extract,
     dest: &Path,
-) -> std::result::Result<(), Box<dyn std::error::Error>> {
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // A whole-directory extract owns its destination; a single-file extract may
     // share one (so don't wipe siblings).
     if !matches!(extract, Extract::File { .. }) {

@@ -18,7 +18,7 @@ use serde_json::Value;
 use web_modules::vendor::{vendor, PackageSpec};
 
 /// This binary's fallible return, `()` by default.
-type Res<T = ()> = Result<T, Box<dyn std::error::Error>>;
+type Res<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 /// `build`'s default inline `index.html`. The entry script is RELATIVE (`./app.js`) so the page
 /// also loads under a subpath (e.g. a GitHub *project* page served at `/<repo>/`). The literal

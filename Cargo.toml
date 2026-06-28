@@ -85,7 +85,7 @@ full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compres
 [dependencies]
 # Core — vendoring npm packages + composing import maps + a transitive `node_modules/`
 # install (npm_utils::install, incl. install::from_lockfile for `web-modules ci`).
-npm-utils = "0.5.2"
+npm-utils = "0.5.3"
 serde_json = "1"
 walkdir = "2"
 semver = "1"

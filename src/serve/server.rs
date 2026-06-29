@@ -97,7 +97,8 @@ impl Frontend {
     /// Select which reject [`Presets`] the static router refuses (default:
     /// [`Presets::ALL`]). Replaces the current selection; compose with the bitwise
     /// operators, e.g. `Presets::ALL & !Presets::CONFIG`. Add individual patterns on top
-    /// with [`reject`](Self::reject).
+    /// with [`reject`](Self::reject). Applies to [`router`](Self::router); [`dev`](Self::dev)
+    /// always refuses all presets.
     pub fn reject_preset(mut self, presets: Presets) -> Self {
         self.reject = presets.into();
         self

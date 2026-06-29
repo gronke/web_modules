@@ -15,7 +15,8 @@
 //!      literally upper-cased filenames so they reproduce on case-sensitive CI too.
 //!   3. The dev router serves only compiled output, and the output doesn't leak source.
 //!   4. Config / secret / dotfile paths (the default reject list) are refused with a 404 on
-//!      both the static and dev routers, while the allow-listed `.well-known` stays reachable.
+//!      both the static and dev routers, including a symlink that resolves to a rejected file,
+//!      while the allow-listed `.well-known` stays reachable.
 //!
 //! Needs the `dev` feature (for [`Frontend::dev`]); run under `--all-features`.
 #![cfg(feature = "dev")]
@@ -279,4 +280,56 @@ async fn reject_preset_and_pattern_select_what_is_refused() {
     // A plain asset that no rule covers is served.
     let (status, ..) = get(app, "/notes.txt").await;
     assert_eq!(status, StatusCode::OK);
+}
+
+/// Promise 4 on the resolved path: a benign-named symlink (`config.js`) whose target is a
+/// rejected file (`.env`) is refused on the static router and the target never leaks. The `.js`
+/// request passes the lexical check, so the resolved file name (after `canonicalize`) is what
+/// rejects it.
+#[cfg(unix)]
+#[tokio::test]
+async fn static_router_rejects_symlink_to_rejected_file() {
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("web");
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root.join(".env"), b"SECRET-ENV=1");
+    symlink(root.join(".env"), root.join("config.js")).unwrap();
+    let app = Frontend::dir(&root).router();
+
+    let (status, _, body) = get(app, "/config.js").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "symlink to .env must be rejected"
+    );
+    assert!(
+        !contains(&body, "SECRET-ENV"),
+        "symlink leaked the rejected target"
+    );
+}
+
+/// Promise 4 on the resolved path, dev router: the same benign-named symlink to a rejected file
+/// is refused there too.
+#[cfg(unix)]
+#[tokio::test]
+async fn dev_router_rejects_symlink_to_rejected_file() {
+    use std::os::unix::fs::symlink;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("web");
+    std::fs::create_dir_all(&root).unwrap();
+    write(&root.join(".env"), b"SECRET-ENV=1");
+    symlink(root.join(".env"), root.join("config.js")).unwrap();
+    let app = Frontend::dir(&root).dev();
+
+    let (status, _, body) = get(app, "/config.js").await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "symlink to .env must be rejected"
+    );
+    assert!(
+        !contains(&body, "SECRET-ENV"),
+        "symlink leaked the rejected target"
+    );
 }

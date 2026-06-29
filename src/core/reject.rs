@@ -2,11 +2,13 @@
 //! bundles, and served responses.
 //!
 //! A [`Reject`] is a compiled set of rules consulted per path. Matching is **per path
-//! component** and **case-insensitive**, and is applied to both the lexical request /
-//! relative path ([`rejects`](Reject::rejects)) and the resolved, canonicalized path
-//! ([`rejects_path`](Reject::rejects_path)) — so OS case-folding, a trailing dot, or
-//! symlink resolution can't smuggle a rejected file through (the same dual check the
-//! source-extension guard in `serving` uses).
+//! component** and **case-insensitive**. Built output (`copy_static`) checks every component of
+//! the path under the source root with [`rejects_path`](Reject::rejects_path), so a rejected
+//! directory (`.git/`) is dropped whole. Serving (the dev server and the static `Frontend`)
+//! checks the request string with [`rejects`](Reject::rejects), then re-checks the canonicalized
+//! file name, so OS case-folding, a trailing dot, or a symlink cannot serve a rejected file under
+//! an allowed name. On the resolved path only the file name is matched; directory components are
+//! matched on the request path.
 //!
 //! Rules come from **presets** (`--reject-preset`, default [`all`](Reject::all)) or an
 //! explicit **list** (`--reject-list`, a full replace):

@@ -82,7 +82,8 @@ inputs:
       Which released `web-modules` to download (a version like 0.3 / 0.3.1, a tag like v0.3.1, or
       `edge`). Empty (default): the release matching the action tag you pinned when it is an exact
       version (`uses: …@v0.3.1` → the v0.3.1 binary, reproducible), otherwise the latest release
-      (e.g. pinning `@v0`, a branch, or a commit SHA). Ignored when `from-source: true`.
+      (e.g. pinning `@v0`, a branch, or a commit SHA). Ignored when `from-source: true`. The action
+      refuses a downloaded binary older than its CLI contract (currently >= 0.4.0).
     required: false
     default: ""
   from-source:
@@ -200,7 +201,28 @@ runs:
         fi
         chmod +x "$bin"
         echo "$dir" >> "$GITHUB_PATH"
-        "$bin" --version
+
+        # Guard: refuse a downloaded binary too old for this action's CLI contract. Since 0.4.0 the
+        # source dir is passed as a POSITIONAL root (and packages via `--package`); a pre-0.4.0 binary
+        # reads that positional as a package spec and fails later with a confusing npm registry 404
+        # (e.g. pinning a moving `@v0` mid-release, before the matching binary has published). Fail
+        # fast with an actionable message instead. `from-source` builds from this action's own tree
+        # and returned above, so it never reaches here. Pure-bash compare (macOS `sort` has no `-V`).
+        MIN_MAJOR=0; MIN_MINOR=4; MIN_PATCH=0
+        ver_out="$("$bin" --version)"; echo "$ver_out" # e.g. "web-modules 0.4.0"
+        core="${ver_out##* }"; core="${core%%[-+]*}"   # last field, minus any -pre/+meta suffix
+        IFS=. read -r maj mnr pat <<< "$core"; maj="${maj:-0}"; mnr="${mnr:-0}"; pat="${pat:-0}"
+        case "$maj$mnr$pat" in
+          *[!0-9]*|'')
+            echo "::warning::could not parse web-modules version '$ver_out'; skipping the >= $MIN_MAJOR.$MIN_MINOR.$MIN_PATCH check" ;;
+          *)
+            if [ "$maj" -lt "$MIN_MAJOR" ] \
+              || { [ "$maj" -eq "$MIN_MAJOR" ] && [ "$mnr" -lt "$MIN_MINOR" ]; } \
+              || { [ "$maj" -eq "$MIN_MAJOR" ] && [ "$mnr" -eq "$MIN_MINOR" ] && [ "$pat" -lt "$MIN_PATCH" ]; }; then
+              echo "::error::downloaded web-modules $core is older than this action requires (>= $MIN_MAJOR.$MIN_MINOR.$MIN_PATCH): it passes the source dir as a positional root, which older binaries read as a package name (registry 404). Set a matching 'version:' input, bump the action ref, or use 'from-source: true'."
+              exit 1
+            fi ;;
+        esac
 
     # 2. Build. The source dir is passed as a positional root and `--out` explicitly; the other
     #    inputs go on the command line only when non-empty (clap treats an empty value as provided).

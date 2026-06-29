@@ -253,6 +253,34 @@ jobs:
           package: web_modules
           features: --features full
 
+  # The composite action downloads a prebuilt binary, then runs `web-modules build` with the source
+  # dir as a positional ROOT (since 0.4.0). A pre-0.4.0 binary reads that positional as a package spec
+  # and 404s on the npm registry, so the action's min-version guard rejects it up front. Regression
+  # test: pin an old (0.3.0) binary and assert the action step does not succeed — the guard's message
+  # is in the step log. The positive path — the action building the demo — is covered by pages.yml.
+  action-guard:
+    name: action min-version guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the action against a pre-contract (0.3.0) binary
+        id: old
+        continue-on-error: true
+        uses: ./
+        with:
+          src: examples/gh-pages
+          manifest: examples/gh-pages
+          version: "0.3.0"
+      - name: Assert the action rejected the old binary
+        env:
+          OUTCOME: ${{ steps.old.outcome }}
+        run: |
+          if [ "$OUTCOME" = "success" ]; then
+            echo "::error::the action accepted a 0.3.0 binary; the min-version guard did not fire"
+            exit 1
+          fi
+          echo "guard correctly rejected the old binary (step outcome: $OUTCOME)"
+
   # Lint the workflow files with the official actionlint image (which bundles shellcheck for the
   # `run:` blocks). actionlint targets *workflows*; the composite `action.yml` is a different schema
   # it can't parse, so that file's embedded bash is reviewed by hand instead. Tracks `:latest`

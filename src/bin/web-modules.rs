@@ -163,7 +163,7 @@ struct CompilerConfig {
     #[command(flatten)]
     gzip: web_modules::compress::GzipArgs,
     /// Reject preset selection — a comma list with `all` / `none` and `!name`, e.g. `all`
-    /// (default), `all,!config`, `source,hidden`. Keeps matching paths out of the output / serving.
+    /// (default), `all,!config`, `source,hidden,secrets`. Keeps matching paths out of output / serving.
     #[arg(long = "reject-preset", default_value = "all", value_name = "PRESETS")]
     reject_preset: String,
     /// Explicit reject patterns (`*.ext` / `name/` / `name`) — a full replace of the presets.

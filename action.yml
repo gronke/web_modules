@@ -79,8 +79,9 @@ inputs:
     default: "false"
   reject-preset:
     description: >-
-      Which reject presets keep config / secret / source paths out of the built output, e.g. `all`
-      (the default), `all,!config`, `source,hidden`, or `none`. Empty uses the binary's `all` default.
+      Which reject presets keep config / secret / source paths — and keys / certificates /
+      database dumps — out of the built output, e.g. `all` (the default), `all,!config`,
+      `source,hidden,secrets`, or `none`. Empty uses the binary's `all` default.
     required: false
     default: ""
   reject-list:

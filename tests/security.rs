@@ -14,9 +14,10 @@
 //!      (macOS, Windows) would otherwise open the on-disk source. Tests pin this with
 //!      literally upper-cased filenames so they reproduce on case-sensitive CI too.
 //!   3. The dev router serves only compiled output, and the output doesn't leak source.
-//!   4. Config / secret / dotfile paths (the default reject list) are refused with a 404 on
-//!      both the static and dev routers, including a symlink that resolves to a rejected file,
-//!      while the allow-listed `.well-known` stays reachable.
+//!   4. Config / secret / dotfile paths (the default reject list — config manifests, dotfiles,
+//!      source, and keys / certificates / database dumps) are refused with a 404 on both the
+//!      static and dev routers, including a symlink that resolves to a rejected file, while the
+//!      allow-listed `.well-known` stays reachable.
 //!
 //! Needs the `dev` feature (for [`Frontend::dev`]); run under `--all-features`.
 #![cfg(feature = "dev")]
@@ -209,6 +210,8 @@ async fn static_router_rejects_config_secret_and_dotfiles() {
     );
     write(&tmp.path().join(".env"), b"SECRET-ENV=1");
     write(&tmp.path().join(".git/config"), b"SECRET-GIT");
+    write(&tmp.path().join("server.key"), b"SECRET-KEY");
+    write(&tmp.path().join("backup.sql"), b"SECRET-SQL");
     write(&tmp.path().join(".well-known/security.txt"), b"contact: x");
     let app = Frontend::dir(tmp.path()).router();
 
@@ -216,6 +219,8 @@ async fn static_router_rejects_config_secret_and_dotfiles() {
         ("/package.json", "SECRET-PKG"),
         ("/.env", "SECRET-ENV"),
         ("/.git/config", "SECRET-GIT"),
+        ("/server.key", "SECRET-KEY"),
+        ("/backup.sql", "SECRET-SQL"),
     ] {
         let (status, _, body) = get(app.clone(), uri).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri} must be rejected");
@@ -239,12 +244,16 @@ async fn dev_router_rejects_config_secret_and_dotfiles() {
     );
     write(&tmp.path().join(".env"), b"SECRET-ENV=1");
     write(&tmp.path().join(".git/config"), b"SECRET-GIT");
+    write(&tmp.path().join("server.key"), b"SECRET-KEY");
+    write(&tmp.path().join("backup.sql"), b"SECRET-SQL");
     let app = Frontend::dir(tmp.path()).dev();
 
     for (uri, marker) in [
         ("/package.json", "SECRET-PKG"),
         ("/.env", "SECRET-ENV"),
         ("/.git/config", "SECRET-GIT"),
+        ("/server.key", "SECRET-KEY"),
+        ("/backup.sql", "SECRET-SQL"),
     ] {
         let (status, _, body) = get(app.clone(), uri).await;
         assert_eq!(status, StatusCode::NOT_FOUND, "{uri} must be rejected");

@@ -15,6 +15,7 @@
 //! - **source** — server-side / source extensions (`php`, `ts`, …).
 //! - **hidden** — any dotfile / dotdir component (`.git/`, `.env`, …), except `.well-known`.
 //! - **config** — build manifests (`package.json`, `tsconfig.json`, …).
+//! - **secrets** — private keys, certificates, and database dumps (`*.pem`, `*.key`, `*.sql`, …).
 //!
 //! The default (all presets) is safe-by-default; pass `none` (or a narrower set) to opt out.
 
@@ -36,13 +37,16 @@ pub struct Presets(u8);
 
 impl Presets {
     /// Server-side / source-code extensions that must never be published or served raw.
-    pub const SOURCE: Presets = Presets(0b001);
+    pub const SOURCE: Presets = Presets(0b0001);
     /// Dotfiles and dotdirs (`.git/`, `.env`, `.sops`, …), except the standard `.well-known`.
-    pub const HIDDEN: Presets = Presets(0b010);
+    pub const HIDDEN: Presets = Presets(0b0010);
     /// Build / tooling manifests (`package.json`, `package-lock.json`, `tsconfig.json`, …).
-    pub const CONFIG: Presets = Presets(0b100);
-    /// Every preset (`SOURCE | HIDDEN | CONFIG`) — the default selection.
-    pub const ALL: Presets = Presets(0b111);
+    pub const CONFIG: Presets = Presets(0b0100);
+    /// Private keys, certificates, and database dumps (`*.pem`, `*.key`, `*.sql`, …) — files
+    /// that are never legitimately served from a web root.
+    pub const SECRETS: Presets = Presets(0b1000);
+    /// Every preset (`SOURCE | HIDDEN | CONFIG | SECRETS`) — the default selection.
+    pub const ALL: Presets = Presets(0b1111);
     /// No presets.
     pub const NONE: Presets = Presets(0);
 
@@ -56,6 +60,7 @@ impl Presets {
             "source" => Some(Presets::SOURCE),
             "hidden" => Some(Presets::HIDDEN),
             "config" => Some(Presets::CONFIG),
+            "secrets" => Some(Presets::SECRETS),
             _ => None,
         }
     }
@@ -84,13 +89,25 @@ impl std::ops::Not for Presets {
 }
 
 /// `source`-preset extensions (lowercase, compared case-insensitively).
-const SOURCE_EXTS: &[&str] = &["php", "php5", "phtml", "ts", "tsx", "mts", "scss", "tera"];
+const SOURCE_EXTS: &[&str] = &[
+    "php", "php5", "phtml", "ts", "tsx", "cts", "mts", "scss", "sass", "tera",
+];
 /// `config`-preset filenames (lowercase).
 const CONFIG_NAMES: &[&str] = &[
     "package.json",
     "package-lock.json",
     "npm-shrinkwrap.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "bun.lockb",
     "tsconfig.json",
+    "jsconfig.json",
+];
+/// `secrets`-preset extensions (lowercase): private keys, certificates, and database dumps —
+/// high-sensitivity files that must never be served from a web root.
+const SECRET_EXTS: &[&str] = &[
+    "pem", "key", "crt", "cer", "der", "p12", "pfx", // keys & certificates
+    "sql", "sqlite", "sqlite3", "db", "dump", // database dumps
 ];
 /// The one dotted name the `hidden` preset still allows (a standard served directory).
 const WELL_KNOWN: &str = ".well-known";
@@ -121,10 +138,13 @@ impl From<Presets> for Reject {
     fn from(presets: Presets) -> Self {
         let mut r = Self::empty();
         if presets.contains(Presets::SOURCE) {
-            r.exts = SOURCE_EXTS.iter().map(|s| s.to_string()).collect();
+            r.exts.extend(SOURCE_EXTS.iter().map(|s| s.to_string()));
+        }
+        if presets.contains(Presets::SECRETS) {
+            r.exts.extend(SECRET_EXTS.iter().map(|s| s.to_string()));
         }
         if presets.contains(Presets::CONFIG) {
-            r.names = CONFIG_NAMES.iter().map(|s| s.to_string()).collect();
+            r.names.extend(CONFIG_NAMES.iter().map(|s| s.to_string()));
         }
         r.hidden = presets.contains(Presets::HIDDEN);
         r
@@ -140,7 +160,7 @@ impl Reject {
         }
     }
 
-    /// All presets (`source` + `hidden` + `config`) — the safe default.
+    /// All presets (`source` + `hidden` + `config` + `secrets`) — the safe default.
     pub fn all() -> Self {
         Presets::ALL.into()
     }
@@ -169,7 +189,7 @@ impl Reject {
 
     /// Parse a `--reject-preset` expression: a comma list with `all` / `none` and `!name`
     /// removal, evaluated left-to-right. Examples: `all` (default), `all,!config`,
-    /// `source,hidden`, `none`. Unknown preset names are an error.
+    /// `source,hidden,secrets`, `none`. Unknown preset names are an error.
     pub fn parse_presets(expr: &str) -> Result<Self, String> {
         let mut active = Presets::NONE;
         for tok in expr.split(',').map(str::trim).filter(|t| !t.is_empty()) {
@@ -274,6 +294,19 @@ mod tests {
         assert!(r.rejects("web/.git/config"));
         assert!(r.rejects("api/secret.php"));
         assert!(r.rejects("app.ts"));
+        // Source siblings of the existing extensions.
+        assert!(r.rejects("mod.cts"));
+        assert!(r.rejects("styles.sass"));
+        // Config / lockfile manifests beyond npm's.
+        assert!(r.rejects("jsconfig.json"));
+        assert!(r.rejects("yarn.lock"));
+        assert!(r.rejects("pnpm-lock.yaml"));
+        assert!(r.rejects("bun.lockb"));
+        // Keys, certificates, and database dumps (the `secrets` preset).
+        assert!(r.rejects("server.key"));
+        assert!(r.rejects("tls/cert.pem"));
+        assert!(r.rejects("backup.sql"));
+        assert!(r.rejects("data.sqlite"));
         // Legitimate web assets are kept.
         assert!(!r.rejects("app.js"));
         assert!(!r.rejects("styles.css"));
@@ -297,6 +330,8 @@ mod tests {
         assert!(r.rejects("web/.Git/config"));
         assert!(r.rejects("API/SECRET.PHP"));
         assert!(r.rejects("Package.JSON"));
+        assert!(r.rejects("SERVER.KEY"));
+        assert!(r.rejects("DUMP.SQL"));
         assert!(!r.rejects(".WELL-KNOWN/x"));
     }
 
@@ -306,16 +341,37 @@ mod tests {
         assert!(!no_config.rejects("package.json")); // config allowed
         assert!(no_config.rejects(".env")); // hidden still on
         assert!(no_config.rejects("x.php")); // source still on
+        assert!(no_config.rejects("server.key")); // secrets still on
 
         let only = Reject::parse_presets("source,hidden").unwrap();
         assert!(only.rejects("x.php") && only.rejects(".env"));
         assert!(!only.rejects("package.json"));
+        assert!(!only.rejects("server.key")); // secrets not selected
 
         let none = Reject::parse_presets("none").unwrap();
         assert!(none.is_empty());
         assert!(!none.rejects(".env") && !none.rejects("package.json"));
 
         assert!(Reject::parse_presets("all,!bogus").is_err());
+    }
+
+    #[test]
+    fn secrets_preset_selects_keys_certs_and_dumps() {
+        let secrets = Reject::parse_presets("secrets").unwrap();
+        // Keys, certs, and dumps are rejected...
+        assert!(secrets.rejects("id.pem"));
+        assert!(secrets.rejects("server.key"));
+        assert!(secrets.rejects("db.sqlite"));
+        assert!(secrets.rejects("backup.sql"));
+        // ...but the other groups are not pulled in.
+        assert!(!secrets.rejects(".env"));
+        assert!(!secrets.rejects("package.json"));
+        assert!(!secrets.rejects("app.ts"));
+
+        // Removing just `secrets` from the default keeps everything else on.
+        let no_secrets = Reject::parse_presets("all,!secrets").unwrap();
+        assert!(!no_secrets.rejects("server.key"));
+        assert!(no_secrets.rejects(".env") && no_secrets.rejects("package.json"));
     }
 
     #[test]
@@ -345,16 +401,19 @@ mod tests {
         let all_but_config: Reject = (Presets::ALL & !Presets::CONFIG).into();
         assert!(all_but_config.rejects("x.php")); // source on
         assert!(all_but_config.rejects(".env")); // hidden on
+        assert!(all_but_config.rejects("server.key")); // secrets on
         assert!(!all_but_config.rejects("package.json")); // config off
 
-        // Union of two groups, the third left out.
+        // Union of two groups, the others left out.
         let cfg_or_src: Reject = (Presets::CONFIG | Presets::SOURCE).into();
         assert!(cfg_or_src.rejects("package.json") && cfg_or_src.rejects("app.ts"));
         assert!(!cfg_or_src.rejects(".env")); // hidden not selected
+        assert!(!cfg_or_src.rejects("server.key")); // secrets not selected
 
         // contains() reflects membership; NONE is ALL's complement of itself.
         let sel = Presets::ALL & !Presets::CONFIG;
         assert!(sel.contains(Presets::SOURCE) && sel.contains(Presets::HIDDEN));
+        assert!(sel.contains(Presets::SECRETS));
         assert!(!sel.contains(Presets::CONFIG));
         assert!(Presets::ALL.contains(Presets::CONFIG));
         assert_eq!(Presets::NONE, Presets::ALL & !Presets::ALL);

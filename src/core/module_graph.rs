@@ -8,12 +8,11 @@
 //! specifiers structurally, at transform time, removes both that fragility and the
 //! false positives from `import`/`from` text inside comments or strings.
 //!
-//! Scope: the graph describes the JavaScript the current build's steps emitted — one
-//! record per output path, matching the preflight's one-winner-per-path resolution. It
-//! does not cover every file in the output directory: what a `*.tera` template renders
-//! is excluded (templates render after validation and receive the generated import
-//! map), and a reused output directory may retain files from earlier builds that the
-//! current run never touched.
+//! Scope: the graph describes the JavaScript the current build's steps emitted —
+//! transform outputs, copied `.js`/`.mjs`, and JavaScript rendered from `*.tera` —
+//! one record per output path, matching the preflight's one-winner-per-path
+//! resolution. It does not cover every file in the output directory: a reused output
+//! directory may retain files from earlier builds that the current run never touched.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

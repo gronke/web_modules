@@ -252,7 +252,9 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     }
 
     // Vendor the transform-runtime helpers the graph shows were injected (the decorator
-    // helper, etc.) — even a non-vendored build may need these.
+    // helper, etc.) — even a non-vendored build may need these. Tera renders later, so
+    // a runtime import appearing only in rendered JS is not auto-vendored — it surfaces
+    // in the unresolved check below instead.
     if graph.uses_runtime_helpers() {
         importmap.extend(vendor_transform_runtime(opts.out, opts.mount)?);
     }
@@ -600,6 +602,45 @@ mod tests {
         let message = err.to_string();
         assert!(
             message.contains("logo.svg") && message.contains("--skip-duplicates"),
+            "got: {message}"
+        );
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn build_analyzes_tera_rendered_js() {
+        // JavaScript rendered from a template joins the graph: its unresolvable bare
+        // import fails the build like any other emitted module's would.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.js.tera"), "import \"missing-package\";").unwrap();
+
+        let err = build(&opts(std::slice::from_ref(&src), &out)).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("missing-package"),
+            "the rendered module's import is validated; got: {message}"
+        );
+    }
+
+    #[cfg(all(feature = "tera", feature = "typescript"))]
+    #[test]
+    fn build_tera_rendered_mjs_must_parse() {
+        // A rendered `.mjs` is unambiguously a module; when the rendered text does not
+        // parse, the build fails naming the template.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("worker.mjs.tera"), "var await = 1;").unwrap();
+
+        let err = build(&opts(std::slice::from_ref(&src), &out)).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("worker.mjs.tera")
+                && message.contains("does not parse as an ES module"),
             "got: {message}"
         );
     }

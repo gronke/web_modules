@@ -144,12 +144,34 @@ impl Preflight for TeraStep {
 
 #[cfg(feature = "tera")]
 impl Step for TeraStep {
-    fn emit(&self, cx: &EmitCx<'_>, src: &Path, _rel: &Path, dest: &Path) -> Result<Emitted> {
+    fn emit(&self, cx: &EmitCx<'_>, src: &Path, rel: &Path, dest: &Path) -> Result<Emitted> {
         let mut ctx = crate::templates::Context::new();
         ctx.insert("importmap", &cx.importmap.to_script_tag());
         let rendered = crate::templates::render_file(src, &ctx)?;
+
+        // A template can render JavaScript (`app.js.tera`); the result joins the
+        // module graph like any other emitted JS, read from the rendered text before
+        // the write. A rendered `.mjs` must parse — the browser would fail on it —
+        // and a rendered `.js` that parses under neither goal warns, matching copies.
+        let ext = dest.extension().and_then(|x| x.to_str()).unwrap_or("");
+        let imports = if ["js", "mjs"].iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+            let module_only = ext.eq_ignore_ascii_case("mjs");
+            let read = crate::module_graph::imports_from_source(&rendered, module_only).map_err(
+                |reason| crate::Error::Build(format!("web-modules: {}: {reason}", rel.display())),
+            )?;
+            if !read.parsed {
+                crate::static_files::build_warning(&format!(
+                    "web-modules: {}: renders neither a module nor a classic script; \
+                     its imports are not validated",
+                    rel.display()
+                ));
+            }
+            Some(read.imports)
+        } else {
+            None
+        };
         std::fs::write(dest, rendered)?;
-        Ok(Emitted::default())
+        Ok(Emitted { imports })
     }
 }
 

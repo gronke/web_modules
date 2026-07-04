@@ -24,6 +24,10 @@ pub mod templates;
 mod pipeline;
 pub use pipeline::*;
 
+// The preflight-capable step abstraction the pipeline (and the dev server's duplicate
+// warnings) run on: every stage states what it would emit before anything is written.
+pub(crate) mod steps;
+
 // The fluent builder over `build()` / `BuildOptions`, re-exported at the crate root as
 // `web_modules::Build` (and `web_modules::build::Build`). Behind the `builder` feature so the bare
 // struct API can be used without it.

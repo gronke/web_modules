@@ -54,8 +54,8 @@ pub(crate) fn content_type(path: &str) -> String {
 /// Extensions of *source* files the toolchain compiles rather than serves: `.ts`/
 /// `.tsx`/`.mts` → `.js`, `.scss` → `.css`, `.tera` → its rendered target. Such
 /// originals are kept out of HTTP responses; the client only ever gets the compiled
-/// output.
-const SOURCE_EXTENSIONS: [&str; 5] = ["ts", "tsx", "mts", "scss", "tera"];
+/// output. One list with the static-copy stage, so build and dev hide the same set.
+use crate::static_files::SOURCE_EXTENSIONS;
 
 /// Whether `path`'s extension marks it as a [source file](SOURCE_EXTENSIONS), matched
 /// **case-insensitively**. Case matters for safety: on a case-insensitive filesystem

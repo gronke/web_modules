@@ -49,6 +49,14 @@ macro_rules! source_builder_methods {
                 self
             }
 
+            /// Allow duplicate output paths, keeping the highest-precedence source
+            /// for each contested path (default off: `build` fails on a conflict and
+            /// `dev` warns about it).
+            pub fn skip_duplicates(mut self, on: bool) -> Self {
+                self.processors.skip_duplicates = on;
+                self
+            }
+
             /// Decorator lowering for the TypeScript transform (default
             /// [`Decorators::Lit`](crate::Decorators::Lit)).
             pub fn decorators(mut self, decorators: crate::Decorators) -> Self {

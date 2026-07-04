@@ -59,6 +59,17 @@ Options:
 
 `build` is the **static counterpart of `dev`** — same source roots and processors, emitted to `--out` instead of served — and it vendors npm only when you pass `--package`/`--manifest`; `vendor` just fetches dependencies into `web_modules/`. Each compiler processor (typescript, scss, tera, minify, gzip) has a `--<name>` / `--no-<name>` toggle, and `--no-default-features` turns the default-on set (typescript, scss, tera) off so you re-enable them individually. Run `web-modules <command> --help` for flags.
 
+### HTML policy
+
+The build never reads or rewrites your HTML.
+Pages are only generated where you opt in: a `*.tera` template (rendered with the generated import map as the `{{ importmap }}` variable), or the `--html`/`--template` fallback when no source provides an `index.html` at all.
+The generated import map is the contract — available as `importmap.json`, the `{{ importmap }}` Tera variable, and the `{importmap}` placeholder — and it is the only map the unresolved-import check validates against; a hand-authored page owns its own inline map.
+
+### Duplicate output paths
+
+When two sources claim one output path — `index.html` next to `index.html.tera`, `app.js` next to `app.ts`, `style.css` next to `style.scss`, or the same relative path in two roots — `build` fails before writing anything and lists every conflict; `dev` warns on the console instead.
+`--skip-duplicates` opts into precedence: the earlier root wins, and within a root a Tera template beats a literal file beats a transformed sibling — the same rule in `build` and `dev`.
+
 ## Library
 
 ```toml

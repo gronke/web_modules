@@ -9,6 +9,7 @@
 //! vendors and composes the inputs.
 
 pub mod importmap;
+pub mod module_graph;
 pub mod mount;
 pub mod reject;
 pub mod static_files;

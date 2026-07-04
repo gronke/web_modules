@@ -182,24 +182,36 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     };
 
     // Compile each root last-to-first, so the FIRST root wins a path conflict (it is
-    // written last, overwriting) — the order the dev server overlays roots in.
+    // written last, overwriting) — the order the dev server overlays roots in. Each file
+    // records what it imports as it is emitted, so the module graph is assembled here
+    // rather than by re-reading the output tree afterward. The graph upserts by output
+    // path in this same write order, so a shadowed file's record is replaced by the
+    // file that actually ships — across roots and when a copied `.js` overwrites a
+    // transformed sibling within one root.
+    let mut graph = crate::module_graph::ModuleGraph::new();
     for root in opts.roots.iter().rev() {
         #[cfg(feature = "typescript")]
         if opts.processors.typescript {
-            crate::typescript::compile_directory_with(root, opts.out, &transpile)?;
+            let nodes = crate::typescript::compile_directory_capturing(root, opts.out, &transpile)?;
+            graph.extend(nodes);
         }
         #[cfg(feature = "scss")]
         if opts.processors.scss {
             crate::scss::compile_directory(root, opts.out, &load_paths)?;
         }
         // Carry across everything the processors don't transform (HTML, images, JSON, …);
-        // sources (`.ts`/`.scss`/`.tera`) are skipped by `copy_static`.
-        crate::static_files::copy_static(root, opts.out, &opts.processors.reject)?;
+        // sources (`.ts`/`.scss`/`.tera`) are skipped by `copy_static`. A verbatim `.js`
+        // joins the graph too, read at copy time.
+        let (_copied, nodes) =
+            crate::static_files::copy_static_capturing(root, opts.out, &opts.processors.reject)?;
+        graph.extend(nodes);
     }
 
-    // Resolve the runtime helpers the transform emitted (decorator helper, etc.) — even a
-    // non-vendored build may need these.
-    importmap.extend(vendor_transform_runtime(opts.out, opts.mount)?);
+    // Vendor the transform-runtime helpers the graph shows were injected (the decorator
+    // helper, etc.) — even a non-vendored build may need these.
+    if graph.uses_runtime_helpers() {
+        importmap.extend(vendor_transform_runtime(opts.out, opts.mount)?);
+    }
 
     // Fail the build if any emitted module imports a bare specifier the generated
     // import map can't resolve (a transform runtime helper, a forgotten dependency,
@@ -207,7 +219,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     // applies to a non-vendored build: importing a bare specifier you didn't vendor
     // is a real error. The generated map is the only validation target: the build
     // never reads a page back, so a hand-authored `index.html` owns its inline map.
-    let unresolved = unresolved_imports(opts.out, &importmap)?;
+    let unresolved = graph.unresolved(&importmap);
     if !unresolved.is_empty() {
         let details = unresolved
             .iter()
@@ -276,108 +288,14 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Bare module specifiers from an emitted module's `import`/`export … from` and
-/// dynamic `import()` statements (covers oxc codegen's output forms).
-fn module_specifiers(js: &str) -> Vec<String> {
-    const PATTERNS: &[&str] = &[
-        "from \"",
-        "from '",
-        "import \"",
-        "import '",
-        "import(\"",
-        "import('",
-    ];
-    let mut specs = Vec::new();
-    for pat in PATTERNS {
-        // Every pattern ends in its quote char; skip defensively if one were empty.
-        let Some(quote) = pat.chars().last() else {
-            continue;
-        };
-        let mut from = 0;
-        while let Some(p) = js[from..].find(pat) {
-            let start = from + p + pat.len();
-            match js[start..].find(quote) {
-                Some(end) => {
-                    specs.push(js[start..start + end].to_string());
-                    from = start + end + 1;
-                }
-                None => break,
-            }
-        }
-    }
-    specs
-}
-
-/// A *bare* specifier (resolved via the import map), not a relative/absolute/URL one.
-fn is_bare(spec: &str) -> bool {
-    !(spec.starts_with('.')
-        || spec.starts_with('/')
-        || spec.contains("://")
-        || spec.starts_with("data:"))
-}
-
-/// Emitted (non-vendored) `.js` under `dir` whose bare imports the `importmap`
-/// can't resolve, as `(relative path, specifier)`.
-fn unresolved_imports(
-    dir: &Path,
-    importmap: &crate::importmap::Importmap,
-) -> Result<Vec<(String, String)>> {
-    let mut out = Vec::new();
-    for entry in walkdir::WalkDir::new(dir)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("js") {
-            continue;
-        }
-        // Vendored modules resolve among themselves; only check our emitted code.
-        if path.components().any(|c| c.as_os_str() == "web_modules") {
-            continue;
-        }
-        let js = std::fs::read_to_string(path)?;
-        for spec in module_specifiers(&js) {
-            if is_bare(&spec) && !importmap.resolves(&spec) {
-                let rel = path.strip_prefix(dir).unwrap_or(path).display().to_string();
-                out.push((rel, spec));
-            }
-        }
-    }
-    Ok(out)
-}
-
 /// npm `@oxc-project/runtime` range; tracks the `oxc_*` crate version.
 const OXC_RUNTIME_RANGE: &str = "^0.137";
 
-/// Vendor the oxc runtime helpers the transform emitted (e.g. the legacy-decorator
-/// `@oxc-project/runtime/helpers/decorate`) so their bare imports resolve. Scans emitted JS under
-/// `out`; vendors `@oxc-project/runtime` when used, else returns an empty map. `build` calls this.
+/// Vendor the oxc transform runtime (`@oxc-project/runtime`) so the helper imports the
+/// transform injected — e.g. the legacy-decorator `@oxc-project/runtime/helpers/decorate`
+/// — resolve. `build` calls this only when the module graph shows a helper was injected
+/// (`ModuleGraph::uses_runtime_helpers`), so it vendors unconditionally here.
 pub fn vendor_transform_runtime(out: &Path, mount: &str) -> Result<crate::importmap::Importmap> {
-    let mut uses_runtime = false;
-    for entry in walkdir::WalkDir::new(out)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("js") {
-            continue;
-        }
-        // Vendored modules carry their own imports; only scan our emitted output.
-        if path.components().any(|c| c.as_os_str() == "web_modules") {
-            continue;
-        }
-        let js = std::fs::read_to_string(path)?;
-        if module_specifiers(&js)
-            .iter()
-            .any(|s| is_bare(s) && s.starts_with("@oxc-project/runtime"))
-        {
-            uses_runtime = true;
-            break;
-        }
-    }
-    if !uses_runtime {
-        return Ok(crate::importmap::Importmap::new());
-    }
     vendor::vendor(
         &out.join("web_modules"),
         mount,
@@ -467,34 +385,6 @@ mod tests {
     }
 
     #[test]
-    fn scanner_and_bare_classification() {
-        let js = "import { a } from \"lit\";\n\
-                  import _d from \"@oxc-project/runtime/helpers/decorate\";\n\
-                  import \"./local.js\";\n\
-                  const m = import(\"bootstrap\");";
-        let specs = module_specifiers(js);
-        assert!(specs.contains(&"lit".to_string()));
-        assert!(specs.contains(&"@oxc-project/runtime/helpers/decorate".to_string()));
-        assert!(specs.contains(&"./local.js".to_string()));
-        assert!(specs.contains(&"bootstrap".to_string()));
-        assert!(is_bare("lit") && is_bare("@oxc-project/runtime/helpers/decorate"));
-        assert!(!is_bare("./local.js") && !is_bare("/x.js") && !is_bare("https://h/y.js"));
-    }
-
-    #[test]
-    fn vendor_transform_runtime_is_noop_without_helpers() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("app.js"),
-            "import { LitElement } from \"lit\";",
-        )
-        .unwrap();
-        // No @oxc-project/runtime import -> nothing vendored, no network.
-        let map = vendor_transform_runtime(dir.path(), "/web_modules").unwrap();
-        assert!(!map.resolves("@oxc-project/runtime/helpers/decorate"));
-    }
-
-    #[test]
     #[ignore = "network: downloads @oxc-project/runtime from the npm registry"]
     fn vendor_transform_runtime_resolves_the_decorator_helper() {
         let dir = tempfile::tempdir().unwrap();
@@ -509,30 +399,6 @@ mod tests {
             .path()
             .join("web_modules/@oxc-project/runtime/src/helpers/esm/decorate.js")
             .is_file());
-    }
-
-    #[test]
-    fn flags_unresolved_app_import_but_skips_vendored() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("app.js"),
-            "import { LitElement } from \"lit\";\n\
-             import _d from \"@oxc-project/runtime/helpers/decorate\";",
-        )
-        .unwrap();
-        // A vendored module with its own bare import is ignored.
-        std::fs::create_dir_all(dir.path().join("web_modules/lit")).unwrap();
-        std::fs::write(dir.path().join("web_modules/lit/index.js"), "import \"x\";").unwrap();
-
-        let mut map = Importmap::new();
-        map.insert("lit", "/web_modules/lit/index.js");
-        let unresolved = unresolved_imports(dir.path(), &map).unwrap();
-        assert_eq!(
-            unresolved.len(),
-            1,
-            "only the helper import is unresolved; got {unresolved:?}"
-        );
-        assert!(unresolved[0].1.starts_with("@oxc-project/runtime"));
     }
 
     #[cfg(feature = "tera")]
@@ -664,6 +530,131 @@ mod tests {
             index.contains("FROM_A"),
             "first root wins a conflict; got: {index}"
         );
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn build_graph_follows_root_precedence() {
+        // The first root wins a path conflict (it is written last). The graph must
+        // describe the winner: a shadowed fallback file with an unresolvable import
+        // must not fail the build, and the winning file with one must.
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary");
+        let fallback = dir.path().join("fallback");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&fallback).unwrap();
+        std::fs::write(primary.join("app.js"), "export const ok = true;").unwrap();
+        std::fs::write(fallback.join("app.js"), "import \"missing-package\";").unwrap();
+
+        let roots = vec![primary.clone(), fallback.clone()];
+        build(&opts(&roots, &out)).unwrap();
+        let shipped = std::fs::read_to_string(out.join("app.js")).unwrap();
+        assert!(
+            shipped.contains("ok"),
+            "the first root's file ships; got:\n{shipped}"
+        );
+
+        // Inverse: the winner itself carries the unresolvable import — that is an error.
+        std::fs::write(primary.join("app.js"), "import \"missing-package\";").unwrap();
+        std::fs::write(fallback.join("app.js"), "export const ok = true;").unwrap();
+        let out2 = dir.path().join("out2");
+        let err = build(&opts(&roots, &out2)).unwrap_err();
+        assert!(matches!(err, Error::Build(_)), "got {err:?}");
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn build_graph_follows_copy_over_transform_precedence() {
+        // Within one root the static copy runs after the transform, so a literal
+        // `app.js` overwrites the `app.js` emitted from `app.ts` — and the graph must
+        // describe the copied file, in both directions.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        // The transform output is shadowed: its unresolvable import must not count …
+        std::fs::write(
+            src.join("app.ts"),
+            "import { x } from \"missing-package\";\nexport const y = x;",
+        )
+        .unwrap();
+        std::fs::write(src.join("app.js"), "export const ok = true;").unwrap();
+        let out = dir.path().join("out");
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        let shipped = std::fs::read_to_string(out.join("app.js")).unwrap();
+        assert!(
+            shipped.contains("ok"),
+            "the copied file overwrites the transformed one; got:\n{shipped}"
+        );
+
+        // … and the copied file's own unresolvable import must.
+        std::fs::write(src.join("app.ts"), "export const y = 1;").unwrap();
+        std::fs::write(src.join("app.js"), "import \"missing-package\";").unwrap();
+        let out2 = dir.path().join("out2");
+        let err = build(&opts(std::slice::from_ref(&src), &out2)).unwrap_err();
+        assert!(matches!(err, Error::Build(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn build_non_utf8_winner_replaces_shadowed_record() {
+        // A non-UTF-8 winning file still records its write, so the shadowed fallback
+        // file's unresolvable import must not fail the build — the content it described
+        // no longer ships.
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary");
+        let fallback = dir.path().join("fallback");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&primary).unwrap();
+        std::fs::create_dir_all(&fallback).unwrap();
+        std::fs::write(primary.join("app.js"), [0xFF, 0xFE, 0x80, b';']).unwrap();
+        std::fs::write(fallback.join("app.js"), "import \"missing-package\";").unwrap();
+
+        let roots = vec![primary, fallback];
+        build(&opts(&roots, &out)).unwrap();
+        assert_eq!(
+            std::fs::read(out.join("app.js")).unwrap(),
+            [0xFF, 0xFE, 0x80, b';'],
+            "the winning bytes ship unchanged"
+        );
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn build_non_utf8_copy_replaces_transformed_record() {
+        // The copied non-UTF-8 `app.js` overwrites the `app.js` emitted from `app.ts`,
+        // so the transform's unresolvable import must not fail the build either.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("app.ts"),
+            "import { x } from \"missing-package\";\nexport const y = x;",
+        )
+        .unwrap();
+        std::fs::write(src.join("app.js"), [0xFF, 0xFE, 0x80, b';']).unwrap();
+
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn build_checks_classic_script_dynamic_imports() {
+        // A copied classic script (`await` as an identifier, so only the script goal
+        // parses) can still dynamically import through the document's import map — an
+        // unresolvable literal specifier in it is a build error.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("legacy.js"),
+            "var await = 1;\nimport(\"missing-package\");",
+        )
+        .unwrap();
+
+        let err = build(&opts(std::slice::from_ref(&src), &out)).unwrap_err();
+        assert!(matches!(err, Error::Build(_)), "got {err:?}");
     }
 
     #[test]

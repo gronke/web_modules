@@ -116,7 +116,9 @@ impl ModuleGraph {
         let mut out = Vec::new();
         for (path, imports) in &self.nodes {
             for import in imports {
-                if is_bare(&import.specifier) && !importmap.resolves(&import.specifier) {
+                if classify(&import.specifier) == SpecifierClass::Bare
+                    && !importmap.resolves(&import.specifier)
+                {
                     out.push((path.display().to_string(), import.specifier.clone()));
                 }
             }
@@ -125,16 +127,64 @@ impl ModuleGraph {
     }
 }
 
-/// A *bare* specifier (resolved via the import map), not a relative / absolute / URL one.
-pub fn is_bare(spec: &str) -> bool {
-    !(spec.starts_with('.')
-        || spec.starts_with('/')
-        || spec.contains("://")
-        || spec.starts_with("data:"))
+/// How the browser treats a module specifier before any import map is consulted — the
+/// split the WHATWG "resolve a module specifier" algorithm makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpecifierClass {
+    /// Carries a URL scheme (`https:`, `data:`, `blob:`, `about:`, `node:`, a custom
+    /// scheme, …) — resolved as a URL, never through the import map.
+    Url,
+    /// Starts with `/`, `./` or `../` — resolved against the importing module's URL.
+    Relative,
+    /// Everything else — resolvable only through the import map.
+    Bare,
+}
+
+/// Classify `spec` by URL grammar, in order: a scheme prefix (an ASCII letter, then
+/// ASCII letters/digits/`+`/`-`/`.`, then `:`) makes it a URL; a `/`, `./` or `../`
+/// prefix makes it relative; anything else is bare. The one classifier every check
+/// shares, so the graph and the resolution report cannot disagree about a specifier.
+pub fn classify(spec: &str) -> SpecifierClass {
+    if has_url_scheme(spec) {
+        SpecifierClass::Url
+    } else if spec.starts_with('/') || spec.starts_with("./") || spec.starts_with("../") {
+        SpecifierClass::Relative
+    } else {
+        SpecifierClass::Bare
+    }
+}
+
+/// Whether `spec` starts with a URL scheme per the URL grammar: an ASCII letter, then
+/// any run of ASCII letters, digits, `+`, `-` or `.`, terminated by `:`.
+fn has_url_scheme(spec: &str) -> bool {
+    let mut chars = spec.chars();
+    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
+        return false;
+    }
+    for c in chars {
+        match c {
+            ':' => return true,
+            c if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') => {}
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn is_runtime_import(spec: &str) -> bool {
     spec == RUNTIME_MODULE || spec.starts_with(&format!("{RUNTIME_MODULE}/"))
+}
+
+/// What reading a verbatim source file yielded: the imports found, and whether the
+/// file actually parsed — an empty import list from a parse failure is a different
+/// fact than a parsed file that imports nothing, and the caller may want to warn.
+#[derive(Debug)]
+pub struct SourceImports {
+    pub imports: Vec<ModuleImport>,
+    /// False when the file parsed under neither the module nor the classic-script
+    /// goal, so nothing is known about its imports. The lexical fallback (without the
+    /// `typescript` feature) cannot detect a parse failure and always reports true.
+    pub parsed: bool,
 }
 
 /// The imports of a verbatim source file (a hand-written `.js`/`.mjs` copied
@@ -147,8 +197,8 @@ fn is_runtime_import(spec: &str) -> bool {
 ///   dynamic `import()` is legal there and resolves through the document's import map,
 ///   so its literal specifiers are still captured (import declarations are module-only
 ///   and cannot occur).
-/// - A file failing both goals yields no imports — it is copied unchanged, and the
-///   empty set records that nothing resolvable is known about it.
+/// - A file failing both goals yields no imports and reports `parsed == false` — it is
+///   copied unchanged, and the caller can surface that its imports are unknown.
 ///
 /// Never reads from a recovered AST: a partial import set from error recovery would
 /// look authoritative without being it.
@@ -161,7 +211,7 @@ fn is_runtime_import(spec: &str) -> bool {
 pub fn imports_from_source(
     js: &str,
     module_only: bool,
-) -> std::result::Result<Vec<ModuleImport>, String> {
+) -> std::result::Result<SourceImports, String> {
     #[cfg(feature = "typescript")]
     return imports_from_source_ast(js, module_only);
     #[cfg(not(feature = "typescript"))]
@@ -170,7 +220,10 @@ pub fn imports_from_source(
         let mut imports = Vec::new();
         static_lexical(js, &mut imports);
         dynamic_lexical(js, &mut imports);
-        Ok(imports)
+        Ok(SourceImports {
+            imports,
+            parsed: true,
+        })
     }
 }
 
@@ -180,7 +233,7 @@ pub fn imports_from_source(
 fn imports_from_source_ast(
     js: &str,
     module_only: bool,
-) -> std::result::Result<Vec<ModuleImport>, String> {
+) -> std::result::Result<SourceImports, String> {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
@@ -190,7 +243,10 @@ fn imports_from_source_ast(
     if !parsed.diagnostics.has_errors() {
         static_from_program(&parsed.program, &mut imports);
         dynamic_from_program(&parsed.program, &mut imports);
-        return Ok(imports);
+        return Ok(SourceImports {
+            imports,
+            parsed: true,
+        });
     }
     if module_only {
         let first = parsed
@@ -204,8 +260,15 @@ fn imports_from_source_ast(
     let script = Parser::new(&allocator, js, SourceType::script()).parse();
     if !script.diagnostics.has_errors() {
         dynamic_from_program(&script.program, &mut imports);
+        return Ok(SourceImports {
+            imports,
+            parsed: true,
+        });
     }
-    Ok(imports)
+    Ok(SourceImports {
+        imports: Vec::new(),
+        parsed: false,
+    })
 }
 
 /// Static `import` / `export … from` specifiers from a parsed program's top-level module
@@ -324,10 +387,50 @@ mod tests {
     }
 
     #[test]
-    fn is_bare_classification() {
-        assert!(is_bare("lit") && is_bare("@oxc-project/runtime/helpers/decorate"));
-        assert!(!is_bare("./local.js") && !is_bare("/x.js") && !is_bare("https://h/y.js"));
-        assert!(!is_bare("data:text/javascript,0"));
+    fn classify_follows_url_grammar() {
+        use SpecifierClass::*;
+        for (spec, want) in [
+            ("lit", Bare),
+            ("@oxc-project/runtime/helpers/decorate", Bare),
+            (".hidden", Bare),     // relative means exactly `/`, `./` or `../`
+            ("1nope:x", Bare),     // a scheme starts with a letter
+            ("no scheme:x", Bare), // a space ends the scheme candidate
+            ("./local.js", Relative),
+            ("../up.js", Relative),
+            ("/x.js", Relative),
+            ("https://h/y.js", Url),
+            ("data:text/javascript,0", Url),
+            ("blob:https://origin/uuid", Url),
+            ("about:blank", Url),
+            ("node:fs", Url),
+            ("file:///x.js", Url),
+            ("custom+scheme.v1:thing", Url),
+        ] {
+            assert_eq!(classify(spec), want, "classify({spec:?})");
+        }
+    }
+
+    #[test]
+    fn unresolved_skips_url_scheme_specifiers() {
+        // `blob:`/`node:`/`about:` imports resolve as URLs, never through the import
+        // map — they must not be reported as unresolved bare imports.
+        let mut graph = ModuleGraph::new();
+        graph.insert(
+            "app.js",
+            vec![
+                ModuleImport::new("node:fs".into(), false),
+                ModuleImport::new("blob:https://origin/uuid".into(), true),
+                ModuleImport::new("about:blank".into(), false),
+                ModuleImport::new("missing-package".into(), false),
+            ],
+        );
+        let unresolved = graph.unresolved(&crate::importmap::Importmap::new());
+        assert_eq!(
+            unresolved.len(),
+            1,
+            "only the bare specifier is unresolved; got {unresolved:?}"
+        );
+        assert_eq!(unresolved[0].1, "missing-package");
     }
 
     #[test]
@@ -336,7 +439,7 @@ mod tests {
                   import _d from \"@oxc-project/runtime/helpers/decorate\";\n\
                   import \"./local.js\";\n\
                   const m = import(\"bootstrap\");";
-        let imports = imports_from_source(js, false).unwrap();
+        let imports = imports_from_source(js, false).unwrap().imports;
         let found = specs(&imports);
         for want in [
             "lit",
@@ -364,7 +467,7 @@ mod tests {
                   import{a as b}from\"lit\";\
                   export{x}from\"bootstrap\";\
                   const m=import(\"lit-html\");";
-        let imports = imports_from_source(js, false).unwrap();
+        let imports = imports_from_source(js, false).unwrap().imports;
         let found = specs(&imports);
         for want in [
             "@oxc-project/runtime/helpers/decorate",
@@ -384,7 +487,7 @@ mod tests {
         let js = "// Satisfies `import nodeCrypto from \"crypto\"` in the browser.\n\
                   const msg = 'import \"nope\" failed';\n\
                   export default {};";
-        let imports = imports_from_source(js, false).unwrap();
+        let imports = imports_from_source(js, false).unwrap().imports;
         let found = specs(&imports);
         assert!(
             !found.contains(&"crypto") && !found.contains(&"nope"),
@@ -401,7 +504,7 @@ mod tests {
         let js =
             "document.addEventListener(\"click\",()=>{import(\"./lazy.js\").then(m=>m.run())});\
                   const load=(n)=>import(n);";
-        let imports = imports_from_source(js, false).unwrap();
+        let imports = imports_from_source(js, false).unwrap().imports;
         let dynamic: Vec<&str> = imports
             .iter()
             .filter(|i| i.kind == SpecifierKind::Dynamic)
@@ -471,12 +574,15 @@ mod tests {
 
     #[cfg(feature = "typescript")]
     #[test]
-    fn unparsable_source_contributes_no_imports() {
+    fn unparsable_source_contributes_no_imports_and_reports_it() {
         // A file that fails both parse goals (broken under the module AND the script
         // grammar) is copied unchanged but adds nothing to the graph — no partial
-        // import set from a recovered AST.
+        // import set from a recovered AST — and the parse failure is reported so the
+        // caller can warn that the file's imports are unknown.
         let js = "import { broken from \"lit\";";
-        assert!(imports_from_source(js, false).unwrap().is_empty());
+        let read = imports_from_source(js, false).unwrap();
+        assert!(read.imports.is_empty());
+        assert!(!read.parsed, "both goals failed, so nothing is known");
     }
 
     #[cfg(feature = "typescript")]
@@ -487,10 +593,11 @@ mod tests {
         // legal in a classic script and resolves through the document's import map,
         // so the script-goal fallback must still record it.
         let js = "var await = 1;\nimport(\"missing-package\");";
-        let imports = imports_from_source(js, false).unwrap();
-        assert_eq!(imports.len(), 1, "got {imports:?}");
-        assert_eq!(imports[0].specifier, "missing-package");
-        assert_eq!(imports[0].kind, SpecifierKind::Dynamic);
+        let read = imports_from_source(js, false).unwrap();
+        assert!(read.parsed, "the classic-script goal parses this");
+        assert_eq!(read.imports.len(), 1, "got {:?}", read.imports);
+        assert_eq!(read.imports[0].specifier, "missing-package");
+        assert_eq!(read.imports[0].kind, SpecifierKind::Dynamic);
     }
 
     #[cfg(feature = "typescript")]
@@ -511,7 +618,7 @@ mod tests {
         let js = "const a = import(`lit`);\n\
                   const b = import(`./local.js`);\n\
                   const c = (name) => import(`pkg/${name}`);";
-        let imports = imports_from_source(js, false).unwrap();
+        let imports = imports_from_source(js, false).unwrap().imports;
         let dynamic: Vec<&str> = imports
             .iter()
             .filter(|i| i.kind == SpecifierKind::Dynamic)

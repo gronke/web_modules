@@ -64,15 +64,28 @@ pub(crate) fn copy_static_capturing(
         // a build error (it is unambiguously a module and the browser would fail on
         // it); a `.js` falls back to the classic-script goal inside
         // `imports_from_source`, and a file that defies both goals — or is not UTF-8 —
-        // contributes an empty import set. The copy itself is byte-for-byte either way.
+        // contributes an empty import set plus a warning, because an empty set from a
+        // parse failure means "unknown", not "imports nothing". The copy itself is
+        // byte-for-byte either way.
         if ["js", "mjs"].iter().any(|e| ext.eq_ignore_ascii_case(e)) {
             let module_only = ext.eq_ignore_ascii_case("mjs");
-            let imports = match std::fs::read_to_string(path) {
-                Ok(source) => imports_from_source(&source, module_only).map_err(|reason| {
-                    crate::Error::Build(format!("web-modules: {}: {reason}", rel.display()))
-                })?,
-                Err(_) => Vec::new(),
+            let (imports, unanalyzable) = match std::fs::read_to_string(path) {
+                Ok(source) => {
+                    let read = imports_from_source(&source, module_only).map_err(|reason| {
+                        crate::Error::Build(format!("web-modules: {}: {reason}", rel.display()))
+                    })?;
+                    let reason =
+                        (!read.parsed).then_some("does not parse as a module or classic script");
+                    (read.imports, reason)
+                }
+                Err(_) => (Vec::new(), Some("is not UTF-8 text")),
             };
+            if let Some(reason) = unanalyzable {
+                build_warning(&format!(
+                    "web-modules: {}: {reason}; its imports are not validated",
+                    rel.display()
+                ));
+            }
             nodes.push(ModuleNode {
                 path: rel.to_path_buf(),
                 imports,
@@ -82,6 +95,17 @@ pub(crate) fn copy_static_capturing(
         count += 1;
     }
     Ok((count, nodes))
+}
+
+/// Emit a build warning: as a `cargo:warning` directive when running inside a build
+/// script (cargo sets `OUT_DIR`, and a build script's stderr is hidden unless it
+/// fails), else straight to stderr.
+pub(crate) fn build_warning(msg: &str) {
+    if std::env::var_os("OUT_DIR").is_some() {
+        println!("cargo:warning={msg}");
+    } else {
+        eprintln!("{msg}");
+    }
 }
 
 #[cfg(test)]

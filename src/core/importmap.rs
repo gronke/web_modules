@@ -21,6 +21,10 @@ use std::path::Path;
 use crate::{Error, Result};
 
 /// An ES module import map (`{ "imports": { … } }`).
+///
+/// This is the imports-only dialect the build emits and validates — not a WHATWG
+/// import-map processor. `scopes`, base-URL resolution and multi-map merging are out
+/// of scope, because the build only ever interprets the map it generated itself.
 #[derive(Default, Debug, Clone, PartialEq, Eq)]
 pub struct Importmap {
     imports: BTreeMap<String, String>,
@@ -86,11 +90,6 @@ impl Importmap {
                 .any(|k| k.ends_with('/') && specifier.starts_with(k.as_str()))
     }
 
-    /// The URL a specifier maps to, when the map carries an exact entry for it.
-    pub fn get(&self, specifier: &str) -> Option<&str> {
-        self.imports.get(specifier).map(String::as_str)
-    }
-
     /// Read an import-map fragment file: a JSON document whose top-level
     /// `"imports"` object has string values.
     pub fn from_json_file(path: &Path) -> Result<Self> {
@@ -118,41 +117,6 @@ impl Importmap {
             map.insert(key.clone(), url.to_string());
         }
         Ok(map)
-    }
-
-    /// The import map a page ships: every inline `<script type="importmap">` in
-    /// `html`, merged in document order with the FIRST occurrence winning per key —
-    /// the browser's rule for multiple import maps. `None` when the document carries
-    /// no import map; a present but malformed map is an error, because the browser
-    /// would reject it too.
-    pub fn from_inline_html(html: &str) -> Result<Option<Self>> {
-        let mut merged: Option<Self> = None;
-        let mut from = 0;
-        while let Some(found) = html[from..].find("<script") {
-            let tag_start = from + found;
-            let Some(tag_len) = html[tag_start..].find('>') else {
-                break;
-            };
-            let tag_end = tag_start + tag_len;
-            let tag = &html[tag_start..tag_end];
-            from = tag_end + 1;
-            if !tag.contains(r#"type="importmap""#) && !tag.contains("type='importmap'") {
-                continue;
-            }
-            let Some(body_len) = html[from..].find("</script>") else {
-                break;
-            };
-            let body = &html[from..from + body_len];
-            from += body_len + "</script>".len();
-            let map = Self::from_json_str(body, "inline import map")?;
-            let target = merged.get_or_insert_with(Self::new);
-            for (key, url) in &map.imports {
-                if !target.imports.contains_key(key) {
-                    target.insert(key.clone(), url.clone());
-                }
-            }
-        }
-        Ok(merged)
     }
 
     /// Serialize to a pretty JSON document.
@@ -297,41 +261,6 @@ mod tests {
         fs::write(&bad, r#"{"nope":{}}"#).unwrap();
         assert!(matches!(
             Importmap::from_json_file(&bad).unwrap_err(),
-            Error::ImportMap(_)
-        ));
-    }
-
-    #[test]
-    fn from_inline_html_merges_first_wins() {
-        let html = r#"<!doctype html>
-<script type="importmap">{"imports": {"a": "./one.js"}}</script>
-<script type="importmap">{"imports": {"a": "./two.js", "b": "./b.js"}}</script>"#;
-        let map = Importmap::from_inline_html(html).unwrap().unwrap();
-        assert_eq!(map.get("a"), Some("./one.js"), "the first map wins per key");
-        assert_eq!(map.get("b"), Some("./b.js"), "later maps add new keys");
-    }
-
-    #[test]
-    fn from_inline_html_ignores_other_scripts_and_accepts_single_quotes() {
-        let html = r#"<script>console.log(1)</script>
-<script type='importmap'>{"imports": {"lit": "./web_modules/lit/index.js"}}</script>
-<script type="module" src="./app.js"></script>"#;
-        let map = Importmap::from_inline_html(html).unwrap().unwrap();
-        assert!(map.resolves("lit"));
-    }
-
-    #[test]
-    fn from_inline_html_none_without_a_map() {
-        assert!(Importmap::from_inline_html("<p>hi</p><script>1</script>")
-            .unwrap()
-            .is_none());
-    }
-
-    #[test]
-    fn from_inline_html_rejects_a_malformed_map() {
-        let html = r#"<script type="importmap">{not json}</script>"#;
-        assert!(matches!(
-            Importmap::from_inline_html(html).unwrap_err(),
             Error::ImportMap(_)
         ));
     }

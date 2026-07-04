@@ -29,7 +29,7 @@ features = ["full"]
 default = ["typescript", "scss", "tera", "builder"]
 
 # TypeScript / modern-JS → browser JS via oxc (incl. legacy decorators for Lit).
-typescript = ["dep:oxc_allocator", "dep:oxc_parser", "dep:oxc_semantic", "dep:oxc_transformer", "dep:oxc_codegen", "dep:oxc_span"]
+typescript = ["dep:oxc_allocator", "dep:oxc_ast", "dep:oxc_ast_visit", "dep:oxc_parser", "dep:oxc_semantic", "dep:oxc_transformer", "dep:oxc_codegen", "dep:oxc_span"]
 # SCSS → CSS via grass.
 scss = ["dep:grass"]
 # HTML templating (e.g. importmap injection) via Tera.
@@ -95,6 +95,8 @@ semver = "1"
 
 # oxc toolchain (TypeScript transform + minify). Optional; pulled by `typescript`/`minify`.
 oxc_allocator = { version = "0.137", optional = true }
+oxc_ast = { version = "0.137", optional = true }
+oxc_ast_visit = { version = "0.137", optional = true }
 oxc_parser = { version = "0.137", optional = true }
 oxc_semantic = { version = "0.137", optional = true }
 oxc_transformer = { version = "0.137", optional = true }

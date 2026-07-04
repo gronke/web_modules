@@ -22,6 +22,7 @@ use oxc_span::SourceType;
 use oxc_transformer::{TransformOptions, Transformer};
 use walkdir::WalkDir;
 
+use crate::module_graph::{ModuleImport, ModuleNode};
 use crate::{Error, Result};
 
 /// Decorator handling for the transform. Defined in the always-compiled [`processors`](super)
@@ -123,6 +124,30 @@ pub fn compile_str(source: &str, path: &Path) -> Result<String> {
 
 /// Like [`compile_str`], but with explicit [`TranspileOptions`].
 pub fn compile_str_with(source: &str, path: &Path, options: &TranspileOptions) -> Result<String> {
+    Ok(compile_str_capturing(source, path, options)?.code)
+}
+
+/// The emitted JS plus the module specifiers it references.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub(crate) struct TranspileOutput {
+    /// The compiled (and, if requested, minified) JavaScript.
+    pub code: String,
+    /// The module specifiers the emitted code imports — static `import` / `export …
+    /// from`, the injected transform-runtime helpers, and dynamic `import()`, all read
+    /// from the final AST after any minification (so an import that dead-code
+    /// elimination removed is not reported). Captured here, at transform time, so the
+    /// build never re-parses or text-scans the output to rediscover them.
+    pub imports: Vec<ModuleImport>,
+}
+
+/// Like [`compile_str_with`], but also returns the module specifiers the emitted code
+/// imports (see [`TranspileOutput`]).
+pub(crate) fn compile_str_capturing(
+    source: &str,
+    path: &Path,
+    options: &TranspileOptions,
+) -> Result<TranspileOutput> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_default();
 
@@ -159,34 +184,46 @@ pub fn compile_str_with(source: &str, path: &Path, options: &TranspileOptions) -
         )));
     }
 
-    if !options.minify {
-        return Ok(Codegen::new().build(&program).code);
-    }
     // Minify as an output option. With `minify`, compress + mangle in the same pass
     // (no re-parse); otherwise codegen still strips whitespace.
-    #[cfg(feature = "minify")]
-    {
-        let ret = oxc_minifier::Minifier::new(oxc_minifier::MinifierOptions::default())
-            .minify(&allocator, &mut program);
-        Ok(Codegen::new()
-            .with_options(CodegenOptions {
-                minify: true,
-                ..CodegenOptions::default()
-            })
-            .with_scoping(ret.scoping)
-            .build(&program)
-            .code)
-    }
-    #[cfg(not(feature = "minify"))]
-    {
-        Ok(Codegen::new()
-            .with_options(CodegenOptions {
-                minify: true,
-                ..CodegenOptions::default()
-            })
-            .build(&program)
-            .code)
-    }
+    let code = if !options.minify {
+        Codegen::new().build(&program).code
+    } else {
+        #[cfg(feature = "minify")]
+        {
+            let ret = oxc_minifier::Minifier::new(oxc_minifier::MinifierOptions::default())
+                .minify(&allocator, &mut program);
+            Codegen::new()
+                .with_options(CodegenOptions {
+                    minify: true,
+                    ..CodegenOptions::default()
+                })
+                .with_scoping(ret.scoping)
+                .build(&program)
+                .code
+        }
+        #[cfg(not(feature = "minify"))]
+        {
+            Codegen::new()
+                .with_options(CodegenOptions {
+                    minify: true,
+                    ..CodegenOptions::default()
+                })
+                .build(&program)
+                .code
+        }
+    };
+
+    // Capture the imports — static `import` / `export … from`, the helpers the transform
+    // injected, and dynamic `import()` — from the final AST, after any minification has
+    // rewritten it: dead-code elimination can drop an import the transform still carried,
+    // and the graph must describe the code that ships. Still structural — the emitted
+    // text is never scanned.
+    let mut imports = Vec::new();
+    crate::module_graph::static_from_program(&program, &mut imports);
+    crate::module_graph::dynamic_from_program(&program, &mut imports);
+
+    Ok(TranspileOutput { code, imports })
 }
 
 /// Compile every `.ts`/`.tsx`/`.mts` under `src_dir` (skipping `_` partials and
@@ -202,7 +239,18 @@ pub fn compile_directory_with(
     out_dir: &Path,
     options: &TranspileOptions,
 ) -> Result<usize> {
-    let mut count = 0;
+    Ok(compile_directory_capturing(src_dir, out_dir, options)?.len())
+}
+
+/// Like [`compile_directory_with`], but returns one [`ModuleNode`] per emitted file —
+/// its output-relative path and the specifiers it imports — so the build can vendor
+/// runtime helpers and verify resolution without re-reading the output tree.
+pub(crate) fn compile_directory_capturing(
+    src_dir: &Path,
+    out_dir: &Path,
+    options: &TranspileOptions,
+) -> Result<Vec<ModuleNode>> {
+    let mut nodes = Vec::new();
     for entry in WalkDir::new(src_dir)
         .follow_links(true)
         .into_iter()
@@ -231,11 +279,14 @@ pub fn compile_directory_with(
             create_dir_all(parent)?;
         }
         let source = read_to_string(path)?;
-        let js = compile_str_with(&source, path, options)?;
-        write(&out, js)?;
-        count += 1;
+        let compiled = compile_str_capturing(&source, path, options)?;
+        write(&out, compiled.code)?;
+        nodes.push(ModuleNode {
+            path: rel.with_extension("js"),
+            imports: compiled.imports,
+        });
     }
-    Ok(count)
+    Ok(nodes)
 }
 
 /// Format an oxc diagnostic slice into a multi-line error message. Generic over
@@ -306,6 +357,72 @@ mod tests {
             standard.contains("count"),
             "Standard preset keeps the field; got:\n{standard}"
         );
+    }
+
+    #[cfg(feature = "minify")]
+    #[test]
+    fn captured_imports_match_the_minified_output() {
+        // Dead-code elimination removes the unreachable dynamic import, so the
+        // captured set must not report it — the graph describes the code that ships.
+        // Without minification the branch survives and the import is real.
+        let src = "if (false) { import(\"gone-package\"); }\nexport const value = 1;";
+        let path = Path::new("m.ts");
+
+        let plain = compile_str_capturing(src, path, &TranspileOptions::default()).unwrap();
+        assert!(
+            plain.imports.iter().any(|i| i.specifier == "gone-package"),
+            "unminified output keeps the branch; got {:?}",
+            plain.imports
+        );
+
+        let minified = compile_str_capturing(
+            src,
+            path,
+            &TranspileOptions {
+                minify: true,
+                ..TranspileOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            !minified.code.contains("gone-package"),
+            "the minifier eliminates the dead branch; got:\n{}",
+            minified.code
+        );
+        assert!(
+            !minified
+                .imports
+                .iter()
+                .any(|i| i.specifier == "gone-package"),
+            "captured imports must match the emitted code; got {:?}",
+            minified.imports
+        );
+    }
+
+    #[cfg(feature = "minify")]
+    #[test]
+    fn minified_capture_still_reports_injected_helpers() {
+        // The decorator helper is used by the lowered output, so it survives
+        // minification — and must still be captured for vendoring.
+        let src = "import { LitElement } from 'lit';\n\
+                   import { customElement } from 'lit/decorators.js';\n\
+                   @customElement('x-el')\n\
+                   export class XEl extends LitElement {}";
+        let out = compile_str_capturing(
+            src,
+            Path::new("x-el.ts"),
+            &TranspileOptions {
+                minify: true,
+                ..TranspileOptions::default()
+            },
+        )
+        .unwrap();
+        let specs: Vec<&str> = out.imports.iter().map(|i| i.specifier.as_str()).collect();
+        assert!(
+            specs.contains(&"@oxc-project/runtime/helpers/decorate"),
+            "helper import captured post-minify; got {specs:?}"
+        );
+        assert!(specs.contains(&"lit"), "used import kept; got {specs:?}");
     }
 
     #[test]

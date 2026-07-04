@@ -10,10 +10,12 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 ### Changed
 
 - refactor(build): runtime-helper vendoring and the unresolved-import check read imports captured at transform and copy time instead of re-scanning the emitted `.js`
+- `build` warns when a copied `.js` parses under neither the module nor the classic-script goal — its imports cannot be validated
 
 ### Fixed
 
 - fix(build): find import specifiers in minified output by reading the AST
+- fix(build): specifiers with a URL scheme (`blob:`, `node:`, `about:`, …) are no longer reported as unresolved bare imports
 
 ## [0.4.0] - 2026-06-28
 

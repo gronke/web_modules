@@ -5,11 +5,13 @@
 //! Sources are [`Mount`]s, each a URL prefix + a source dir; the default is one at
 //! `/`. Resolution is **dir-observation-order-dominant**: most-specific prefix first,
 //! then (among the dirs matching that prefix, **in the order given**) the first that
-//! can produce the requested *target* wins (compile `foo.{ts,tsx,mts}` → `foo.js`,
-//! `foo.scss` → `foo.css`, else serve a static file). So overlaying several dirs at one
-//! prefix resolves "first dir wins", as a side-effect. An optional embedded fallback (a
-//! baked `include_dir!` tree) supplies whatever the source dirs don't: vendored
-//! `web_modules/`, a baked `index.html`. The watcher watches every source dir
+//! can produce the requested *target* wins — render `foo.tera`, else serve a literal
+//! file, else compile `foo.{ts,tsx,mts}` → `foo.js` / `foo.scss` → `foo.css` — the
+//! same precedence the build applies under `--skip-duplicates`. So overlaying several
+//! dirs at one prefix resolves "first dir wins", as a side-effect; contested targets
+//! are reported once at startup (silence with `skip_duplicates`). An optional embedded
+//! fallback (a baked `include_dir!` tree) supplies whatever the source dirs don't:
+//! vendored `web_modules/`, a baked `index.html`. The watcher watches every source dir
 //! identically and reloads on any change.
 //!
 //! Enable the `dev` feature.
@@ -154,6 +156,11 @@ fn build_router(
     fallback: Option<&'static Dir<'static>>,
     config: DevConfig,
 ) -> Router {
+    // The same preflight the build runs, warn-only: a contested target is served by
+    // its winner, but the ambiguity is worth a line on the console.
+    for warning in duplicate_warnings(&mounts, &config) {
+        eprintln!("{warning}");
+    }
     let livereload = LiveReloadLayer::new();
     spawn_watcher(mounts.clone(), livereload.reloader());
     let state = DevState {
@@ -166,6 +173,59 @@ fn build_router(
         .fallback(serve_asset)
         .with_state(state)
         .layer(livereload)
+}
+
+/// The duplicate-target warnings the dev server prints at startup: per URL prefix, the
+/// mounted dirs (declaration order) run through the same preflight the build uses, and
+/// every contested target is reported once with its winner. Empty when
+/// `skip_duplicates` is set. Mounts at different prefixes are never compared —
+/// most-specific-prefix routing is deliberate composition, not an accident.
+fn duplicate_warnings(mounts: &[Mount], config: &DevConfig) -> Vec<String> {
+    if config.skip_duplicates {
+        return Vec::new();
+    }
+    let steps = crate::build::steps::enabled_steps(config, Default::default());
+    let preflights: Vec<&dyn crate::build::steps::Preflight> = steps
+        .iter()
+        .map(|step| step.as_ref() as &dyn crate::build::steps::Preflight)
+        .collect();
+    // Group the mounted dirs by URL prefix, keeping declaration order per group.
+    let mut prefixes: Vec<&str> = Vec::new();
+    let mut groups: HashMap<&str, Vec<PathBuf>> = HashMap::new();
+    for mount in mounts {
+        let prefix = mount.url_prefix();
+        if !groups.contains_key(prefix) {
+            prefixes.push(prefix);
+        }
+        groups
+            .entry(prefix)
+            .or_default()
+            .push(mount.dir().to_path_buf());
+    }
+    let mut lines = Vec::new();
+    for prefix in prefixes {
+        let roots = &groups[prefix];
+        let report = crate::build::steps::preflight(roots, &preflights);
+        for conflict in report.conflicts() {
+            let target = if prefix.ends_with('/') {
+                format!("{prefix}{}", conflict.out_rel.display())
+            } else {
+                format!("{prefix}/{}", conflict.out_rel.display())
+            };
+            let winner = &conflict.claimants[0];
+            let losers = conflict.claimants[1..]
+                .iter()
+                .map(|claim| roots[claim.root].join(&claim.rel).display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!(
+                "web-modules: duplicate target {target}: {} wins over {losers} \
+                 (--skip-duplicates silences this)",
+                roots[winner.root].join(&winner.rel).display()
+            ));
+        }
+    }
+    lines
 }
 
 /// Bind `addr` and serve [`dev_router`] over `roots` (all processors on) until the
@@ -225,9 +285,10 @@ fn matching<'a>(state: &'a DevState, requested: &str) -> Vec<(&'a Mount, String)
 
 /// Resolve a request to `(bytes, content-type)`, **dir-observation-order-dominant**:
 /// for each matching mount in order, the first that can produce the requested target
-/// wins — render a `.tera` (checked first, the final-overlay precedence build uses),
-/// else compile a source `.ts`/`.scss`, else serve a static file — then the embedded
-/// fallback.
+/// wins — render a `.tera`, else serve a literal file, else compile a source
+/// `.ts`/`.scss` — then the embedded fallback. The same within-dir precedence the
+/// build's preflight ranks (Tera over a literal over a transformed sibling), so `dev`
+/// and `build` resolve a shadowed target alike.
 fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)>, String> {
     // Reject list: never serve config / secret / source-code paths (see `reject`). Checked on the
     // request string here, and on the resolved file below, so case-folding / a trailing dot can't
@@ -238,10 +299,10 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)
     }
     for (mount, rel) in matching(state, requested) {
         // `/foo.html` (any rendered target) ← render `foo.html.tera` from this dir, the live
-        // counterpart of the build pipeline's tree-wide `.tera`. Checked **first** so a `.tera`
-        // takes precedence over a same-named compiled/static target — matching build, where the
-        // tera pass overlays everything. The `.tera` source itself stays hidden from raw serving
-        // (it's a source extension).
+        // counterpart of the build pipeline's `.tera` step. Checked **first** so a `.tera`
+        // takes precedence over a same-named literal/compiled target — the top of the
+        // build's within-root ranking. The `.tera` source itself stays hidden from raw
+        // serving (it's a source extension).
         #[cfg(feature = "tera")]
         if state.config.tera && !rel.is_empty() {
             if let Some(src) = contained_file(mount.dir(), &format!("{rel}.tera")) {
@@ -253,6 +314,28 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)
                 if !is_partial {
                     let html = compile_cached(state, &src, Kind::Tera)?;
                     return Ok(Some((html, content_type(&rel))));
+                }
+            }
+        }
+        // Literal file in this dir — checked before the compilers, so a literal
+        // `app.js` outranks a sibling `app.ts`, exactly as the build ranks the static
+        // copy over a transform. Never serve a *source* raw (a `.scss`/`.ts` is
+        // reachable only through its compiled target, below). Re-check the resolved
+        // path, not just the request string: on a case-insensitive / name-folding FS
+        // the OS can open a source the request didn't reveal (`app.SCSS`, `app.scss.`).
+        if !rel.is_empty() && !is_source_file(&rel) {
+            if let Some(path) = contained_file(mount.dir(), &rel) {
+                // Re-check the resolved file *name* (the fold-prone part; not the absolute path,
+                // whose parent dirs are out of our control) so OS case-folding / a trailing dot
+                // can't smuggle a rejected file past the lexical check above.
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if state.config.reject.rejects(name) {
+                    crate::reject::warn_rejected(&rel);
+                    return Ok(None);
+                }
+                if !has_source_extension(&path) {
+                    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+                    return Ok(Some((bytes, content_type(&rel))));
                 }
             }
         }
@@ -273,26 +356,6 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)
                 if let Some(src) = contained_file(mount.dir(), &format!("{stem}.scss")) {
                     let css = compile_cached(state, &src, Kind::Scss)?;
                     return Ok(Some((css, "text/css; charset=utf-8".into())));
-                }
-            }
-        }
-        // Static file in this dir — but never serve a *source* raw (a `.scss`/`.ts`
-        // is reachable only through its compiled target, above). Re-check the resolved
-        // path, not just the request string: on a case-insensitive / name-folding FS the
-        // OS can open a source the request didn't reveal (`app.SCSS`, `app.scss.`).
-        if !rel.is_empty() && !is_source_file(&rel) {
-            if let Some(path) = contained_file(mount.dir(), &rel) {
-                // Re-check the resolved file *name* (the fold-prone part; not the absolute path,
-                // whose parent dirs are out of our control) so OS case-folding / a trailing dot
-                // can't smuggle a rejected file past the lexical check above.
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if state.config.reject.rejects(name) {
-                    crate::reject::warn_rejected(&rel);
-                    return Ok(None);
-                }
-                if !has_source_extension(&path) {
-                    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                    return Ok(Some((bytes, content_type(&rel))));
                 }
             }
         }
@@ -453,6 +516,69 @@ mod tests {
         assert!(resolve(&state, "data.json").unwrap().is_some());
         // Even bypassing Layer 1, resolve's own containment blocks the escape.
         assert!(resolve(&state, "../secret").unwrap().is_none());
+    }
+
+    #[test]
+    fn dev_serves_literal_js_over_compiling_sibling_ts() {
+        // A literal `app.js` outranks the sibling `app.ts` — the build's precedence
+        // under `--skip-duplicates`, so dev serves what build would ship.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app.js"), b"literal();").unwrap();
+        std::fs::write(root.join("app.ts"), "export const compiled = 1;").unwrap();
+        let state = state(vec![Mount::root(root)]);
+        let (bytes, _) = resolve(&state, "app.js").unwrap().unwrap();
+        assert_eq!(bytes, b"literal();", "the literal file wins");
+    }
+
+    #[test]
+    fn dev_serves_literal_css_over_scss() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("style.css"), b"a{color:red}").unwrap();
+        std::fs::write(root.join("style.scss"), "a { color: blue; }").unwrap();
+        let state = state(vec![Mount::root(root)]);
+        let (bytes, _) = resolve(&state, "style.css").unwrap().unwrap();
+        assert_eq!(bytes, b"a{color:red}", "the literal file wins");
+    }
+
+    #[test]
+    fn duplicate_warnings_lists_conflicts_and_names_the_winner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app.js"), b"literal();").unwrap();
+        std::fs::write(root.join("app.ts"), "export const compiled = 1;").unwrap();
+
+        let mounts = vec![Mount::root(root)];
+        let warnings = duplicate_warnings(&mounts, &DevConfig::default());
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            warnings[0].contains("/app.js")
+                && warnings[0].contains("app.js wins over")
+                && warnings[0].contains("app.ts")
+                && warnings[0].contains("--skip-duplicates"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn skip_duplicates_suppresses_dev_warnings() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app.js"), b"literal();").unwrap();
+        std::fs::write(root.join("app.ts"), "export const compiled = 1;").unwrap();
+
+        let config = DevConfig {
+            skip_duplicates: true,
+            ..DevConfig::default()
+        };
+        let warnings = duplicate_warnings(&[Mount::root(root)], &config);
+        assert!(warnings.is_empty(), "got {warnings:?}");
     }
 
     #[test]

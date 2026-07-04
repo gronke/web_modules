@@ -201,55 +201,22 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     // non-vendored build may need these.
     importmap.extend(vendor_transform_runtime(opts.out, opts.mount)?);
 
-    // The map the page actually ships is authoritative: a static `index.html` with an
-    // inline `<script type="importmap">` is what the browser resolves against, so the
-    // unresolved check runs against it and its entries must agree with the generated
-    // map. Compared mount-agnostically, because inline maps use relative addresses so
-    // one file works served at / and under /<repo>/. The generated map may carry
-    // surplus (the vendored transform-runtime helpers); only shared entries compare.
-    // A same-named `*.tera` overlays the static file later and receives the generated
-    // map — the existing precedence divergence documented on `render_tera_tree`.
-    let inline = match std::fs::read_to_string(opts.out.join("index.html")) {
-        Ok(html) => crate::importmap::Importmap::from_inline_html(&html)?,
-        Err(_) => None,
-    };
-    if let Some(inline) = &inline {
-        let divergent = inline_divergence(inline, &importmap);
-        if !divergent.is_empty() {
-            let noun = if divergent.len() == 1 {
-                "entry diverges"
-            } else {
-                "entries diverge"
-            };
-            return Err(Error::Build(format!(
-                "web-modules: {} inline import-map {noun} from the generated map - \
-                 update index.html or the vendored specs:\n{}",
-                divergent.len(),
-                divergent.join("\n")
-            )));
-        }
-    }
-
-    // Fail the build if any emitted module imports a bare specifier the effective
+    // Fail the build if any emitted module imports a bare specifier the generated
     // import map can't resolve (a transform runtime helper, a forgotten dependency,
-    // a missing inline entry, …) — so a browser-load failure becomes a clear build
-    // error instead. This still applies to a non-vendored build: importing a bare
-    // specifier you didn't vendor is a real error.
-    let effective = inline.as_ref().unwrap_or(&importmap);
-    let unresolved = unresolved_imports(opts.out, effective)?;
+    // …) — so a browser-load failure becomes a clear build error instead. This still
+    // applies to a non-vendored build: importing a bare specifier you didn't vendor
+    // is a real error. The generated map is the only validation target: the build
+    // never reads a page back, so a hand-authored `index.html` owns its inline map.
+    let unresolved = unresolved_imports(opts.out, &importmap)?;
     if !unresolved.is_empty() {
         let details = unresolved
             .iter()
             .map(|(file, spec)| format!("  {file}: import \"{spec}\""))
             .collect::<Vec<_>>()
             .join("\n");
-        let where_ = if inline.is_some() {
-            "the page's inline import map"
-        } else {
-            "the vendored specs / import map"
-        };
         return Err(Error::Build(format!(
-            "web-modules: {} unresolved bare import(s) - add them to {where_}:\n{details}",
+            "web-modules: {} unresolved bare import(s) - add them to the vendored \
+             specs / import map:\n{details}",
             unresolved.len()
         )));
     }
@@ -351,26 +318,6 @@ fn is_bare(spec: &str) -> bool {
 
 /// Emitted (non-vendored) `.js` under `dir` whose bare imports the `importmap`
 /// can't resolve, as `(relative path, specifier)`.
-/// Inline entries whose target disagrees with the generated map's entry for the same
-/// specifier — almost always a stale hand-edit. Targets compare mount-agnostically:
-/// the generated absolute URL must end with the inline address minus a leading `.`,
-/// so `./web_modules/lit/index.js` matches `/<mount>/web_modules/lit/index.js`.
-fn inline_divergence(
-    inline: &crate::importmap::Importmap,
-    generated: &crate::importmap::Importmap,
-) -> Vec<String> {
-    inline
-        .iter()
-        .filter_map(|(specifier, target)| {
-            let counterpart = generated.get(specifier)?;
-            let suffix = target.trim_start_matches('.');
-            (!counterpart.ends_with(suffix)).then(|| {
-                format!("  \"{specifier}\": inline \"{target}\" vs generated \"{counterpart}\"")
-            })
-        })
-        .collect()
-}
-
 fn unresolved_imports(
     dir: &Path,
     importmap: &crate::importmap::Importmap,
@@ -790,9 +737,10 @@ mod tests {
     }
 
     #[test]
-    fn inline_map_is_authoritative_for_unresolved() {
-        // The page ships its own inline map covering the bare import, so the build
-        // passes even though the generated map is empty.
+    fn build_validates_only_the_generated_map() {
+        // The page's inline map is the page's own business: it does not stand in for
+        // the generated map, so a bare import the generated (here empty) map can't
+        // resolve fails the build even though the page's map covers it.
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         let out = dir.path().join("out");
@@ -808,57 +756,30 @@ mod tests {
         )
         .unwrap();
 
-        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        let err = build(&opts(std::slice::from_ref(&src), &out)).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("unresolved bare import"),
+            "the generated map is the only validation target; got: {message}"
+        );
     }
 
     #[test]
-    fn inline_map_missing_entry_fails() {
-        // An inline map exists, so it is authoritative — and it does not cover the
-        // bare import the emitted module carries.
+    fn build_never_parses_page_html() {
+        // A literal page is copied byte-for-byte and never read back: markup no
+        // import-map parser would accept must not affect the build.
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         let out = dir.path().join("out");
         std::fs::create_dir_all(&src).unwrap();
-        std::fs::write(
-            src.join("index.html"),
-            r#"<script type="importmap">{"imports": {}}</script>"#,
-        )
-        .unwrap();
-        std::fs::write(
-            src.join("app.ts"),
-            "import { LitElement } from \"lit\";\nexport class X extends LitElement {}",
-        )
-        .unwrap();
+        let page = r#"<!doctype html><script type="importmap">{not json}</script>"#;
+        std::fs::write(src.join("index.html"), page).unwrap();
 
-        let err = build(&opts(std::slice::from_ref(&src), &out)).unwrap_err();
-        let message = err.to_string();
-        assert!(
-            message.contains("inline import map"),
-            "the error names the page's inline map; got: {message}"
-        );
-    }
-
-    #[test]
-    fn inline_divergence_is_mount_agnostic() {
-        let mut inline = crate::importmap::Importmap::new();
-        inline.insert("lit", "./web_modules/lit/index.js");
-        let mut generated = crate::importmap::Importmap::new();
-        generated.insert("lit", "/hash/web_modules/lit/index.js");
-        assert!(
-            inline_divergence(&inline, &generated).is_empty(),
-            "a mount prefix is not divergence"
-        );
-
-        let mut stale = crate::importmap::Importmap::new();
-        stale.insert("lit", "./web_modules/lit/OLD.js");
-        let divergent = inline_divergence(&stale, &generated);
-        assert_eq!(divergent.len(), 1, "a different target is divergence");
-
-        let mut surplus = generated.clone();
-        surplus.insert("@oxc-project/runtime/helpers/decorate", "/x/decorate.js");
-        assert!(
-            inline_divergence(&inline, &surplus).is_empty(),
-            "generated-only surplus entries never diverge"
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(out.join("index.html")).unwrap(),
+            page,
+            "the literal page ships unchanged"
         );
     }
 }

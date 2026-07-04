@@ -170,6 +170,11 @@ struct CompilerConfig {
     /// Repeatable.
     #[arg(long = "reject-list", value_name = "PATTERN")]
     reject_list: Vec<String>,
+    /// Allow duplicate output paths, keeping the highest-precedence source for each contested
+    /// path (earlier root first, then a Tera template over a literal file over a transformed
+    /// sibling). Without it `build` fails on a conflict; `dev` warns, and this silences it.
+    #[arg(long = "skip-duplicates")]
+    skip_duplicates: bool,
 }
 
 /// The resolved toggles + tuning, independent of which features were compiled in — what `build`
@@ -182,6 +187,7 @@ struct ResolvedCompiler {
     gzip: bool,
     ts_decorators: web_modules::typescript::Decorators,
     extra_scss_load_paths: Vec<PathBuf>,
+    skip_duplicates: bool,
 }
 
 impl CompilerConfig {
@@ -206,6 +212,7 @@ impl CompilerConfig {
                 paths.extend(cfg.scss_load_paths.iter().cloned());
                 paths
             },
+            skip_duplicates: self.skip_duplicates,
         }
     }
 
@@ -230,6 +237,7 @@ impl ResolvedCompiler {
         p.tera = self.tera;
         p.ts_decorators = self.ts_decorators;
         p.extra_scss_load_paths = self.extra_scss_load_paths;
+        p.skip_duplicates = self.skip_duplicates;
         p
     }
 }
@@ -640,6 +648,30 @@ mod tests {
         assert!(d.typescript && d.scss && d.tera, "ts/scss/tera default on");
         assert!(!d.minify && !d.gzip, "minify/gzip default off");
         assert!(resolve_build(&["--minify"]).minify, "--minify opts in");
+    }
+
+    #[test]
+    fn skip_duplicates_reaches_the_processors_from_build_and_dev() {
+        assert!(!resolve_build(&[]).skip_duplicates, "strict by default");
+        let resolved = resolve_build(&["--skip-duplicates"]);
+        assert!(resolved.skip_duplicates);
+        assert!(
+            resolved.into_processors().skip_duplicates,
+            "the flag lands on the Processors both subcommands consume"
+        );
+
+        let cli = Cli::try_parse_from(["web-modules", "dev", "web", "--skip-duplicates"]).unwrap();
+        match cli.command {
+            Command::Dev { compiler, .. } => {
+                assert!(
+                    compiler
+                        .resolve_with(&PkgConfig::default())
+                        .into_processors()
+                        .skip_duplicates
+                );
+            }
+            _ => panic!("expected Dev"),
+        }
     }
 
     #[test]

@@ -22,7 +22,7 @@ use oxc_span::SourceType;
 use oxc_transformer::{TransformOptions, Transformer};
 use walkdir::WalkDir;
 
-use crate::module_graph::{ModuleImport, ModuleNode};
+use crate::module_graph::ModuleImport;
 use crate::{Error, Result};
 
 /// Decorator handling for the transform. Defined in the always-compiled [`processors`](super)
@@ -239,54 +239,92 @@ pub fn compile_directory_with(
     out_dir: &Path,
     options: &TranspileOptions,
 ) -> Result<usize> {
-    Ok(compile_directory_capturing(src_dir, out_dir, options)?.len())
-}
-
-/// Like [`compile_directory_with`], but returns one [`ModuleNode`] per emitted file —
-/// its output-relative path and the specifiers it imports — so the build can vendor
-/// runtime helpers and verify resolution without re-reading the output tree.
-pub(crate) fn compile_directory_capturing(
-    src_dir: &Path,
-    out_dir: &Path,
-    options: &TranspileOptions,
-) -> Result<Vec<ModuleNode>> {
-    let mut nodes = Vec::new();
+    let mut count = 0;
     for entry in WalkDir::new(src_dir)
         .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
     {
         let path = entry.path();
-        let name = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        let is_ts = path.extension().and_then(|x| x.to_str()).is_some_and(|x| {
-            ["ts", "tsx", "mts"]
-                .iter()
-                .any(|e| x.eq_ignore_ascii_case(e))
-        });
-        // `.d.ts` declarations emit no JS; skip them (case-insensitively, to match `is_ts`).
-        let is_decl = name.to_ascii_lowercase().ends_with(".d.ts");
-        if !is_ts || name.starts_with('_') || is_decl {
-            continue;
-        }
         let rel = path
             .strip_prefix(src_dir)
             .map_err(|e| Error::TypeScript(e.to_string()))?;
+        if TypeScriptStep::claims_source(rel).is_none() {
+            continue;
+        }
         let out = out_dir.join(rel).with_extension("js");
         if let Some(parent) = out.parent() {
             create_dir_all(parent)?;
         }
         let source = read_to_string(path)?;
-        let compiled = compile_str_capturing(&source, path, options)?;
-        write(&out, compiled.code)?;
-        nodes.push(ModuleNode {
-            path: rel.with_extension("js"),
-            imports: compiled.imports,
-        });
+        let js = compile_str_with(&source, path, options)?;
+        write(&out, js)?;
+        count += 1;
     }
-    Ok(nodes)
+    Ok(count)
+}
+
+/// The TypeScript stage as a pipeline step: claims `.ts`/`.tsx`/`.mts` (minus `_`
+/// partials and `.d.ts` declarations) for a mirrored `.js`, and emits through
+/// [`compile_str_capturing`] so the transform's imports feed the module graph.
+pub(crate) struct TypeScriptStep {
+    options: TranspileOptions,
+}
+
+impl TypeScriptStep {
+    pub(crate) fn new(options: TranspileOptions) -> Self {
+        Self { options }
+    }
+
+    /// The claim rule, shared with [`compile_directory_with`]'s walk: the tiebreak is
+    /// the extension's position in dev's probe order (`ts`, `tsx`, `mts`).
+    fn claims_source(rel: &Path) -> Option<u8> {
+        let name = rel.file_name()?.to_str()?;
+        let ext = rel.extension()?.to_str()?;
+        let tiebreak = ["ts", "tsx", "mts"]
+            .iter()
+            .position(|e| ext.eq_ignore_ascii_case(e))? as u8;
+        // `.d.ts` declarations emit no JS; `_` partials are skipped by convention.
+        if name.starts_with('_') || name.to_ascii_lowercase().ends_with(".d.ts") {
+            return None;
+        }
+        Some(tiebreak)
+    }
+}
+
+impl crate::build::steps::Preflight for TypeScriptStep {
+    fn name(&self) -> &'static str {
+        "TypeScript transform"
+    }
+
+    fn rank(&self) -> crate::build::steps::Rank {
+        crate::build::steps::Rank::Transform
+    }
+
+    fn claim(&self, rel: &Path) -> Option<crate::build::steps::Claim> {
+        let tiebreak = Self::claims_source(rel)?;
+        Some(crate::build::steps::Claim {
+            out_rel: rel.with_extension("js"),
+            tiebreak,
+        })
+    }
+}
+
+impl crate::build::steps::Step for TypeScriptStep {
+    fn emit(
+        &self,
+        _cx: &crate::build::steps::EmitCx<'_>,
+        src: &Path,
+        _rel: &Path,
+        dest: &Path,
+    ) -> Result<crate::build::steps::Emitted> {
+        let source = read_to_string(src)?;
+        let compiled = compile_str_capturing(&source, src, &self.options)?;
+        write(dest, compiled.code)?;
+        Ok(crate::build::steps::Emitted {
+            imports: Some(compiled.imports),
+        })
+    }
 }
 
 /// Format an oxc diagnostic slice into a multi-line error message. Generic over

@@ -28,6 +28,7 @@
 
 use std::path::{Path, PathBuf};
 
+use super::steps;
 use crate::vendor::{self, PackageSpec};
 use crate::{Error, Result};
 
@@ -37,9 +38,10 @@ pub struct BuildOptions<'a> {
     /// source tree is just compiled statically, exactly as the dev server serves a
     /// non-vendored tree.
     pub specs: &'a [PackageSpec],
-    /// Source root(s), merged first-match-wins (the first root wins a path conflict),
-    /// exactly as the dev server overlays them. Usually one (the source directory);
-    /// pass `std::slice::from_ref(&dir)` for the single-root case.
+    /// Source root(s). Two sources claiming one output path fail the build unless
+    /// [`Processors::skip_duplicates`] is set, which keeps the first root's file —
+    /// the order the dev server overlays roots in. Usually one (the source
+    /// directory); pass `std::slice::from_ref(&dir)` for the single-root case.
     pub roots: &'a [PathBuf],
     /// Output directory (e.g. `$OUT_DIR/dist`).
     pub out: &'a Path,
@@ -87,6 +89,12 @@ pub struct Processors {
     /// Paths to keep out of the output and out of serving — config / secrets / source-code.
     /// Defaults to all presets. See [`Reject`](crate::reject::Reject).
     pub reject: crate::reject::Reject,
+    /// Allow duplicate output paths (default off). `build` then keeps the
+    /// highest-precedence source for each contested path — earlier root first, then a
+    /// Tera template over a literal file over a transformed sibling — instead of
+    /// failing; the dev server stops warning about the conflicts it would otherwise
+    /// report. A source-tree policy like `reject`, shared by `build` and `dev`.
+    pub skip_duplicates: bool,
 }
 
 impl Default for Processors {
@@ -98,6 +106,7 @@ impl Default for Processors {
             ts_decorators: crate::Decorators::Lit,
             extra_scss_load_paths: Vec::new(),
             reject: crate::reject::Reject::all(),
+            skip_duplicates: false,
         }
     }
 }
@@ -146,31 +155,6 @@ fn rerun_if_changed(path: &Path) {
 pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     std::fs::create_dir_all(opts.out)?;
 
-    // Vendor only when there are packages to vendor. A non-vendored source tree (no
-    // specs and no `--manifest`) just compiles statically — the same thing the dev
-    // server does serving such a tree, only emitted instead of served.
-    let mut importmap = if opts.specs.is_empty() {
-        crate::importmap::Importmap::new()
-    } else {
-        vendor::vendor(&opts.out.join("web_modules"), opts.mount, opts.specs)?
-    };
-
-    // SCSS `@use`/`@import` load paths span every source root (matching the dev server),
-    // plus the output dir (so vendored stylesheets under `<out>/web_modules` resolve) and
-    // any explicit `--scss-load-path`.
-    #[cfg(feature = "scss")]
-    let load_paths: Vec<&Path> = {
-        let mut paths: Vec<&Path> = opts.roots.iter().map(PathBuf::as_path).collect();
-        paths.push(opts.out);
-        paths.extend(
-            opts.processors
-                .extra_scss_load_paths
-                .iter()
-                .map(PathBuf::as_path),
-        );
-        paths
-    };
-
     // TypeScript transform options — only when the `typescript` processor is compiled in. Without
     // it, `build` doesn't touch `.ts` files at all: they're skipped like any source file (never
     // transformed, never copied raw), exactly as `dev` serves a tree with TS off.
@@ -181,36 +165,124 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         ..Default::default()
     };
 
-    // Compile each root last-to-first, so the FIRST root wins a path conflict (it is
-    // written last, overwriting) — the order the dev server overlays roots in. Each file
-    // records what it imports as it is emitted, so the module graph is assembled here
-    // rather than by re-reading the output tree afterward. The graph upserts by output
-    // path in this same write order, so a shadowed file's record is replaced by the
-    // file that actually ships — across roots and when a copied `.js` overwrites a
-    // transformed sibling within one root.
+    // SCSS `@use`/`@import` load paths span every source root (matching the dev server),
+    // plus the output dir (so vendored stylesheets under `<out>/web_modules` resolve) and
+    // any explicit `--scss-load-path`.
+    #[cfg(feature = "scss")]
+    let scss_load_paths: Vec<PathBuf> = {
+        let mut paths: Vec<PathBuf> = opts.roots.to_vec();
+        paths.push(opts.out.to_path_buf());
+        paths.extend(opts.processors.extra_scss_load_paths.iter().cloned());
+        paths
+    };
+
+    // One walk of the source roots: every enabled step states what it would emit, so
+    // duplicate output paths are caught before anything is written and each output
+    // path is then written exactly once, by its winner.
+    let steps = steps::enabled_steps(
+        &opts.processors,
+        steps::StepConfig {
+            #[cfg(feature = "typescript")]
+            transpile,
+            #[cfg(feature = "scss")]
+            scss_load_paths,
+        },
+    );
+    let preflights: Vec<&dyn steps::Preflight> = steps
+        .iter()
+        .map(|step| step.as_ref() as &dyn steps::Preflight)
+        .collect();
+    let report = steps::preflight(opts.roots, &preflights);
+
+    // Duplicate output paths fail the build before the first write, naming every
+    // claimant; `--skip-duplicates` opts into precedence instead — earlier root first,
+    // then a Tera template over a literal file over a transformed sibling, the order
+    // the dev server resolves a request in.
+    let conflicts = report.conflicts();
+    if !conflicts.is_empty() && !opts.processors.skip_duplicates {
+        let mut lines = Vec::new();
+        for conflict in &conflicts {
+            lines.push(format!("  {}:", conflict.out_rel.display()));
+            for (i, claim) in conflict.claimants.iter().enumerate() {
+                let wins = if i == 0 {
+                    " - wins with --skip-duplicates"
+                } else {
+                    ""
+                };
+                lines.push(format!(
+                    "    {} ({}){wins}",
+                    opts.roots[claim.root].join(&claim.rel).display(),
+                    steps[claim.step].name(),
+                ));
+            }
+        }
+        let noun = if conflicts.len() == 1 {
+            "path is"
+        } else {
+            "paths are"
+        };
+        return Err(Error::Build(format!(
+            "web-modules: {} output {noun} claimed by more than one source - remove \
+             the duplicates or pass --skip-duplicates:\n{}",
+            conflicts.len(),
+            lines.join("\n")
+        )));
+    }
+
+    // Vendor only when there are packages to vendor. A non-vendored source tree (no
+    // specs and no `--manifest`) just compiles statically — the same thing the dev
+    // server does serving such a tree, only emitted instead of served.
+    let mut importmap = if opts.specs.is_empty() {
+        crate::importmap::Importmap::new()
+    } else {
+        vendor::vendor(&opts.out.join("web_modules"), opts.mount, opts.specs)?
+    };
+
+    // Emit every non-Tera winner exactly once, feeding the module graph as each file
+    // is written. Tera waits: its templates receive the import map, which is final
+    // only after helper vendoring below.
     let mut graph = crate::module_graph::ModuleGraph::new();
-    for root in opts.roots.iter().rev() {
-        #[cfg(feature = "typescript")]
-        if opts.processors.typescript {
-            let nodes = crate::typescript::compile_directory_capturing(root, opts.out, &transpile)?;
-            graph.extend(nodes);
+    let mut tera_winners = Vec::new();
+    for winner in report.winners() {
+        if steps[winner.step].rank() == steps::Rank::Tera {
+            tera_winners.push(winner);
+            continue;
         }
-        #[cfg(feature = "scss")]
-        if opts.processors.scss {
-            crate::scss::compile_directory(root, opts.out, &load_paths)?;
-        }
-        // Carry across everything the processors don't transform (HTML, images, JSON, …);
-        // sources (`.ts`/`.scss`/`.tera`) are skipped by `copy_static`. A verbatim `.js`
-        // joins the graph too, read at copy time.
-        let (_copied, nodes) =
-            crate::static_files::copy_static_capturing(root, opts.out, &opts.processors.reject)?;
-        graph.extend(nodes);
+        emit_winner(&steps, winner, opts, &importmap, &mut graph)?;
     }
 
     // Vendor the transform-runtime helpers the graph shows were injected (the decorator
     // helper, etc.) — even a non-vendored build may need these.
     if graph.uses_runtime_helpers() {
         importmap.extend(vendor_transform_runtime(opts.out, opts.mount)?);
+    }
+
+    // Emit the import map as a standalone artifact too, so test harnesses (and
+    // es-module-shims / an external `<script type="importmap" src>`) can consume it.
+    importmap.write_to(&opts.out.join("importmap.json"))?;
+
+    // Render the Tera winners, with the now-final import map exposed as the
+    // `importmap` template variable — the static counterpart of the dev server's
+    // on-the-fly `.tera` rendering.
+    for winner in tera_winners {
+        emit_winner(&steps, winner, opts, &importmap, &mut graph)?;
+    }
+
+    // Entry-page fallback: synthesise `index.html` from `--template` / inline `--html`
+    // only when no source claims that target (a literal root `index.html`, or an
+    // `index.html.tera` when tera runs). Keyed off the claims, not `out/index.html`:
+    // probing the output would wrongly skip the refresh on an incremental rebuild into
+    // a reused output dir (a build script's `OUT_DIR`), leaving a stale page when
+    // `--html`/`--template` or the import map changed.
+    if !report.claims_target("index.html") {
+        let html = match opts.template {
+            Some(template) => {
+                rerun_if_changed(template);
+                render_template(template, &importmap)?
+            }
+            None => opts.html.replace("{importmap}", &importmap.to_script_tag()),
+        };
+        std::fs::write(opts.out.join("index.html"), html)?;
     }
 
     // Fail the build if any emitted module imports a bare specifier the generated
@@ -233,57 +305,40 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         )));
     }
 
-    // Emit the import map as a standalone artifact too, so test harnesses (and
-    // es-module-shims / an external `<script type="importmap" src>`) can consume it.
-    importmap.write_to(&opts.out.join("importmap.json"))?;
-
-    // Render every `*.tera` in the tree to its stripped target (`index.html.tera` →
-    // `index.html`), with the import map available as the `importmap` variable. Looped
-    // last-to-first so the first root wins, matching the compile order. The static
-    // counterpart of the dev server's on-the-fly `.tera` rendering.
-    #[cfg(feature = "tera")]
-    if opts.processors.tera {
-        for root in opts.roots.iter().rev() {
-            render_tera_tree(root, opts.out, &importmap)?;
-        }
-    }
-
-    // Entry-page fallback: synthesise `index.html` from `--template` / inline `--html` only when
-    // the *source tree* doesn't provide one (a root-level `index.html`, or an `index.html.tera`
-    // when tera is on). Keyed off the source tree, not `out/index.html`: probing the output would
-    // wrongly skip the refresh on an incremental rebuild into a reused output dir (a build
-    // script's `OUT_DIR`), leaving a stale page when `--html`/`--template` or the import map changed.
-    let tera_on = cfg!(feature = "tera") && opts.processors.tera;
-    let tree_provides_index = opts.roots.iter().any(|root| {
-        root.join("index.html").exists() || (tera_on && root.join("index.html.tera").exists())
-    });
-    if !tree_provides_index {
-        let html = match opts.template {
-            Some(template) => {
-                rerun_if_changed(template);
-                render_template(template, &importmap)?
-            }
-            None => opts.html.replace("{importmap}", &importmap.to_script_tag()),
-        };
-        std::fs::write(opts.out.join("index.html"), html)?;
-    }
-
     #[cfg(feature = "compress")]
     if opts.output.gzip {
         crate::compress::gzip_dir(opts.out, &["js", "css", "html", "json", "svg"])?;
     }
 
     // Re-run the build script when any source file changes. A bare `rerun-if-changed`
-    // on the directory only catches add/remove (the directory's own mtime), not edits to
-    // existing files — which would leave an *embedded* build serving stale assets — so
-    // walk every root and emit every entry (the root dir included, to catch add/remove).
-    for root in opts.roots {
-        for entry in walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
-            rerun_if_changed(entry.path());
-        }
+    // on the directory only catches add/remove (the directory's own mtime), not edits
+    // to existing files — which would leave an *embedded* build serving stale assets —
+    // so the preflight's walk feeds every visited entry through (directories included,
+    // to catch add/remove).
+    for path in report.walked_paths() {
+        rerun_if_changed(path);
+    }
+    Ok(())
+}
+
+/// Emit one preflight winner through its claiming step — parent directories created,
+/// the emitted imports recorded in the module graph under the output-relative path.
+fn emit_winner(
+    steps: &[Box<dyn steps::Step>],
+    winner: &steps::ClaimRecord,
+    opts: &BuildOptions<'_>,
+    importmap: &crate::importmap::Importmap,
+    graph: &mut crate::module_graph::ModuleGraph,
+) -> Result<()> {
+    let src = opts.roots[winner.root].join(&winner.rel);
+    let dest = opts.out.join(&winner.out_rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let emitted =
+        steps[winner.step].emit(&steps::EmitCx { importmap }, &src, &winner.rel, &dest)?;
+    if let Some(imports) = emitted.imports {
+        graph.insert(winner.out_rel.clone(), imports);
     }
     Ok(())
 }
@@ -301,59 +356,6 @@ pub fn vendor_transform_runtime(out: &Path, mount: &str) -> Result<crate::import
         mount,
         &[PackageSpec::npm("@oxc-project/runtime", OXC_RUNTIME_RANGE)],
     )
-}
-
-/// Render every `*.tera` under `root` to its stripped target under `out`
-/// (`index.html.tera` → `index.html`), skipping `_`-prefixed partials, with the
-/// import-map `<script>` tag exposed as the `importmap` variable. The static counterpart
-/// of the dev server's on-the-fly `.tera` rendering. Returns the number rendered.
-///
-/// `tera::one_off` (via [`crate::templates`]) has no template registry, so each file
-/// renders independently — `{% include %}` / `{% extends %}` across files aren't
-/// supported (hence the `_`-partial skip is a convention, not an inheritance system).
-///
-/// Runs as a final overlay (after vendoring + the import-map/unresolved-import checks), so a
-/// `*.tera` takes precedence over a same-named compiled/static target — matching the dev server,
-/// which checks `.tera` first. Two consequences of that placement, both for unusual configs: across
-/// multiple roots a later root's `.tera` overwrites an *earlier* root's literal same-named file
-/// (the dev server resolves per-root, so the earlier root wins there — a minor divergence), and JS
-/// emitted *by* a `.tera` (e.g. `app.js.tera`) is not scanned for unresolved bare imports.
-#[cfg(feature = "tera")]
-fn render_tera_tree(
-    root: &Path,
-    out: &Path,
-    importmap: &crate::importmap::Importmap,
-) -> Result<usize> {
-    let mut ctx = crate::templates::Context::new();
-    ctx.insert("importmap", &importmap.to_script_tag());
-    let mut count = 0;
-    for entry in walkdir::WalkDir::new(root)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        let path = entry.path();
-        let is_tera = path
-            .extension()
-            .and_then(|x| x.to_str())
-            .is_some_and(|x| x.eq_ignore_ascii_case("tera"));
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if !is_tera || name.starts_with('_') {
-            continue;
-        }
-        let rel = path
-            .strip_prefix(root)
-            .map_err(|e| Error::Template(e.to_string()))?;
-        // Drop the final `.tera`: `index.html.tera` → `index.html`, `page.tera` → `page`.
-        let dest = out.join(rel).with_extension("");
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let html = crate::templates::render_file(path, &ctx)?;
-        std::fs::write(&dest, html)?;
-        count += 1;
-    }
-    Ok(count)
 }
 
 /// Render `index.html` from a Tera `template`, exposing the import-map script tag
@@ -426,6 +428,13 @@ mod tests {
             processors: Processors::default(),
             output: Output::default(),
         }
+    }
+
+    /// [`opts`] with duplicate output paths allowed — the precedence semantics.
+    fn opts_skip<'a>(roots: &'a [PathBuf], out: &'a Path) -> BuildOptions<'a> {
+        let mut o = opts(roots, out);
+        o.processors.skip_duplicates = true;
+        o
     }
 
     #[test]
@@ -512,7 +521,9 @@ mod tests {
 
     #[cfg(feature = "tera")]
     #[test]
-    fn build_first_root_wins() {
+    fn build_first_root_wins_under_skip_duplicates() {
+        // A cross-root conflict is an error by default; with `--skip-duplicates` the
+        // first root wins, the order the dev server overlays roots in.
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a");
         let b = dir.path().join("b");
@@ -523,8 +534,13 @@ mod tests {
         std::fs::write(b.join("index.html.tera"), "FROM_B").unwrap();
 
         let roots = vec![a, b];
-        build(&opts(&roots, &out)).unwrap();
+        let err = build(&opts(&roots, &out)).unwrap_err();
+        assert!(
+            err.to_string().contains("--skip-duplicates"),
+            "strict by default; got: {err}"
+        );
 
+        build(&opts_skip(&roots, &out)).unwrap();
         let index = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(
             index.contains("FROM_A"),
@@ -534,10 +550,90 @@ mod tests {
 
     #[cfg(feature = "tera")]
     #[test]
+    fn build_conflict_error_lists_every_conflict() {
+        // Every contested output path is reported at once — each claimant named with
+        // its step — and nothing has been written when the build fails.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("index.html"), "LITERAL").unwrap();
+        std::fs::write(src.join("index.html.tera"), "TERA").unwrap();
+        std::fs::write(src.join("app.ts"), "export const x = 1;").unwrap();
+        std::fs::write(src.join("app.js"), "export const ok = true;").unwrap();
+
+        let err = build(&opts(std::slice::from_ref(&src), &out)).unwrap_err();
+        let message = err.to_string();
+        for expected in [
+            "index.html",
+            "app.js",
+            "Tera template",
+            "static copy",
+            "TypeScript transform",
+            "--skip-duplicates",
+        ] {
+            assert!(
+                message.contains(expected),
+                "missing {expected:?} in: {message}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_dir(&out).unwrap().count(),
+            0,
+            "the conflict check runs before anything is written"
+        );
+    }
+
+    #[test]
+    fn build_cross_root_same_relative_path_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("logo.svg"), "<svg>A</svg>").unwrap();
+        std::fs::write(b.join("logo.svg"), "<svg>B</svg>").unwrap();
+
+        let roots = vec![a, b];
+        let err = build(&opts(&roots, &out)).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("logo.svg") && message.contains("--skip-duplicates"),
+            "got: {message}"
+        );
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn build_tera_does_not_override_earlier_roots_under_skip() {
+        // Root order dominates the within-root ranks: a later root's `.tera` no longer
+        // overlays an earlier root's literal same-target file, matching how the dev
+        // server resolves the request.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("index.html"), "LITERAL_A").unwrap();
+        std::fs::write(b.join("index.html.tera"), "TERA_B").unwrap();
+
+        let roots = vec![a, b];
+        build(&opts_skip(&roots, &out)).unwrap();
+        let index = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            index.contains("LITERAL_A"),
+            "the earlier root's literal wins over a later root's template; got: {index}"
+        );
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
     fn build_graph_follows_root_precedence() {
-        // The first root wins a path conflict (it is written last). The graph must
-        // describe the winner: a shadowed fallback file with an unresolvable import
-        // must not fail the build, and the winning file with one must.
+        // Under `--skip-duplicates` the first root wins a path conflict, and the graph
+        // must describe the winner: a shadowed fallback file with an unresolvable
+        // import must not fail the build, and the winning file with one must.
         let dir = tempfile::tempdir().unwrap();
         let primary = dir.path().join("primary");
         let fallback = dir.path().join("fallback");
@@ -548,7 +644,7 @@ mod tests {
         std::fs::write(fallback.join("app.js"), "import \"missing-package\";").unwrap();
 
         let roots = vec![primary.clone(), fallback.clone()];
-        build(&opts(&roots, &out)).unwrap();
+        build(&opts_skip(&roots, &out)).unwrap();
         let shipped = std::fs::read_to_string(out.join("app.js")).unwrap();
         assert!(
             shipped.contains("ok"),
@@ -559,16 +655,15 @@ mod tests {
         std::fs::write(primary.join("app.js"), "import \"missing-package\";").unwrap();
         std::fs::write(fallback.join("app.js"), "export const ok = true;").unwrap();
         let out2 = dir.path().join("out2");
-        let err = build(&opts(&roots, &out2)).unwrap_err();
+        let err = build(&opts_skip(&roots, &out2)).unwrap_err();
         assert!(matches!(err, Error::Build(_)), "got {err:?}");
     }
 
     #[cfg(feature = "typescript")]
     #[test]
-    fn build_graph_follows_copy_over_transform_precedence() {
-        // Within one root the static copy runs after the transform, so a literal
-        // `app.js` overwrites the `app.js` emitted from `app.ts` — and the graph must
-        // describe the copied file, in both directions.
+    fn build_graph_follows_literal_over_transform_precedence() {
+        // Within one root a literal `app.js` outranks the `app.js` a sibling `app.ts`
+        // would emit — and the graph must describe the winner, in both directions.
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -580,18 +675,18 @@ mod tests {
         .unwrap();
         std::fs::write(src.join("app.js"), "export const ok = true;").unwrap();
         let out = dir.path().join("out");
-        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        build(&opts_skip(std::slice::from_ref(&src), &out)).unwrap();
         let shipped = std::fs::read_to_string(out.join("app.js")).unwrap();
         assert!(
             shipped.contains("ok"),
-            "the copied file overwrites the transformed one; got:\n{shipped}"
+            "the literal file outranks the transformed sibling; got:\n{shipped}"
         );
 
-        // … and the copied file's own unresolvable import must.
+        // … and the winning literal's own unresolvable import must count.
         std::fs::write(src.join("app.ts"), "export const y = 1;").unwrap();
         std::fs::write(src.join("app.js"), "import \"missing-package\";").unwrap();
         let out2 = dir.path().join("out2");
-        let err = build(&opts(std::slice::from_ref(&src), &out2)).unwrap_err();
+        let err = build(&opts_skip(std::slice::from_ref(&src), &out2)).unwrap_err();
         assert!(matches!(err, Error::Build(_)), "got {err:?}");
     }
 
@@ -610,7 +705,7 @@ mod tests {
         std::fs::write(fallback.join("app.js"), "import \"missing-package\";").unwrap();
 
         let roots = vec![primary, fallback];
-        build(&opts(&roots, &out)).unwrap();
+        build(&opts_skip(&roots, &out)).unwrap();
         assert_eq!(
             std::fs::read(out.join("app.js")).unwrap(),
             [0xFF, 0xFE, 0x80, b';'],
@@ -620,9 +715,9 @@ mod tests {
 
     #[cfg(feature = "typescript")]
     #[test]
-    fn build_non_utf8_copy_replaces_transformed_record() {
-        // The copied non-UTF-8 `app.js` overwrites the `app.js` emitted from `app.ts`,
-        // so the transform's unresolvable import must not fail the build either.
+    fn build_non_utf8_literal_replaces_transformed_record() {
+        // The non-UTF-8 literal `app.js` outranks the `app.js` a sibling `app.ts`
+        // would emit, so the transform's unresolvable import must not fail the build.
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         let out = dir.path().join("out");
@@ -634,7 +729,7 @@ mod tests {
         .unwrap();
         std::fs::write(src.join("app.js"), [0xFF, 0xFE, 0x80, b';']).unwrap();
 
-        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        build(&opts_skip(std::slice::from_ref(&src), &out)).unwrap();
     }
 
     #[cfg(feature = "typescript")]
@@ -709,9 +804,11 @@ mod tests {
 
     #[cfg(feature = "tera")]
     #[test]
-    fn build_tera_wins_over_literal_same_target() {
-        // A `*.tera` overlays a same-named literal in the same root — the precedence the dev
-        // server also applies (it checks `.tera` first), so `dev` and `build` stay in lock-step.
+    fn build_tera_wins_over_literal_same_target_under_skip() {
+        // A same-root double assignment is an error by default; under
+        // `--skip-duplicates` the `*.tera` outranks the literal — the precedence the
+        // dev server also applies (it checks `.tera` first), so `dev` and `build`
+        // stay in lock-step.
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         let out = dir.path().join("out");
@@ -719,11 +816,17 @@ mod tests {
         std::fs::write(src.join("index.html"), "LITERAL").unwrap();
         std::fs::write(src.join("index.html.tera"), "TERA").unwrap();
 
-        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        let err = build(&opts(std::slice::from_ref(&src), &out)).unwrap_err();
+        assert!(
+            err.to_string().contains("index.html"),
+            "the double assignment is named; got: {err}"
+        );
+
+        build(&opts_skip(std::slice::from_ref(&src), &out)).unwrap();
         let index = std::fs::read_to_string(out.join("index.html")).unwrap();
         assert!(
             index.contains("TERA") && !index.contains("LITERAL"),
-            "the .tera overlays the literal same-target; got:\n{index}"
+            "the .tera outranks the literal same-target; got:\n{index}"
         );
     }
 

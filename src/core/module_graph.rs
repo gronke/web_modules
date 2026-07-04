@@ -1,22 +1,19 @@
 //! The module graph: which module specifiers each emitted file imports.
 //!
 //! Produced where each file is handled — the TypeScript transform captures its imports
-//! from the AST it just built (see [`crate::typescript`]), and [`copy_static`] captures
-//! them from verbatim `.js` at copy time — so the build never re-reads the output tree
-//! to reconstruct them. That re-reading is what made the previous text scan fragile:
-//! it ran against minified output whose spacing its matcher didn't expect. Reading the
+//! from the AST it just built (see [`crate::typescript`]), and the static-copy step
+//! reads verbatim `.js` as it copies — so the build never re-reads the output tree to
+//! reconstruct them. That re-reading is what made the previous text scan fragile: it
+//! ran against minified output whose spacing its matcher didn't expect. Reading the
 //! specifiers structurally, at transform time, removes both that fragility and the
 //! false positives from `import`/`from` text inside comments or strings.
 //!
-//! Scope: the graph describes the JavaScript emitted by the TypeScript transform and
-//! the static-copy stages, after their overwrite precedence is applied — a later record
-//! for the same output path replaces the earlier one exactly as the later write
-//! overwrites the file. It does not cover every file in the output directory: what a
-//! `*.tera` template renders is excluded (templates render after validation and receive
-//! the generated import map), and a reused output directory may retain files from
-//! earlier builds that the current run never touched.
-//!
-//! [`copy_static`]: crate::static_files::copy_static
+//! Scope: the graph describes the JavaScript the current build's steps emitted — one
+//! record per output path, matching the preflight's one-winner-per-path resolution. It
+//! does not cover every file in the output directory: what a `*.tera` template renders
+//! is excluded (templates render after validation and receive the generated import
+//! map), and a reused output directory may retain files from earlier builds that the
+//! current run never touched.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -60,22 +57,15 @@ impl ModuleImport {
     }
 }
 
-/// One emitted file and the specifiers it imports, keyed by its output-relative path.
-#[derive(Clone, Debug)]
-pub struct ModuleNode {
-    pub path: PathBuf,
-    pub imports: Vec<ModuleImport>,
-}
-
 /// The imports of the emitted (non-vendored) modules, keyed by output-relative path.
-/// Assembled during the build from the transform and the static-file copy, then used to
-/// decide runtime-helper vendoring and to verify that every bare import resolves — no
-/// walk of the output tree.
+/// Assembled during the build as each winner is emitted, then used to decide
+/// runtime-helper vendoring and to verify that every bare import resolves — no walk of
+/// the output tree.
 ///
 /// One record per output path: recording a path again replaces the earlier entry, the
-/// way the corresponding write overwrites the file. The build feeds it in write order
-/// (roots last-to-first so the first root wins, and within a root the transform before
-/// the static copy), so the graph describes the file those stages actually ship.
+/// way the corresponding write would overwrite the file. The preflight already picks
+/// one winner per output path, so the build records each path once; the upsert keeps
+/// the graph honest if a caller ever records in write order again.
 #[derive(Clone, Debug, Default)]
 pub struct ModuleGraph {
     nodes: BTreeMap<PathBuf, Vec<ModuleImport>>,
@@ -90,14 +80,6 @@ impl ModuleGraph {
     /// record for the same path — the last write wins, as on the filesystem.
     pub fn insert(&mut self, path: impl Into<PathBuf>, imports: Vec<ModuleImport>) {
         self.nodes.insert(path.into(), imports);
-    }
-
-    /// [`insert`](Self::insert) every node, in order — later nodes replace earlier
-    /// same-path ones.
-    pub fn extend(&mut self, nodes: impl IntoIterator<Item = ModuleNode>) {
-        for node in nodes {
-            self.insert(node.path, node.imports);
-        }
     }
 
     /// Whether any emitted module imports the transform runtime — the signal to

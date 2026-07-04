@@ -9,30 +9,21 @@ use std::path::Path;
 
 use walkdir::WalkDir;
 
-use crate::module_graph::{imports_from_source, ModuleNode};
+use crate::module_graph::imports_from_source;
 use crate::Result;
+
+/// Extensions the source processors consume. Never shipped raw — even when the
+/// matching processor is disabled, a `.scss` or `.ts` stays unshipped rather than
+/// leaking source into the output. The dev server's request filter uses the same list.
+pub(crate) const SOURCE_EXTENSIONS: [&str; 5] = ["ts", "tsx", "mts", "scss", "tera"];
 
 /// Copy files from `src` to `out` (preserving structure), skipping things a build step
 /// produces or ignores: `.ts`/`.tsx`/`.mts`/`.scss`/`.tera` sources, `_`-prefixed partials,
 /// and any path the [`reject`](crate::reject) list excludes (config / secrets / source).
 /// Returns the number of files copied.
 pub fn copy_static(src: &Path, out: &Path, reject: &crate::reject::Reject) -> Result<usize> {
-    Ok(copy_static_capturing(src, out, reject)?.0)
-}
-
-/// Like [`copy_static`], but also returns a [`ModuleNode`] for every copied `.js`/`.mjs`
-/// file — its output-relative path and the specifiers it imports — so a hand-written
-/// module copied verbatim contributes to the build's module graph the same way
-/// transformed files do, and its imports are vendored / resolution-checked without a
-/// separate scan of the output tree. The `usize` is the total number of files copied
-/// (all types), matching [`copy_static`].
-pub(crate) fn copy_static_capturing(
-    src: &Path,
-    out: &Path,
-    reject: &crate::reject::Reject,
-) -> Result<(usize, Vec<ModuleNode>)> {
+    let step = StaticStep::new(reject.clone());
     let mut count = 0;
-    let mut nodes = Vec::new();
     for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if !path.is_file() {
@@ -40,36 +31,89 @@ pub(crate) fn copy_static_capturing(
         }
         // WalkDir yields paths under `src`, so the strip is infallible.
         let rel = path.strip_prefix(src).expect("walkdir entry is under src");
-        // Reject list: never publish config / secret / source-code files into the output.
-        if reject.rejects_path(rel) {
-            crate::reject::warn_rejected(&rel.display().to_string());
-            continue;
-        }
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let ext = path.extension().and_then(|x| x.to_str()).unwrap_or("");
-        if name.starts_with('_')
-            || ["ts", "tsx", "mts", "scss", "tera"]
-                .iter()
-                .any(|e| ext.eq_ignore_ascii_case(e))
-        {
+        if step.claims_source(rel).is_none() {
             continue;
         }
         let dest = out.join(rel);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        // Every copied `.js`/`.mjs` records a graph node — the record marks the WRITE
-        // (replacing any earlier record for the same output path), independent of
-        // whether the bytes are readable as a module. An `.mjs` that fails to parse is
-        // a build error (it is unambiguously a module and the browser would fail on
-        // it); a `.js` falls back to the classic-script goal inside
-        // `imports_from_source`, and a file that defies both goals — or is not UTF-8 —
-        // contributes an empty import set plus a warning, because an empty set from a
-        // parse failure means "unknown", not "imports nothing". The copy itself is
-        // byte-for-byte either way.
-        if ["js", "mjs"].iter().any(|e| ext.eq_ignore_ascii_case(e)) {
+        std::fs::copy(path, &dest)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+/// The static-copy stage as a pipeline step: claims everything that is not a source
+/// file, a `_` partial, or reject-listed, and copies it byte-for-byte. A copied
+/// `.js`/`.mjs` is read for the module graph on the way — the record marks the WRITE,
+/// independent of whether the bytes are readable as a module.
+pub(crate) struct StaticStep {
+    reject: crate::reject::Reject,
+}
+
+impl StaticStep {
+    pub(crate) fn new(reject: crate::reject::Reject) -> Self {
+        Self { reject }
+    }
+
+    /// The claim rule, shared with [`copy_static`]'s walk. Warns per reject-listed
+    /// path, exactly as the copy loop always has.
+    fn claims_source(&self, rel: &Path) -> Option<()> {
+        let name = rel.file_name()?.to_str()?;
+        let ext = rel.extension().and_then(|x| x.to_str()).unwrap_or("");
+        if name.starts_with('_')
+            || SOURCE_EXTENSIONS
+                .iter()
+                .any(|e| ext.eq_ignore_ascii_case(e))
+        {
+            return None;
+        }
+        // Reject list: never publish config / secret / source-code files into the output.
+        if self.reject.rejects_path(rel) {
+            crate::reject::warn_rejected(&rel.display().to_string());
+            return None;
+        }
+        Some(())
+    }
+}
+
+impl crate::build::steps::Preflight for StaticStep {
+    fn name(&self) -> &'static str {
+        "static copy"
+    }
+
+    fn rank(&self) -> crate::build::steps::Rank {
+        crate::build::steps::Rank::Static
+    }
+
+    fn claim(&self, rel: &Path) -> Option<crate::build::steps::Claim> {
+        self.claims_source(rel)?;
+        Some(crate::build::steps::Claim {
+            out_rel: rel.to_path_buf(),
+            tiebreak: 0,
+        })
+    }
+}
+
+impl crate::build::steps::Step for StaticStep {
+    /// Copy byte-for-byte; read a `.js`/`.mjs` for the graph first. An `.mjs` that
+    /// fails to parse is a build error (it is unambiguously a module and the browser
+    /// would fail on it); a `.js` falls back to the classic-script goal inside
+    /// `imports_from_source`, and a file that defies both goals — or is not UTF-8 —
+    /// contributes an empty import set plus a warning, because an empty set from a
+    /// parse failure means "unknown", not "imports nothing".
+    fn emit(
+        &self,
+        _cx: &crate::build::steps::EmitCx<'_>,
+        src: &Path,
+        rel: &Path,
+        dest: &Path,
+    ) -> Result<crate::build::steps::Emitted> {
+        let ext = rel.extension().and_then(|x| x.to_str()).unwrap_or("");
+        let imports = if ["js", "mjs"].iter().any(|e| ext.eq_ignore_ascii_case(e)) {
             let module_only = ext.eq_ignore_ascii_case("mjs");
-            let (imports, unanalyzable) = match std::fs::read_to_string(path) {
+            let (imports, unanalyzable) = match std::fs::read_to_string(src) {
                 Ok(source) => {
                     let read = imports_from_source(&source, module_only).map_err(|reason| {
                         crate::Error::Build(format!("web-modules: {}: {reason}", rel.display()))
@@ -86,15 +130,13 @@ pub(crate) fn copy_static_capturing(
                     rel.display()
                 ));
             }
-            nodes.push(ModuleNode {
-                path: rel.to_path_buf(),
-                imports,
-            });
-        }
-        std::fs::copy(path, &dest)?;
-        count += 1;
+            Some(imports)
+        } else {
+            None
+        };
+        std::fs::copy(src, dest)?;
+        Ok(crate::build::steps::Emitted { imports })
     }
-    Ok((count, nodes))
 }
 
 /// Emit a build warning: as a `cargo:warning` directive when running inside a build
@@ -157,12 +199,51 @@ mod tests {
         );
     }
 
+    /// Run [`StaticStep::emit`] for one file, `src/<rel>` → `out/<rel>`.
+    fn emit_one(src: &Path, rel: &str, out: &Path) -> crate::Result<crate::build::steps::Emitted> {
+        use crate::build::steps::Step;
+        let step = StaticStep::new(crate::reject::Reject::none());
+        let map = crate::importmap::Importmap::new();
+        let cx = crate::build::steps::EmitCx { importmap: &map };
+        std::fs::create_dir_all(out).unwrap();
+        step.emit(&cx, &src.join(rel), Path::new(rel), &out.join(rel))
+    }
+
     #[test]
-    fn copies_non_utf8_js_byte_for_byte_with_empty_record() {
+    fn step_claims_everything_but_sources_partials_and_rejected() {
+        use crate::build::steps::Preflight;
+        let step = StaticStep::new(crate::reject::Reject::all());
+        assert!(step.claim(Path::new("page.html")).is_some());
+        assert!(step.claim(Path::new("app.js")).is_some());
+        assert_eq!(
+            step.claim(Path::new("sub/img.png")).unwrap().out_rel,
+            Path::new("sub/img.png"),
+            "a static claim targets its own path"
+        );
+        for source in [
+            "app.ts",
+            "app.TSX",
+            "mod.mts",
+            "style.scss",
+            "page.html.tera",
+        ] {
+            assert!(
+                step.claim(Path::new(source)).is_none(),
+                "{source} is a processor's input, never copied raw"
+            );
+        }
+        assert!(step.claim(Path::new("_partial.html")).is_none());
+        assert!(
+            step.claim(Path::new(".env")).is_none(),
+            "reject-listed paths make no claim"
+        );
+    }
+
+    #[test]
+    fn step_copies_non_utf8_js_byte_for_byte_with_empty_record() {
         // A `.js` that isn't UTF-8 can't be a well-formed ES module — it still copies
-        // unchanged (fs::copy, not a decode/re-encode round trip) and still records a
-        // graph node with no imports: the node marks the WRITE, so it replaces any
-        // earlier record a shadowed same-path file left behind.
+        // unchanged (fs::copy, not a decode/re-encode round trip) and still records
+        // its write with no imports.
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         let out = dir.path().join("out");
@@ -170,14 +251,11 @@ mod tests {
         let bytes: &[u8] = &[0xFF, 0xFE, b'v', b'a', b'r', 0x80, 0x00, b';'];
         std::fs::write(src.join("blob.js"), bytes).unwrap();
 
-        let (count, nodes) =
-            copy_static_capturing(&src, &out, &crate::reject::Reject::none()).unwrap();
-        assert_eq!(count, 1);
-        assert_eq!(nodes.len(), 1, "the write is recorded");
-        assert!(
-            nodes[0].imports.is_empty(),
-            "non-UTF-8 bytes contribute no imports; got {:?}",
-            nodes[0].imports
+        let emitted = emit_one(&src, "blob.js", &out).unwrap();
+        assert_eq!(
+            emitted.imports.as_deref().map(<[_]>::len),
+            Some(0),
+            "the write is recorded, with no imports"
         );
         assert_eq!(
             std::fs::read(out.join("blob.js")).unwrap(),
@@ -188,7 +266,7 @@ mod tests {
 
     #[cfg(feature = "typescript")]
     #[test]
-    fn broken_mjs_fails_the_copy_with_the_path() {
+    fn step_fails_a_broken_mjs_with_the_path() {
         // An `.mjs` is unambiguously a module; if it does not parse, the browser will
         // fail on it, so the build fails first — naming the file.
         let dir = tempfile::tempdir().unwrap();
@@ -197,7 +275,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("worker.mjs"), "var await = 1;").unwrap();
 
-        let err = copy_static_capturing(&src, &out, &crate::reject::Reject::none()).unwrap_err();
+        let err = emit_one(&src, "worker.mjs", &out).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("worker.mjs") && msg.contains("does not parse as an ES module"),
@@ -207,7 +285,7 @@ mod tests {
 
     #[cfg(feature = "typescript")]
     #[test]
-    fn copies_unparsable_js_with_empty_imports() {
+    fn step_copies_unparsable_js_with_empty_imports() {
         // Broken syntax still copies unchanged; the graph records the file with no
         // imports instead of a partial set from a recovered AST.
         let dir = tempfile::tempdir().unwrap();
@@ -217,15 +295,13 @@ mod tests {
         let js = "import { broken from \"lit\";";
         std::fs::write(src.join("broken.js"), js).unwrap();
 
-        let (count, nodes) =
-            copy_static_capturing(&src, &out, &crate::reject::Reject::none()).unwrap();
-        assert_eq!(count, 1);
+        let emitted = emit_one(&src, "broken.js", &out).unwrap();
         assert_eq!(std::fs::read_to_string(out.join("broken.js")).unwrap(), js);
-        assert_eq!(nodes.len(), 1);
-        assert!(
-            nodes[0].imports.is_empty(),
+        assert_eq!(
+            emitted.imports.as_deref().map(<[_]>::len),
+            Some(0),
             "no partial imports from a recovered AST; got {:?}",
-            nodes[0].imports
+            emitted.imports
         );
     }
 

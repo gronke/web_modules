@@ -6,7 +6,7 @@
 //! vendored Bootstrap under `web_modules/bootstrap/scss`).
 
 use std::fs::{create_dir_all, write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use grass::{Options, OutputStyle};
 use walkdir::WalkDir;
@@ -68,6 +68,55 @@ pub fn compile_directory(src_dir: &Path, out_dir: &Path, load_paths: &[&Path]) -
         count += 1;
     }
     Ok(count)
+}
+
+/// The SCSS stage as a pipeline step: claims `.scss` (minus `_` partials) for a
+/// mirrored `.css`.
+pub(crate) struct ScssStep {
+    load_paths: Vec<PathBuf>,
+}
+
+impl ScssStep {
+    pub(crate) fn new(load_paths: Vec<PathBuf>) -> Self {
+        Self { load_paths }
+    }
+}
+
+impl crate::build::steps::Preflight for ScssStep {
+    fn name(&self) -> &'static str {
+        "SCSS compile"
+    }
+
+    fn rank(&self) -> crate::build::steps::Rank {
+        crate::build::steps::Rank::Transform
+    }
+
+    fn claim(&self, rel: &Path) -> Option<crate::build::steps::Claim> {
+        let name = rel.file_name()?.to_str()?;
+        let ext = rel.extension()?.to_str()?;
+        if !ext.eq_ignore_ascii_case("scss") || name.starts_with('_') {
+            return None;
+        }
+        Some(crate::build::steps::Claim {
+            out_rel: rel.with_extension("css"),
+            tiebreak: 0,
+        })
+    }
+}
+
+impl crate::build::steps::Step for ScssStep {
+    fn emit(
+        &self,
+        _cx: &crate::build::steps::EmitCx<'_>,
+        src: &Path,
+        _rel: &Path,
+        dest: &Path,
+    ) -> Result<crate::build::steps::Emitted> {
+        let paths: Vec<&Path> = self.load_paths.iter().map(PathBuf::as_path).collect();
+        let css = compile_file(src, &paths)?;
+        write(dest, css)?;
+        Ok(crate::build::steps::Emitted::default())
+    }
 }
 
 /// Feature-specific `--scss-*` flags, paired with the `--scss` / `--no-scss` toggle in

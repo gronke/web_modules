@@ -9,12 +9,12 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Added
 
-- feat(build): duplicate output detection — `build` fails before writing anything when two sources claim one output path, listing every conflict; `--skip-duplicates` keeps the highest-precedence source instead
+- feat(build): duplicate output detection — `build` fails before writing anything when two sources claim one output path, listing every conflict; `dev` warns about each conflict at startup instead of failing; `--skip-duplicates` (both commands, `Processors`, and the builders) keeps the highest-precedence source silently
 
 ### Changed
 
 - refactor(build): one preflight scan of the source roots decides what every stage emits, and each output path is written exactly once by its winner; runtime-helper vendoring and the unresolved-import check read imports captured as each file is emitted instead of re-scanning the emitted `.js`
-- Under `--skip-duplicates`, a conflict resolves by one rule: earlier root first, then a Tera template over a literal file over a transformed sibling — a later root's `.tera` no longer overwrites an earlier root's file
+- Under `--skip-duplicates`, a conflict resolves by one rule in `build` and `dev` alike: earlier root first, then a Tera template over a literal file over a transformed sibling — a later root's `.tera` no longer overwrites an earlier root's file, and `dev` now serves a literal `.js`/`.css` instead of compiling a shadowed sibling source
 - The unresolved-import check runs after Tera rendering, and JavaScript rendered from a template joins the module graph — an unresolvable import in it now fails the build
 - `build` warns when a copied `.js` parses under neither the module nor the classic-script goal — its imports cannot be validated
 

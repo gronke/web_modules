@@ -4124,6 +4124,7 @@ dependencies = [
  "quick-xml",
  "rolldown",
  "semver",
+ "serde",
  "serde_json",
  "tempfile",
  "tera",

@@ -25,7 +25,10 @@ use crate::{Error, Result};
 /// This is the imports-only dialect the build emits and validates — not a WHATWG
 /// import-map processor. `scopes`, base-URL resolution and multi-map merging are out
 /// of scope, because the build only ever interprets the map it generated itself.
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+/// The struct is the wire shape: serde derives both directions of the
+/// `{ "imports": { … } }` document, so parsing and printing cannot drift apart.
+/// Unknown top-level keys (`scopes`, `integrity`, …) are ignored on read.
+#[derive(Default, Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Importmap {
     imports: BTreeMap<String, String>,
 }
@@ -101,27 +104,12 @@ impl Importmap {
     /// Parse an import-map JSON document (a top-level `"imports"` object with string
     /// values); `context` names the source in error messages.
     pub fn from_json_str(json: &str, context: &str) -> Result<Self> {
-        let parsed: serde_json::Value =
-            serde_json::from_str(json).map_err(|e| Error::ImportMap(format!("{context}: {e}")))?;
-        let imports = parsed
-            .get("imports")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| {
-                Error::ImportMap(format!("{context}: expected a top-level 'imports' object"))
-            })?;
-        let mut map = Self::new();
-        for (key, value) in imports {
-            let url = value.as_str().ok_or_else(|| {
-                Error::ImportMap(format!("{context}: imports.{key:?} is not a string"))
-            })?;
-            map.insert(key.clone(), url.to_string());
-        }
-        Ok(map)
+        serde_json::from_str(json).map_err(|e| Error::ImportMap(format!("{context}: {e}")))
     }
 
     /// Serialize to a pretty JSON document.
     pub fn to_json(&self) -> String {
-        self.to_value().to_string_pretty()
+        serde_json::to_string_pretty(self).expect("string map serializes")
     }
 
     /// Render a complete `<script type="importmap">…</script>` element (compact JSON).
@@ -133,7 +121,7 @@ impl Importmap {
     pub fn to_script_tag(&self) -> String {
         format!(
             "<script type=\"importmap\">{}</script>",
-            escape_for_script(&self.to_value().to_string_compact())
+            escape_for_script(&serde_json::to_string(self).expect("string map serializes"))
         )
     }
 
@@ -144,30 +132,6 @@ impl Importmap {
         }
         fs::write(path, self.to_json())?;
         Ok(())
-    }
-
-    fn to_value(&self) -> Doc<'_> {
-        Doc(&self.imports)
-    }
-}
-
-/// Thin wrapper so `to_json`/`to_script_tag` share one serialization path.
-struct Doc<'a>(&'a BTreeMap<String, String>);
-
-impl Doc<'_> {
-    fn json(&self) -> serde_json::Value {
-        let body: serde_json::Map<String, serde_json::Value> = self
-            .0
-            .iter()
-            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-            .collect();
-        serde_json::json!({ "imports": body })
-    }
-    fn to_string_pretty(&self) -> String {
-        serde_json::to_string_pretty(&self.json()).expect("string map serializes")
-    }
-    fn to_string_compact(&self) -> String {
-        serde_json::to_string(&self.json()).expect("string map serializes")
     }
 }
 

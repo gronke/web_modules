@@ -206,7 +206,14 @@ fn preflight_warnings(mounts: &[Mount], config: &DevConfig) -> Vec<String> {
     let mut lines = Vec::new();
     for prefix in prefixes {
         let roots = &groups[prefix];
-        let report = crate::build::steps::preflight(roots, &preflights, &config.reject);
+        let report = crate::build::steps::preflight(
+            roots,
+            &preflights,
+            crate::build::steps::WalkPolicy {
+                reject: &config.reject,
+                symlinks: config.symlinks,
+            },
+        );
         for error in report.walk_errors() {
             lines.push(format!("web-modules: preflight: {error}"));
         }
@@ -215,6 +222,12 @@ fn preflight_warnings(mounts: &[Mount], config: &DevConfig) -> Vec<String> {
                 "web-modules: {} resolves outside its mount ({}) - not served",
                 roots[source.root].join(&source.rel).display(),
                 source.target.display(),
+            ));
+        }
+        for skipped in report.skipped_symlinks() {
+            lines.push(format!(
+                "web-modules: {} is a symlink - served as a redirect, skipped by build",
+                roots[skipped.root].join(&skipped.rel).display(),
             ));
         }
         if config.skip_duplicates {
@@ -591,6 +604,50 @@ mod tests {
                 && warnings[0].contains("app.js wins over")
                 && warnings[0].contains("app.ts")
                 && warnings[0].contains("--skip-duplicates"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follow_unsafe_suppresses_escape_warnings() {
+        // Escapes are the mode's contract, so the startup line disappears with them.
+        let tmp = tempfile::tempdir().unwrap();
+        let private = tmp.path().join("private");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("credentials.txt"), "secret").unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&private, root.join("exposed")).unwrap();
+
+        let config = DevConfig {
+            symlinks: crate::SymlinkMode::FollowUnsafe,
+            ..DevConfig::default()
+        };
+        let warnings = preflight_warnings(&[Mount::root(root)], &config);
+        assert!(warnings.is_empty(), "got {warnings:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redirect_mode_warns_about_skipped_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("real.txt"), "data").unwrap();
+        std::os::unix::fs::symlink(root.join("real.txt"), root.join("link.txt")).unwrap();
+
+        let config = DevConfig {
+            symlinks: crate::SymlinkMode::Redirect,
+            ..DevConfig::default()
+        };
+        let warnings = preflight_warnings(&[Mount::root(root)], &config);
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            warnings[0].contains("link.txt")
+                && warnings[0].contains("redirect")
+                && warnings[0].contains("skipped by build"),
             "got: {}",
             warnings[0]
         );

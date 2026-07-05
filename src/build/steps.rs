@@ -181,13 +181,33 @@ impl ClaimRecord {
 }
 
 /// Every claim from one walk of the source roots, plus every visited path (the
-/// `cargo:rerun-if-changed` set), the files that resolve outside their root, and
-/// the walk problems that would make the preflight incomplete.
+/// `cargo:rerun-if-changed` set), the files that resolve outside their root, the
+/// symlinks the mode told the walk not to follow, and the walk problems that would
+/// make the preflight incomplete.
 pub(crate) struct PreflightReport {
     claims: Vec<ClaimRecord>,
     walked: Vec<PathBuf>,
     escaping_sources: Vec<EscapingSource>,
     walk_errors: Vec<String>,
+    skipped_symlinks: Vec<SkippedSymlink>,
+}
+
+/// The walk-level policies [`preflight`] enforces, bundled so the signature does not
+/// grow one parameter per policy: the reject list (drops claims by target) and the
+/// symlink mode (what a link in the tree means).
+pub(crate) struct WalkPolicy<'a> {
+    pub reject: &'a crate::reject::Reject,
+    pub symlinks: crate::SymlinkMode,
+}
+
+/// A symlink the walk did not follow — [`Redirect`](crate::SymlinkMode::Redirect) /
+/// [`Move`](crate::SymlinkMode::Move) modes only, where serving answers with a
+/// redirect and a static build has nothing to emit. A directory link is recorded as
+/// its single top entry; nothing beneath it is walked.
+#[derive(Debug)]
+pub(crate) struct SkippedSymlink {
+    pub root: usize,
+    pub rel: PathBuf,
 }
 
 /// A source file whose canonical location is not under its canonical root — a
@@ -202,12 +222,20 @@ pub(crate) struct EscapingSource {
     pub target: PathBuf,
 }
 
-/// Walk each root once (following symlinks) and offer every file to every step.
-/// Containment is canonical: each root resolves once, every file must resolve under
+/// Walk each root once and offer every file to every step, under the walk policy.
+///
+/// Symlinks follow the mode: under [`Follow`](crate::SymlinkMode::Follow) (default)
+/// containment is canonical — each root resolves once, every file must resolve under
 /// it, and one that does not is recorded as an [`EscapingSource`] instead of being
-/// offered. In-root symlinks work; a link out of the tree never publishes.
-/// Unreadable entries and unresolvable links land in `walk_errors` rather than being
-/// silently dropped — a partial preflight would otherwise pass for a complete one.
+/// offered, so in-root links work and a link out of the tree never publishes. Under
+/// [`FollowUnsafe`](crate::SymlinkMode::FollowUnsafe) every link is followed and
+/// nothing escapes by definition. Under [`Redirect`](crate::SymlinkMode::Redirect) /
+/// [`Move`](crate::SymlinkMode::Move) links are not followed at all: each one is
+/// recorded as a [`SkippedSymlink`] (serving answers a redirect; a build has nothing
+/// to emit). Unreadable entries and unresolvable links land in `walk_errors` rather
+/// than being silently dropped — a partial preflight would otherwise pass for a
+/// complete one.
+///
 /// The `reject` list guards emission centrally, by **target**: a claim on a rejected
 /// output path is dropped (with a warning) no matter which step makes it, so a
 /// template or a compiled source cannot materialize `.env` or `private.key` — the
@@ -215,23 +243,33 @@ pub(crate) struct EscapingSource {
 pub(crate) fn preflight(
     roots: &[PathBuf],
     steps: &[&dyn Preflight],
-    reject: &crate::reject::Reject,
+    policy: WalkPolicy<'_>,
 ) -> PreflightReport {
     let mut report = PreflightReport {
         claims: Vec::new(),
         walked: Vec::new(),
         escaping_sources: Vec::new(),
         walk_errors: Vec::new(),
+        skipped_symlinks: Vec::new(),
     };
+    let follow = matches!(
+        policy.symlinks,
+        crate::SymlinkMode::Follow | crate::SymlinkMode::FollowUnsafe
+    );
     for (root_index, root) in roots.iter().enumerate() {
-        let canonical_root = match std::fs::canonicalize(root) {
-            Ok(canonical) => canonical,
-            Err(e) => {
-                report.walk_errors.push(format!("{}: {e}", root.display()));
-                continue;
-            }
+        // Canonical containment applies under `Follow` only: `FollowUnsafe` permits
+        // escapes, and the redirect modes never follow a link in the first place.
+        let canonical_root = match policy.symlinks {
+            crate::SymlinkMode::Follow => match std::fs::canonicalize(root) {
+                Ok(canonical) => Some(canonical),
+                Err(e) => {
+                    report.walk_errors.push(format!("{}: {e}", root.display()));
+                    continue;
+                }
+            },
+            _ => None,
         };
-        for entry in walkdir::WalkDir::new(root).follow_links(true) {
+        for entry in walkdir::WalkDir::new(root).follow_links(follow) {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(e) => {
@@ -241,30 +279,44 @@ pub(crate) fn preflight(
             };
             let path = entry.path();
             report.walked.push(path.to_path_buf());
+            // Redirect/Move: a symlink (file or directory alike) is a redirect when
+            // served and nothing when built — record it and move on. Checked before
+            // `is_file`, which would stat *through* the link.
+            if !follow && entry.path_is_symlink() {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    report.skipped_symlinks.push(SkippedSymlink {
+                        root: root_index,
+                        rel: rel.to_path_buf(),
+                    });
+                }
+                continue;
+            }
             if !path.is_file() {
                 continue;
             }
             let Ok(rel) = path.strip_prefix(root) else {
                 continue;
             };
-            let canonical = match std::fs::canonicalize(path) {
-                Ok(canonical) => canonical,
-                Err(e) => {
-                    report.walk_errors.push(format!("{}: {e}", path.display()));
+            if let Some(canonical_root) = &canonical_root {
+                let canonical = match std::fs::canonicalize(path) {
+                    Ok(canonical) => canonical,
+                    Err(e) => {
+                        report.walk_errors.push(format!("{}: {e}", path.display()));
+                        continue;
+                    }
+                };
+                if !canonical.starts_with(canonical_root) {
+                    report.escaping_sources.push(EscapingSource {
+                        root: root_index,
+                        rel: rel.to_path_buf(),
+                        target: canonical,
+                    });
                     continue;
                 }
-            };
-            if !canonical.starts_with(&canonical_root) {
-                report.escaping_sources.push(EscapingSource {
-                    root: root_index,
-                    rel: rel.to_path_buf(),
-                    target: canonical,
-                });
-                continue;
             }
             for (step_index, step) in steps.iter().enumerate() {
                 if let Some(claim) = step.claim(rel) {
-                    if reject.rejects_path(&claim.out_rel) {
+                    if policy.reject.rejects_path(&claim.out_rel) {
                         crate::reject::warn_rejected(&claim.out_rel.display().to_string());
                         continue;
                     }
@@ -359,6 +411,11 @@ impl PreflightReport {
     pub(crate) fn walk_errors(&self) -> &[String] {
         &self.walk_errors
     }
+
+    /// Symlinks the mode told the walk not to follow (Redirect/Move modes only).
+    pub(crate) fn skipped_symlinks(&self) -> &[SkippedSymlink] {
+        &self.skipped_symlinks
+    }
 }
 
 #[cfg(test)]
@@ -404,10 +461,18 @@ mod tests {
     }
 
     fn scan(roots: &[PathBuf]) -> PreflightReport {
+        scan_with(roots, crate::SymlinkMode::Follow)
+    }
+
+    fn scan_with(roots: &[PathBuf], symlinks: crate::SymlinkMode) -> PreflightReport {
+        let reject = crate::reject::Reject::none();
         preflight(
             roots,
             &[&CopyLike, &TransformLike],
-            &crate::reject::Reject::none(),
+            WalkPolicy {
+                reject: &reject,
+                symlinks,
+            },
         )
     }
 
@@ -486,10 +551,14 @@ mod tests {
         std::fs::write(root.join("x.two"), "later").unwrap();
         std::fs::write(root.join("x.one"), "earlier").unwrap();
 
+        let reject = crate::reject::Reject::none();
         let report = preflight(
             std::slice::from_ref(&root),
             &[&Multi],
-            &crate::reject::Reject::none(),
+            WalkPolicy {
+                reject: &reject,
+                symlinks: crate::SymlinkMode::Follow,
+            },
         );
         let conflicts = report.conflicts();
         assert_eq!(conflicts.len(), 1);
@@ -535,10 +604,14 @@ mod tests {
         std::fs::write(root.join("b.abs"), "x").unwrap();
         std::fs::write(root.join("fine.txt"), "x").unwrap();
 
+        let reject = crate::reject::Reject::none();
         let report = preflight(
             std::slice::from_ref(&root),
             &[&Hostile, &CopyLike],
-            &crate::reject::Reject::none(),
+            WalkPolicy {
+                reject: &reject,
+                symlinks: crate::SymlinkMode::Follow,
+            },
         );
         let escaping = report.escaping();
         assert_eq!(escaping.len(), 2, "got {escaping:?}");
@@ -583,7 +656,10 @@ mod tests {
         let report = preflight(
             std::slice::from_ref(&root),
             &[&CopyLike, &TransformLike],
-            &reject,
+            WalkPolicy {
+                reject: &reject,
+                symlinks: crate::SymlinkMode::Follow,
+            },
         );
         assert!(
             !report.claims_target("a.txt"),
@@ -635,6 +711,66 @@ mod tests {
         assert!(
             report.claims_target("linked/a.txt"),
             "file in a linked dir claims"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_follow_unsafe_claims_escaping_files() {
+        // The mode's contract: every link is followed, wherever it points — the
+        // escape is neither recorded nor refused.
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("credentials.txt"), "secret").unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&private, root.join("exposed")).unwrap();
+
+        let report = scan_with(
+            std::slice::from_ref(&root),
+            crate::SymlinkMode::FollowUnsafe,
+        );
+        assert!(
+            report.escaping_sources().is_empty(),
+            "escapes are permitted"
+        );
+        assert!(
+            report.claims_target("exposed/credentials.txt"),
+            "the escaping file claims like any other"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_redirect_skips_symlinks_and_claims_plain_files() {
+        // Redirect/Move: links are never followed — a file link and a directory
+        // link are each recorded once, nothing beneath a dir link is walked, and
+        // plain files claim as usual. A dangling link is a skip too, not an error:
+        // serving redirects to its content whether or not the target exists.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::write(root.join("real/a.txt"), "data").unwrap();
+        std::fs::write(root.join("plain.txt"), "plain").unwrap();
+        std::os::unix::fs::symlink(root.join("plain.txt"), root.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
+        std::os::unix::fs::symlink(root.join("missing"), root.join("dangling")).unwrap();
+
+        let report = scan_with(std::slice::from_ref(&root), crate::SymlinkMode::Redirect);
+        let mut skipped: Vec<_> = report
+            .skipped_symlinks()
+            .iter()
+            .map(|s| s.rel.display().to_string())
+            .collect();
+        skipped.sort();
+        assert_eq!(skipped, ["dangling", "link.txt", "linked"]);
+        assert!(report.walk_errors().is_empty(), "a skip is not an error");
+        assert!(report.claims_target("plain.txt"), "plain files still claim");
+        assert!(report.claims_target("real/a.txt"));
+        assert!(
+            !report.claims_target("linked/a.txt"),
+            "nothing beneath a directory link is walked"
         );
     }
 

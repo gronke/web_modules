@@ -340,12 +340,28 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
         .iter()
         .map(|step| step.as_ref() as &dyn steps::Preflight)
         .collect();
-    let report = steps::preflight(opts.roots, &preflights, &opts.processors.reject);
+    let report = steps::preflight(
+        opts.roots,
+        &preflights,
+        steps::WalkPolicy {
+            reject: &opts.processors.reject,
+            symlinks: opts.processors.symlinks,
+        },
+    );
 
     // A walk problem means the preflight may be incomplete — surface it instead of
     // silently building from a partial picture (a dangling link, an unreadable dir).
     for error in report.walk_errors() {
         crate::static_files::build_warning(&format!("web-modules: preflight: {error}"));
+    }
+
+    // Redirect/Move modes only: a symlink is a serving-time redirect, and a static
+    // build has nothing to emit for one — each is skipped aloud.
+    for skipped in report.skipped_symlinks() {
+        crate::static_files::build_warning(&format!(
+            "web-modules: {}: symlink skipped - a static build cannot express a redirect",
+            opts.roots[skipped.root].join(&skipped.rel).display()
+        ));
     }
 
     // Sources may only come from inside their root: a file that canonically resolves

@@ -26,7 +26,7 @@ features = ["full"]
 # Specialised for building web modules + simple web apps: TypeScript, SCSS and
 # Tera are on by default. None of these pull in a server runtime, so a `build.rs`
 # that only enables `default` stays free of axum/tokio.
-default = ["typescript", "scss", "tera", "builder"]
+default = ["typescript", "scss", "tera", "builder", "symlink-move"]
 
 # TypeScript / modern-JS → browser JS via oxc (incl. legacy decorators for Lit).
 typescript = ["dep:oxc_allocator", "dep:oxc_ast", "dep:oxc_ast_visit", "dep:oxc_parser", "dep:oxc_semantic", "dep:oxc_transformer", "dep:oxc_codegen", "dep:oxc_span"]
@@ -80,10 +80,14 @@ builder = []
 # Emit `tracing::warn!` for paths dropped by the reject list (built output / serving / bundling).
 # Off by default (no `tracing` dep on the lean path); a no-op without a subscriber when on.
 tracing = ["dep:tracing"]
+# The redirect symlink modes (`--symlinks redirect|move`): serving answers 307/308 with the link
+# content as the Location. Default-on so the modes are an opt-in CLI/API choice; strip with
+# `--no-default-features` for a build where a symlink can never become a redirect.
+symlink-move = []
 # Everything in the lean toolchain (incl. `env`, so CI's `--features full` lint/test covers the
 # env-gated CLI arms). The heavy, opt-in `bundle` is intentionally NOT included, so `full` (and
 # `--features full`) builds stay free of the rolldown / second-oxc tree.
-full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm", "builder", "tracing"]
+full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm", "builder", "tracing", "symlink-move"]
 
 [dependencies]
 # Core — vendoring npm packages + composing import maps + a transitive `node_modules/`

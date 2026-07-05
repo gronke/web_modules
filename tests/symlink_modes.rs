@@ -108,6 +108,7 @@ async fn follow_unsafe_serves_the_escape_but_keeps_every_other_guard() {
     assert!(String::from_utf8_lossy(&body).contains("fromOutside"));
 }
 
+#[cfg(feature = "symlink-move")]
 #[tokio::test]
 async fn redirect_answers_with_the_link_content_and_never_the_target() {
     let tmp = tempfile::tempdir().unwrap();
@@ -156,6 +157,7 @@ async fn redirect_answers_with_the_link_content_and_never_the_target() {
     }
 }
 
+#[cfg(feature = "symlink-move")]
 #[tokio::test]
 async fn move_answers_permanently_and_symlinked_sources_stay_dark() {
     let tmp = tempfile::tempdir().unwrap();
@@ -213,6 +215,7 @@ fn build_follow_unsafe_publishes_the_escape() {
     );
 }
 
+#[cfg(feature = "symlink-move")]
 #[test]
 fn build_redirect_skips_symlinks_and_ships_the_rest() {
     let tmp = tempfile::tempdir().unwrap();

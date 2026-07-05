@@ -691,11 +691,14 @@ mod tests {
             SymlinkMode::Follow,
             "safe by default"
         );
-        // Every value string parses, `move` included (a keyword as a word, not as a value).
+        // Every value string parses, `move` included (a keyword as a word, not as a
+        // value); the redirect rows exist only with the default-on `symlink-move`.
         for (value, mode) in [
             ("follow", SymlinkMode::Follow),
             ("follow-unsafe", SymlinkMode::FollowUnsafe),
+            #[cfg(feature = "symlink-move")]
             ("redirect", SymlinkMode::Redirect),
+            #[cfg(feature = "symlink-move")]
             ("move", SymlinkMode::Move),
         ] {
             let resolved = resolve_build(&["--symlinks", value]);
@@ -703,8 +706,8 @@ mod tests {
             assert_eq!(resolved.into_processors().symlinks, mode);
         }
 
-        let cli =
-            Cli::try_parse_from(["web-modules", "dev", "web", "--symlinks", "redirect"]).unwrap();
+        let cli = Cli::try_parse_from(["web-modules", "dev", "web", "--symlinks", "follow-unsafe"])
+            .unwrap();
         match cli.command {
             Command::Dev { compiler, .. } => {
                 assert_eq!(
@@ -712,7 +715,7 @@ mod tests {
                         .resolve_with(&PkgConfig::default())
                         .into_processors()
                         .symlinks,
-                    SymlinkMode::Redirect,
+                    SymlinkMode::FollowUnsafe,
                     "the flag lands on the Processors both subcommands consume"
                 );
             }

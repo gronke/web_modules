@@ -7,6 +7,11 @@
 #[cfg(feature = "axum")]
 mod serving;
 
+/// The redirect symlink modes — the crate's own special sauce, one module so the
+/// default-on `symlink-move` feature gates it in one place.
+#[cfg(all(feature = "axum", feature = "symlink-move"))]
+mod symlink_move;
+
 #[cfg(feature = "axum")]
 pub mod server;
 

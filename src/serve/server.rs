@@ -37,8 +37,8 @@ use axum::{
 use include_dir::Dir;
 
 use super::serving::{
-    content_type, has_source_extension, has_traversal, is_source_file, redirect_response,
-    relative_under, resolve_file, Resolved,
+    content_type, has_source_extension, has_traversal, is_source_file, relative_under,
+    resolve_file, Resolved,
 };
 use crate::reject::{Presets, Reject};
 use crate::SymlinkMode;
@@ -304,8 +304,12 @@ async fn serve_static(
                     }
                     // Redirect modes: the symlink's content is the Location; a
                     // redirect from the most-specific root is definitive.
+                    #[cfg(feature = "symlink-move")]
                     Some(Resolved::Redirect(location)) => {
-                        return match redirect_response(&location, *symlinks == SymlinkMode::Move) {
+                        return match super::symlink_move::redirect_response(
+                            &location,
+                            *symlinks == SymlinkMode::Move,
+                        ) {
                             Some(response) => response,
                             None => StatusCode::NOT_FOUND.into_response(),
                         };
@@ -364,9 +368,9 @@ mod tests {
         assert_eq!(Frontend::dir("web").symlinks, SymlinkMode::Follow);
         assert_eq!(
             Frontend::dir("web")
-                .symlinks(SymlinkMode::Redirect)
+                .symlinks(SymlinkMode::FollowUnsafe)
                 .symlinks,
-            SymlinkMode::Redirect
+            SymlinkMode::FollowUnsafe
         );
     }
 

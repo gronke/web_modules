@@ -27,6 +27,10 @@
 /// build cannot express an HTTP redirect, so those two modes skip symlinks when
 /// building. Embedded (`include_dir!`) trees carry no symlinks — the mode is a
 /// filesystem concern.
+///
+/// The two redirect modes are compiled behind the default-on `symlink-move`
+/// feature: `--no-default-features` yields a build in which a symlink can never
+/// become a redirect, while `Follow` and `FollowUnsafe` are always available.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum SymlinkMode {
@@ -40,8 +44,12 @@ pub enum SymlinkMode {
     FollowUnsafe,
     /// Do not follow: serving answers `307 Temporary Redirect` with the symlink's
     /// own content as the `Location`; the build skips the link with a warning.
+    /// Requires the `symlink-move` feature (default-on).
+    #[cfg(feature = "symlink-move")]
     Redirect,
     /// [`Redirect`](SymlinkMode::Redirect), but permanent: `308 Permanent Redirect`.
+    /// Requires the `symlink-move` feature (default-on).
+    #[cfg(feature = "symlink-move")]
     Move,
 }
 
@@ -54,7 +62,9 @@ pub enum SymlinkModeArg {
     #[default]
     Follow,
     FollowUnsafe,
+    #[cfg(feature = "symlink-move")]
     Redirect,
+    #[cfg(feature = "symlink-move")]
     Move,
 }
 
@@ -64,7 +74,9 @@ impl From<SymlinkModeArg> for SymlinkMode {
         match arg {
             SymlinkModeArg::Follow => SymlinkMode::Follow,
             SymlinkModeArg::FollowUnsafe => SymlinkMode::FollowUnsafe,
+            #[cfg(feature = "symlink-move")]
             SymlinkModeArg::Redirect => SymlinkMode::Redirect,
+            #[cfg(feature = "symlink-move")]
             SymlinkModeArg::Move => SymlinkMode::Move,
         }
     }
@@ -83,12 +95,16 @@ mod tests {
     #[test]
     fn cli_values_are_kebab_case() {
         // Pins the user-facing strings, `move` included (a legal value string even
-        // though lowercase `move` is a Rust keyword).
+        // though lowercase `move` is a Rust keyword). The redirect values exist only
+        // with the default-on `symlink-move` feature.
         use clap::ValueEnum;
         let names: Vec<_> = SymlinkModeArg::value_variants()
             .iter()
             .map(|v| v.to_possible_value().unwrap().get_name().to_string())
             .collect();
+        #[cfg(feature = "symlink-move")]
         assert_eq!(names, ["follow", "follow-unsafe", "redirect", "move"]);
+        #[cfg(not(feature = "symlink-move"))]
+        assert_eq!(names, ["follow", "follow-unsafe"]);
     }
 }

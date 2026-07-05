@@ -741,7 +741,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "symlink-move"))]
     #[test]
     fn preflight_redirect_skips_symlinks_and_claims_plain_files() {
         // Redirect/Move: links are never followed — a file link and a directory

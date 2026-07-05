@@ -91,6 +91,7 @@ What a symlink in a source tree means is selectable with `--symlinks` (also `Pro
 | `move` | links are skipped with a warning | `308 Permanent Redirect`, same rule |
 
 Under `follow` a link works within its own source root and never across roots.
+The two redirect modes are the crate's own special sauce and are compiled behind the default-on `symlink-move` feature — `--no-default-features` yields a build in which a symlink can never become a redirect, while `follow` and `follow-unsafe` are always available.
 The redirect modes answer without ever opening the target — the link content is the `Location`, taken literally (plus the request's remaining components when a directory link is on the way) — which is also why a static build has nothing to emit for a link and skips it.
 In every mode, request-path traversal, the reject list, source-hiding, the SCSS import sandbox, and vendor-extraction hardening are unaffected: a symlink mode never relaxes a security sandbox.
 The live-reload watcher's behavior through links is backend-defined; under `follow-unsafe` an edit behind an out-of-tree link may not trigger a reload.

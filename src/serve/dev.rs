@@ -289,10 +289,11 @@ async fn serve_asset(State(state): State<DevState>, uri: Uri) -> Response {
             .header(header::CONTENT_TYPE, content_type)
             .body(Body::from(body))
             .expect("valid response"),
+        #[cfg(feature = "symlink-move")]
         Ok(Some(Served::Redirect {
             location,
             permanent,
-        })) => match super::serving::redirect_response(&location, permanent) {
+        })) => match super::symlink_move::redirect_response(&location, permanent) {
             Some(response) => response,
             // `location_value` pre-sanitized; an unbuildable header is a refusal.
             None => (StatusCode::NOT_FOUND, format!("404 Not Found: {requested}")).into_response(),
@@ -308,8 +309,15 @@ async fn serve_asset(State(state): State<DevState>, uri: Uri) -> Response {
 /// What [`resolve`] produced: response bytes, or — the redirect symlink modes only —
 /// the redirect a symlink stands for.
 enum Served {
-    Bytes { body: Vec<u8>, content_type: String },
-    Redirect { location: String, permanent: bool },
+    Bytes {
+        body: Vec<u8>,
+        content_type: String,
+    },
+    #[cfg(feature = "symlink-move")]
+    Redirect {
+        location: String,
+        permanent: bool,
+    },
 }
 
 /// A probe for a *source* candidate (a `.tera`, `.ts`, `.scss`): only a real file
@@ -401,6 +409,7 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<Served>, String> 
                 }
                 // Redirect modes: a symlink on the literal path answers with its
                 // own content as the Location — the target is never opened.
+                #[cfg(feature = "symlink-move")]
                 Some(Resolved::Redirect(location)) => {
                     return Ok(Some(Served::Redirect {
                         location,
@@ -556,6 +565,7 @@ mod tests {
         fn bytes(self) -> (Vec<u8>, String) {
             match self {
                 Served::Bytes { body, content_type } => (body, content_type),
+                #[cfg(feature = "symlink-move")]
                 Served::Redirect { location, .. } => {
                     panic!("expected bytes, got a redirect to {location}")
                 }
@@ -700,7 +710,7 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "symlink-move"))]
     #[test]
     fn redirect_mode_answers_with_the_link_content_and_hides_symlinked_sources() {
         let tmp = tempfile::tempdir().unwrap();
@@ -737,7 +747,7 @@ mod tests {
         assert_eq!(bytes, b"data", "plain files keep the full guard chain");
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "symlink-move"))]
     #[test]
     fn move_mode_marks_the_redirect_permanent() {
         let tmp = tempfile::tempdir().unwrap();
@@ -779,7 +789,7 @@ mod tests {
         assert!(warnings.is_empty(), "got {warnings:?}");
     }
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "symlink-move"))]
     #[test]
     fn redirect_mode_warns_about_skipped_symlinks() {
         let tmp = tempfile::tempdir().unwrap();

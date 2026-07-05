@@ -721,6 +721,7 @@ mod tests {
         o
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn build_replaces_stale_outputs_across_rebuilds() {
         // The stale-file failure sequence from the review: a source removed between
@@ -910,6 +911,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "compress")]
     #[test]
     fn build_reserves_gzip_sidecars() {
         // A shipped `app.js.gz` collides with the sidecar the gzip pass writes for the

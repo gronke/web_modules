@@ -151,7 +151,7 @@ pub fn dev_router_mounted_with_embedded(
     build_router(mounts, Some(embedded), DevConfig::default())
 }
 
-fn build_router(
+pub(crate) fn build_router(
     mounts: Vec<Mount>,
     fallback: Option<&'static Dir<'static>>,
     config: DevConfig,

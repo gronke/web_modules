@@ -37,10 +37,11 @@ use axum::{
 use include_dir::Dir;
 
 use super::serving::{
-    contained_file, content_type, has_source_extension, has_traversal, is_source_file,
-    relative_under,
+    content_type, has_source_extension, has_traversal, is_source_file, redirect_response,
+    relative_under, resolve_file, Resolved,
 };
 use crate::reject::{Presets, Reject};
+use crate::SymlinkMode;
 
 /// The backing of a served root: assets baked into the binary, or a directory read
 /// from the filesystem at runtime.
@@ -77,6 +78,9 @@ pub struct Frontend {
     /// Paths refused by the static router (config / secrets / source). Default: all presets.
     /// See [`Reject`](crate::reject::Reject). (The [`dev`](Self::dev) path uses all presets.)
     reject: Reject,
+    /// What a symlink in a filesystem root means (default: the safe
+    /// [`Follow`](SymlinkMode::Follow)). Carried into [`dev`](Self::dev) too.
+    symlinks: SymlinkMode,
 }
 
 impl Frontend {
@@ -108,6 +112,14 @@ impl Frontend {
     /// selected [`presets`](Self::reject_preset). Case-insensitive. Repeatable.
     pub fn reject(mut self, pattern: impl AsRef<str>) -> Self {
         self.reject.add(pattern);
+        self
+    }
+
+    /// What a symlink in a filesystem root means (default: the safe
+    /// [`SymlinkMode::Follow`]). Applies to [`router`](Self::router) and is carried
+    /// into [`dev`](Self::dev).
+    pub fn symlinks(mut self, mode: SymlinkMode) -> Self {
+        self.symlinks = mode;
         self
     }
 
@@ -145,11 +157,17 @@ impl Frontend {
     pub fn router(self) -> Router {
         Router::new()
             .fallback(serve_static)
-            .with_state(Arc::new((self.roots, self.reject)))
+            .with_state(Arc::new(StaticState {
+                roots: self.roots,
+                reject: self.reject,
+                symlinks: self.symlinks,
+            }))
     }
 
     /// Compile TS/SCSS on the fly + watch the **filesystem** roots, live-reloading the
     /// browser; embedded roots are the static fallback. Requires the `dev` feature.
+    /// The [`symlinks`](Self::symlinks) mode is carried over; the reject list is not —
+    /// the dev path always refuses all presets.
     #[cfg(feature = "dev")]
     pub fn dev(self) -> Router {
         let mut mounts = Vec::new();
@@ -168,10 +186,11 @@ impl Frontend {
                 Source::Embedded(dir) => embedded = embedded.or(Some(dir)),
             }
         }
-        match embedded {
-            Some(dir) => crate::dev::dev_router_mounted_with_embedded(mounts, dir),
-            None => crate::dev::dev_router_mounted(mounts),
-        }
+        let config = crate::dev::DevConfig {
+            symlinks: self.symlinks,
+            ..Default::default()
+        };
+        crate::dev::build_router(mounts, embedded, config)
     }
 
     /// [`dev`](Self::dev) in debug builds (with the `dev` feature), else
@@ -184,15 +203,27 @@ impl Frontend {
     }
 }
 
+/// The static router's shared state: the roots, the reject policy, and the symlink
+/// mode.
+struct StaticState {
+    roots: Vec<Root>,
+    reject: Reject,
+    symlinks: SymlinkMode,
+}
+
 /// Static handler: resolve a request against the roots (most-specific prefix first,
 /// same-prefix ties in declaration order) and serve the first match, staying inside
-/// each root.
+/// each root (per the symlink mode).
 async fn serve_static(
-    State(state): State<Arc<(Vec<Root>, Reject)>>,
+    State(state): State<Arc<StaticState>>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
-    let (roots, reject) = &*state;
+    let StaticState {
+        roots,
+        reject,
+        symlinks,
+    } = &*state;
     let raw = uri.path().trim_start_matches('/');
     let requested = if raw.is_empty() || raw.ends_with('/') {
         format!("{raw}index.html")
@@ -234,7 +265,11 @@ async fn serve_static(
             }
             Source::Dir(path) => {
                 if gzip_ok {
-                    if let Some(gz) = contained_file(path, &format!("{rel}.gz")) {
+                    // A sidecar never redirects: only a real `.gz` file counts, and
+                    // the plain probe below decides what a symlink means.
+                    if let Some(Resolved::File(gz)) =
+                        resolve_file(path, &format!("{rel}.gz"), *symlinks)
+                    {
                         // Don't hand back a gzipped *source* (e.g. an `app.scss.gz`):
                         // strip `.gz` and re-check the resolved name.
                         let degz_is_source = gz
@@ -247,25 +282,35 @@ async fn serve_static(
                         }
                     }
                 }
-                if let Some(file) = contained_file(path, &rel) {
-                    // Re-check the *resolved* path, not just the request string: a
-                    // case-insensitive or name-folding FS can open a source/rejected file the
-                    // request didn't reveal (`app.SCSS`, or `secret.php.` on Windows), which the
-                    // lexical guards above miss. Check the file name (the fold-prone part), not the
-                    // absolute path whose parent dirs are out of our control.
-                    let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if reject.rejects(name) {
-                        crate::reject::warn_rejected(&rel);
-                        continue;
+                match resolve_file(path, &rel, *symlinks) {
+                    Some(Resolved::File(file)) => {
+                        // Re-check the *resolved* path, not just the request string: a
+                        // case-insensitive or name-folding FS can open a source/rejected file the
+                        // request didn't reveal (`app.SCSS`, or `secret.php.` on Windows), which the
+                        // lexical guards above miss. Check the file name (the fold-prone part), not the
+                        // absolute path whose parent dirs are out of our control.
+                        let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if reject.rejects(name) {
+                            crate::reject::warn_rejected(&rel);
+                            continue;
+                        }
+                        if !has_source_extension(&file) {
+                            return match std::fs::read(&file) {
+                                Ok(bytes) => ([(header::CONTENT_TYPE, ct)], bytes).into_response(),
+                                Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+                                    .into_response(),
+                            };
+                        }
                     }
-                    if !has_source_extension(&file) {
-                        return match std::fs::read(&file) {
-                            Ok(bytes) => ([(header::CONTENT_TYPE, ct)], bytes).into_response(),
-                            Err(e) => {
-                                (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-                            }
+                    // Redirect modes: the symlink's content is the Location; a
+                    // redirect from the most-specific root is definitive.
+                    Some(Resolved::Redirect(location)) => {
+                        return match redirect_response(&location, *symlinks == SymlinkMode::Move) {
+                            Some(response) => response,
+                            None => StatusCode::NOT_FOUND.into_response(),
                         };
                     }
+                    None => {}
                 }
             }
         }
@@ -312,6 +357,17 @@ mod tests {
         let r = Root::new("/ui/", Source::Dir(PathBuf::from("x")));
         assert_eq!(r.prefix, "ui");
         assert!(r.watch);
+    }
+
+    #[test]
+    fn frontend_defaults_to_the_safe_symlink_mode() {
+        assert_eq!(Frontend::dir("web").symlinks, SymlinkMode::Follow);
+        assert_eq!(
+            Frontend::dir("web")
+                .symlinks(SymlinkMode::Redirect)
+                .symlinks,
+            SymlinkMode::Redirect
+        );
     }
 
     #[test]

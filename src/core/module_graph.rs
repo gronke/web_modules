@@ -121,35 +121,20 @@ pub enum SpecifierClass {
     Bare,
 }
 
-/// Classify `spec` by URL grammar, in order: a scheme prefix (an ASCII letter, then
-/// ASCII letters/digits/`+`/`-`/`.`, then `:`) makes it a URL; a `/`, `./` or `../`
-/// prefix makes it relative; anything else is bare. The one classifier every check
+/// Classify `spec` the way the WHATWG "resolve a module specifier" algorithm does, in
+/// order: a string the WHATWG URL parser (the `url` crate) accepts as an absolute URL
+/// is a URL — the browser's own first resolution step, so scheme edge cases and
+/// whitespace stripping match by construction; a `/`, `./` or `../` prefix is resolved
+/// against the importing module; anything else is bare. The one classifier every check
 /// shares, so the graph and the resolution report cannot disagree about a specifier.
 pub fn classify(spec: &str) -> SpecifierClass {
-    if has_url_scheme(spec) {
+    if url::Url::parse(spec).is_ok() {
         SpecifierClass::Url
     } else if spec.starts_with('/') || spec.starts_with("./") || spec.starts_with("../") {
         SpecifierClass::Relative
     } else {
         SpecifierClass::Bare
     }
-}
-
-/// Whether `spec` starts with a URL scheme per the URL grammar: an ASCII letter, then
-/// any run of ASCII letters, digits, `+`, `-` or `.`, terminated by `:`.
-fn has_url_scheme(spec: &str) -> bool {
-    let mut chars = spec.chars();
-    if !chars.next().is_some_and(|c| c.is_ascii_alphabetic()) {
-        return false;
-    }
-    for c in chars {
-        match c {
-            ':' => return true,
-            c if c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.') => {}
-            _ => return false,
-        }
-    }
-    false
 }
 
 fn is_runtime_import(spec: &str) -> bool {
@@ -375,10 +360,18 @@ mod tests {
             ("@oxc-project/runtime/helpers/decorate", Bare),
             (".hidden", Bare),     // relative means exactly `/`, `./` or `../`
             ("1nope:x", Bare),     // a scheme starts with a letter
-            ("no scheme:x", Bare), // a space ends the scheme candidate
+            ("no scheme:x", Bare), // a space is invalid in a scheme
             ("./local.js", Relative),
             ("../up.js", Relative),
             ("/x.js", Relative),
+            // Protocol-relative has no scheme, so it falls through to the `/` rule —
+            // the browser resolves it against the importing module's URL the same way.
+            ("//host/mod.js", Relative),
+            // A leading `name:` is always a scheme by URL grammar: userinfo can only
+            // appear inside an authority introduced by `//`, so a scheme-less
+            // `user:pass@host` form cannot exist — the browser parses `user:` as the
+            // scheme here too.
+            ("user:pass@example.com/mod.js", Url),
             ("https://h/y.js", Url),
             ("data:text/javascript,0", Url),
             ("blob:https://origin/uuid", Url),

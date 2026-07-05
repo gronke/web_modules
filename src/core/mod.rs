@@ -13,5 +13,6 @@ pub mod module_graph;
 pub mod mount;
 pub mod reject;
 pub mod static_files;
+pub mod symlinks;
 pub mod tsconfig;
 pub mod vendor;

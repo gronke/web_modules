@@ -64,6 +64,14 @@ macro_rules! source_builder_methods {
                 self
             }
 
+            /// What a symlink in a source tree means (default
+            /// [`SymlinkMode::Follow`](crate::SymlinkMode::Follow): a link resolves
+            /// only within its own root).
+            pub fn symlinks(mut self, mode: crate::SymlinkMode) -> Self {
+                self.processors.symlinks = mode;
+                self
+            }
+
             /// Add an extra SCSS `@use`/`@import` load path, on top of the source
             /// roots. Repeatable.
             pub fn scss_load_path(mut self, path: impl Into<std::path::PathBuf>) -> Self {

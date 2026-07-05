@@ -22,6 +22,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - `build` warns when a copied `.js` parses under neither the module nor the classic-script goal — its imports cannot be validated
 - The import map's `{ "imports": … }` wire shape is a serde derive on `Importmap` itself, so serialization and parsing share one definition; fragment parse errors now carry serde_json's line/column diagnostics
 - Without the `typescript` feature, emitted `.js`/`.mjs` is no longer scanned lexically for imports — each such file warns that its imports are not validated, instead of risking phantom bare specifiers from `import` text inside comments or strings
+- npm-utils 0.6 (audit, package sources, `--dir`, `--progress`) — the `web-modules npm` passthrough inherits the new CLI; the library APIs the vendorer uses are unchanged
 
 ### Fixed
 

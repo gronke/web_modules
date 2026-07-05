@@ -45,8 +45,10 @@ pub(crate) trait Preflight {
     fn name(&self) -> &'static str;
     fn rank(&self) -> Rank;
     /// The claim this step makes on the source file at root-relative `rel`, or `None`
-    /// when the file is not its input (wrong extension, `_` partial, `.d.ts`,
-    /// reject-listed, …).
+    /// when the file is not its input (wrong extension, `_` partial, `.d.ts`, …).
+    /// Steps need not consult the reject list: the driver drops every claim whose
+    /// *target* is rejected, centrally. (The static step still applies it to its
+    /// sources, because a raw copy ships the source file itself.)
     fn claim(&self, rel: &Path) -> Option<Claim>;
 }
 
@@ -223,7 +225,15 @@ pub(crate) struct EscapingSource {
 /// offered. In-root symlinks work; a link out of the tree never publishes.
 /// Unreadable entries and unresolvable links land in `walk_errors` rather than being
 /// silently dropped — a partial preflight would otherwise pass for a complete one.
-pub(crate) fn preflight(roots: &[PathBuf], steps: &[&dyn Preflight]) -> PreflightReport {
+/// The `reject` list guards emission centrally, by **target**: a claim on a rejected
+/// output path is dropped (with a warning) no matter which step makes it, so a
+/// template or a compiled source cannot materialize `.env` or `private.key` — the
+/// same decision the dev server takes on the request path.
+pub(crate) fn preflight(
+    roots: &[PathBuf],
+    steps: &[&dyn Preflight],
+    reject: &crate::reject::Reject,
+) -> PreflightReport {
     let mut report = PreflightReport {
         claims: Vec::new(),
         walked: Vec::new(),
@@ -271,6 +281,10 @@ pub(crate) fn preflight(roots: &[PathBuf], steps: &[&dyn Preflight]) -> Prefligh
             }
             for (step_index, step) in steps.iter().enumerate() {
                 if let Some(claim) = step.claim(rel) {
+                    if reject.rejects_path(&claim.out_rel) {
+                        crate::reject::warn_rejected(&claim.out_rel.display().to_string());
+                        continue;
+                    }
                     report.claims.push(ClaimRecord {
                         root: root_index,
                         rel: rel.to_path_buf(),
@@ -407,7 +421,11 @@ mod tests {
     }
 
     fn scan(roots: &[PathBuf]) -> PreflightReport {
-        preflight(roots, &[&CopyLike, &TransformLike])
+        preflight(
+            roots,
+            &[&CopyLike, &TransformLike],
+            &crate::reject::Reject::none(),
+        )
     }
 
     #[test]
@@ -485,7 +503,11 @@ mod tests {
         std::fs::write(root.join("x.two"), "later").unwrap();
         std::fs::write(root.join("x.one"), "earlier").unwrap();
 
-        let report = preflight(std::slice::from_ref(&root), &[&Multi]);
+        let report = preflight(
+            std::slice::from_ref(&root),
+            &[&Multi],
+            &crate::reject::Reject::none(),
+        );
         let conflicts = report.conflicts();
         assert_eq!(conflicts.len(), 1);
         assert_eq!(
@@ -530,7 +552,11 @@ mod tests {
         std::fs::write(root.join("b.abs"), "x").unwrap();
         std::fs::write(root.join("fine.txt"), "x").unwrap();
 
-        let report = preflight(std::slice::from_ref(&root), &[&Hostile, &CopyLike]);
+        let report = preflight(
+            std::slice::from_ref(&root),
+            &[&Hostile, &CopyLike],
+            &crate::reject::Reject::none(),
+        );
         let escaping = report.escaping();
         assert_eq!(escaping.len(), 2, "got {escaping:?}");
         assert!(escaping
@@ -558,6 +584,29 @@ mod tests {
         // The walk records the root, the subdirectory and the file — directory mtimes
         // catch add/remove for rerun-if-changed.
         assert!(report.walked_paths().len() >= 3);
+    }
+
+    #[test]
+    fn preflight_drops_claims_with_rejected_targets() {
+        // Rejection is by target, centrally: the transform's `.txt` output dies even
+        // though its `.src` source matches no pattern, and it dies for every step.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.src"), "source").unwrap();
+        std::fs::write(root.join("b.md"), "fine").unwrap();
+
+        let reject = crate::reject::Reject::from_list(["*.txt"]);
+        let report = preflight(
+            std::slice::from_ref(&root),
+            &[&CopyLike, &TransformLike],
+            &reject,
+        );
+        assert!(
+            !report.claims_target("a.txt"),
+            "the rejected target is not claimed"
+        );
+        assert!(report.claims_target("b.md"), "unrejected claims survive");
     }
 
     #[cfg(unix)]

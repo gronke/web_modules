@@ -14,6 +14,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Changed
 
+- **`build` stages the output and replaces `--out` atomically** — a reused output directory can no longer retain stale files from a previous build (a removed source's emitted module, a dropped package's vendored files), and a failed build leaves the previous output untouched; `--out` must be absent, empty, or a previous build's output (marked `.web-modules-out`), so a mistyped `--out .` is refused instead of deleting anything — delete a pre-existing output directory once when upgrading; the vendor cache carries over between builds and no-longer-requested packages are pruned
 - refactor(build): one preflight scan of the source roots decides what every stage emits, and each output path is written exactly once by its winner; runtime-helper vendoring and the unresolved-import check read imports captured as each file is emitted instead of re-scanning the emitted `.js`
 - Under `--skip-duplicates`, a conflict resolves by one rule in `build` and `dev` alike: earlier root first, then a Tera template over a literal file over a transformed sibling — a later root's `.tera` no longer overwrites an earlier root's file, and `dev` now serves a literal `.js`/`.css` instead of compiling a shadowed sibling source
 - The unresolved-import check runs after Tera rendering, and JavaScript rendered from a template joins the module graph — an unresolvable import in it now fails the build

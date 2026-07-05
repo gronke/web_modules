@@ -22,7 +22,16 @@ pub fn gzip_file(path: &Path) -> Result<u64> {
     let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
     encoder.write_all(&bytes)?;
     let compressed = encoder.finish()?;
-    std::fs::write(append_gz(path), &compressed)?;
+    // Write-then-rename: replace the directory entry instead of truncating in place,
+    // so a sidecar that arrived as a hardlink (the staged build seeds `web_modules/`
+    // from the previous output) never rewrites the retired tree through the shared
+    // inode.
+    let dest = append_gz(path);
+    let mut tmp = dest.clone().into_os_string();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, &compressed)?;
+    std::fs::rename(&tmp, &dest)?;
     Ok(compressed.len() as u64)
 }
 

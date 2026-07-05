@@ -563,6 +563,81 @@ fn is_up_to_date(marker: &Path, cache_key: &str, dest_dir: &Path, extract: &Extr
     }
 }
 
+/// Remove vendored entries the current build did not request. The staged build seeds
+/// `web_modules/` from the previous output to keep download caches warm, so a package
+/// whose spec was dropped since then would otherwise ship forever; this deletes such
+/// package dirs and their `.<flat>.version` cache markers (plus leftover lock files
+/// and stray files), and removes the vendor dir itself when nothing remains.
+/// `extra_dirs` names pipeline-vendored packages beyond `specs` (the transform
+/// runtime).
+pub(crate) fn prune(vendor_dir: &Path, specs: &[PackageSpec], extra_dirs: &[&str]) -> Result<()> {
+    if !vendor_dir.is_dir() {
+        return Ok(());
+    }
+    let keep_dirs: Vec<String> = specs
+        .iter()
+        .map(|spec| spec.dir.clone())
+        .chain(extra_dirs.iter().map(|dir| dir.to_string()))
+        .collect();
+    let keep_markers: Vec<String> = keep_dirs
+        .iter()
+        .map(|dir| format!(".{}.version", dir.replace('/', "_")))
+        .collect();
+    prune_level(vendor_dir, "", &keep_dirs, &keep_markers)
+        .map_err(|e| Error::Vendor(e.to_string()))?;
+    if std::fs::read_dir(vendor_dir)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
+    {
+        let _ = std::fs::remove_dir(vendor_dir);
+    }
+    Ok(())
+}
+
+/// One directory level of [`prune`]: keep exact package dirs, descend into scope dirs
+/// on the way to a kept package (removing them when emptied), keep current cache
+/// markers at the root, and delete everything else.
+fn prune_level(
+    dir: &Path,
+    prefix: &str,
+    keep_dirs: &[String],
+    keep_markers: &[String],
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue; // never written by the vendorer; leave it alone
+        };
+        let qualified = if prefix.is_empty() {
+            name.to_string()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if entry.file_type()?.is_dir() {
+            if keep_dirs.contains(&qualified) {
+                continue;
+            }
+            if keep_dirs
+                .iter()
+                .any(|keep| keep.starts_with(&format!("{qualified}/")))
+            {
+                prune_level(&entry.path(), &qualified, keep_dirs, keep_markers)?;
+                if std::fs::read_dir(entry.path())?.next().is_none() {
+                    std::fs::remove_dir(entry.path())?;
+                }
+                continue;
+            }
+            std::fs::remove_dir_all(entry.path())?;
+        } else if prefix.is_empty() && keep_markers.iter().any(|keep| keep == name) {
+            continue;
+        } else {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 /// Extract `bytes` (an npm `.tar.gz` or a GitHub `.zip`) into `dest` per `extract`.
 /// GitHub archives carry a single top-level `repo-<ref>/` directory, stripped
 /// generically (its exact name depends on the ref).
@@ -1079,5 +1154,66 @@ mod tests {
         assert!(json.contains("\"lit/\": \"/web_modules/lit/\""));
         // Second run is a cache hit: idempotent, no panic.
         vendor(&root, "/web_modules", &specs).unwrap();
+    }
+
+    #[test]
+    fn prune_removes_dropped_packages_and_keeps_current_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("web_modules");
+        for d in [
+            "lit",
+            "dropped",
+            "@scope/keep",
+            "@scope/drop",
+            "@gone/only",
+            "@oxc-project/runtime/src",
+        ] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+            std::fs::write(dir.join(d).join("index.js"), "export {};").unwrap();
+        }
+        for m in [
+            ".lit.version",
+            ".dropped.version",
+            ".@scope_keep.version",
+            ".@scope_drop.version",
+            ".@oxc-project_runtime.version",
+            ".lit.lock",
+        ] {
+            std::fs::write(dir.join(m), "x").unwrap();
+        }
+        std::fs::write(dir.join("stray.txt"), "x").unwrap();
+
+        let specs = [
+            PackageSpec::npm("lit", "^3"),
+            PackageSpec::npm("@scope/keep", "^1"),
+        ];
+        prune(&dir, &specs, &["@oxc-project/runtime"]).unwrap();
+
+        assert!(dir.join("lit/index.js").exists());
+        assert!(dir.join("@scope/keep/index.js").exists());
+        assert!(dir.join("@oxc-project/runtime/src/index.js").exists());
+        assert!(dir.join(".lit.version").exists());
+        assert!(dir.join(".@scope_keep.version").exists());
+        assert!(!dir.join("dropped").exists(), "dropped package dir removed");
+        assert!(
+            !dir.join("@scope/drop").exists(),
+            "dropped scoped member removed"
+        );
+        assert!(!dir.join("@gone").exists(), "fully dropped scope removed");
+        assert!(
+            !dir.join(".dropped.version").exists(),
+            "stale marker removed"
+        );
+        assert!(!dir.join(".lit.lock").exists(), "leftover lock removed");
+        assert!(!dir.join("stray.txt").exists(), "stray file removed");
+    }
+
+    #[test]
+    fn prune_removes_an_emptied_vendor_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("web_modules");
+        std::fs::create_dir_all(dir.join("dropped")).unwrap();
+        prune(&dir, &[], &[]).unwrap();
+        assert!(!dir.exists(), "an emptied vendor dir does not ship");
     }
 }

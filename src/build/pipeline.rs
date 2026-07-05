@@ -43,7 +43,10 @@ pub struct BuildOptions<'a> {
     /// the order the dev server overlays roots in. Usually one (the source
     /// directory); pass `std::slice::from_ref(&dir)` for the single-root case.
     pub roots: &'a [PathBuf],
-    /// Output directory (e.g. `$OUT_DIR/dist`).
+    /// Output directory (e.g. `$OUT_DIR/dist`), **replaced atomically** by each
+    /// build. Must be absent, empty, or a previous build's output (marked with
+    /// `.web-modules-out`); anything else is refused rather than deleted, so a
+    /// mistyped `--out` cannot destroy a directory this tool did not produce.
     pub out: &'a Path,
     /// URL prefix the vendored modules are served at (e.g. `"/web_modules"`).
     pub mount: &'a str,
@@ -156,8 +159,135 @@ fn rerun_if_changed(path: &Path) {
 
 /// Vendor + transform + compile + render into `out`, ready to embed and serve.
 /// In a build script (cargo sets `OUT_DIR`) also emits `cargo:rerun-if-changed` for the source tree.
+///
+/// The build is staged: everything lands in a fresh sibling directory, which then
+/// atomically replaces `out`. A reused output directory therefore cannot retain
+/// anything from a previous build — no stale module escapes validation, no dropped
+/// vendored package keeps shipping — and a failed build leaves the previous output
+/// untouched. `out` must be absent, empty, or a previous build's output (recognized
+/// by its `.web-modules-out` marker); the build refuses to replace a directory it
+/// cannot prove it produced, which is what makes `--out .` safe to mistype.
 pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
-    std::fs::create_dir_all(opts.out)?;
+    let out = std::path::absolute(opts.out)?;
+    ensure_replaceable(&out)?;
+    let stage = sibling(&out, "stage")?;
+    let old = sibling(&out, "old")?;
+    // Leftovers of a crashed earlier build; clear before staging anew.
+    remove_dir_all_if_present(&stage)?;
+    remove_dir_all_if_present(&old)?;
+    std::fs::create_dir_all(&stage)?;
+    if let Err(e) = build_into(&stage, &out, opts) {
+        let _ = std::fs::remove_dir_all(&stage);
+        return Err(e);
+    }
+    // The swap: retire the previous output, promote the stage, drop the old tree.
+    if out.exists() {
+        std::fs::rename(&out, &old)?;
+    }
+    std::fs::rename(&stage, &out)?;
+    remove_dir_all_if_present(&old)?;
+    Ok(())
+}
+
+/// The marker each build writes into its output root — how [`build`] recognizes a
+/// directory it may replace. Content: the crate version that produced it.
+const OUT_MARKER: &str = ".web-modules-out";
+
+/// The one vendored package that comes from the pipeline itself rather than
+/// `BuildOptions::specs`: the oxc transform-helper runtime.
+const OXC_RUNTIME_PACKAGE: &str = "@oxc-project/runtime";
+
+/// `out` may be replaced only when this build can own it: absent, empty, or marked as
+/// a previous build's output. Anything else is someone else's directory — the current
+/// dir under `--out .`, a shared `OUT_DIR` — and replacing it would delete files this
+/// tool never wrote.
+fn ensure_replaceable(out: &Path) -> Result<()> {
+    match std::fs::metadata(out) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => {
+            return Err(Error::Build(format!(
+                "web-modules: --out {} exists and is not a directory",
+                out.display()
+            )))
+        }
+    }
+    if out.join(OUT_MARKER).exists() || std::fs::read_dir(out)?.next().is_none() {
+        return Ok(());
+    }
+    Err(Error::Build(format!(
+        "web-modules: {} contains files web-modules did not produce - refusing to \
+         replace it; pass an absent or empty --out, or delete the directory once \
+         (each build marks its output with {OUT_MARKER})",
+        out.display()
+    )))
+}
+
+/// `.<name>.web-modules-<suffix>` next to `dir` — same filesystem, so the promoting
+/// rename is atomic.
+fn sibling(dir: &Path, suffix: &str) -> Result<PathBuf> {
+    let name = dir.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+        Error::Build(format!(
+            "web-modules: --out {} has no usable directory name",
+            dir.display()
+        ))
+    })?;
+    Ok(dir.with_file_name(format!(".{name}.web-modules-{suffix}")))
+}
+
+fn remove_dir_all_if_present(dir: &Path) -> Result<()> {
+    match std::fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Seed the stage's vendor dir from the previous output, so npm-utils' cache markers
+/// keep matching and an unchanged package costs no re-download. Regular files are
+/// hardlinked (cheap; vendored content is only ever replaced, never rewritten in
+/// place); the dot-named cache markers are byte-copied, because the vendorer rewrites
+/// them in place on a version change and must not reach back into the retired tree
+/// through a shared inode. Packages the current build does not request are pruned
+/// after vendoring ([`vendor::prune`]).
+fn seed_vendor_cache(previous: &Path, stage: &Path) -> Result<()> {
+    if !previous.is_dir() {
+        return Ok(());
+    }
+    // Links are not followed: a marked output contains none this tool produced.
+    for entry in walkdir::WalkDir::new(previous) {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        let Ok(rel) = path.strip_prefix(previous) else {
+            continue;
+        };
+        let dest = stage.join(rel);
+        if entry.file_type().is_dir() {
+            std::fs::create_dir_all(&dest)?;
+        } else if entry.file_type().is_file() {
+            let dotted = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'));
+            if dotted || std::fs::hard_link(path, &dest).is_err() {
+                std::fs::copy(path, &dest)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One staged build: the whole pipeline, writing into `stage`; `previous` (the
+/// current `out`, if any) only seeds the vendor cache. The caller promotes the stage
+/// on success and removes it on failure.
+fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<()> {
+    // Marks the output as replaceable by the next build; written first so even an
+    // interrupted stage is recognizable.
+    std::fs::write(
+        stage.join(OUT_MARKER),
+        concat!(env!("CARGO_PKG_VERSION"), "\n"),
+    )?;
 
     // TypeScript transform options — only when the `typescript` processor is compiled in. Without
     // it, `build` doesn't touch `.ts` files at all: they're skipped like any source file (never
@@ -170,12 +300,12 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     };
 
     // SCSS `@use`/`@import` load paths span every source root (matching the dev server),
-    // plus the output dir (so vendored stylesheets under `<out>/web_modules` resolve) and
+    // plus the stage (so vendored stylesheets under `<out>/web_modules` resolve) and
     // any explicit `--scss-load-path`.
     #[cfg(feature = "scss")]
     let scss_load_paths: Vec<PathBuf> = {
         let mut paths: Vec<PathBuf> = opts.roots.to_vec();
-        paths.push(opts.out.to_path_buf());
+        paths.push(stage.to_path_buf());
         paths.extend(opts.processors.extra_scss_load_paths.iter().cloned());
         paths
     };
@@ -300,6 +430,8 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
             let out_rel = winner.out_rel.as_path();
             let reserved_for = if out_rel == Path::new("importmap.json") {
                 Some("the generated import map".to_string())
+            } else if out_rel == Path::new(OUT_MARKER) {
+                Some("the output marker".to_string())
             } else if out_rel.starts_with("web_modules") {
                 Some("the vendored modules directory (web_modules/)".to_string())
             } else if cfg!(feature = "compress")
@@ -336,13 +468,17 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         )));
     }
 
+    // Warm the vendor cache from the previous output before vendoring resolves
+    // against it; packages this build no longer requests are pruned again below.
+    seed_vendor_cache(&previous.join("web_modules"), &stage.join("web_modules"))?;
+
     // Vendor only when there are packages to vendor. A non-vendored source tree (no
     // specs and no `--manifest`) just compiles statically — the same thing the dev
     // server does serving such a tree, only emitted instead of served.
     let mut importmap = if opts.specs.is_empty() {
         crate::importmap::Importmap::new()
     } else {
-        vendor::vendor(&opts.out.join("web_modules"), opts.mount, opts.specs)?
+        vendor::vendor(&stage.join("web_modules"), opts.mount, opts.specs)?
     };
 
     // Emit every non-Tera winner exactly once, feeding the module graph as each file
@@ -355,34 +491,42 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
             tera_winners.push(winner);
             continue;
         }
-        emit_winner(&steps, winner, opts, &importmap, &mut graph)?;
+        emit_winner(&steps, winner, opts, stage, &importmap, &mut graph)?;
     }
 
     // Vendor the transform-runtime helpers the graph shows were injected (the decorator
     // helper, etc.) — even a non-vendored build may need these. Tera renders later, so
     // a runtime import appearing only in rendered JS is not auto-vendored — it surfaces
     // in the unresolved check below instead.
-    if graph.uses_runtime_helpers() {
-        importmap.extend(vendor_transform_runtime(opts.out, opts.mount)?);
+    let runtime_vendored = graph.uses_runtime_helpers();
+    if runtime_vendored {
+        importmap.extend(vendor_transform_runtime(stage, opts.mount)?);
     }
+
+    // Drop vendored packages this build did not request — the seed may carry
+    // packages whose spec was removed since the previous build.
+    let extra_vendored: &[&str] = if runtime_vendored {
+        &[OXC_RUNTIME_PACKAGE]
+    } else {
+        &[]
+    };
+    vendor::prune(&stage.join("web_modules"), opts.specs, extra_vendored)?;
 
     // Emit the import map as a standalone artifact too, so test harnesses (and
     // es-module-shims / an external `<script type="importmap" src>`) can consume it.
-    importmap.write_to(&opts.out.join("importmap.json"))?;
+    importmap.write_to(&stage.join("importmap.json"))?;
 
     // Render the Tera winners, with the now-final import map exposed as the
     // `importmap` template variable — the static counterpart of the dev server's
     // on-the-fly `.tera` rendering.
     for winner in tera_winners {
-        emit_winner(&steps, winner, opts, &importmap, &mut graph)?;
+        emit_winner(&steps, winner, opts, stage, &importmap, &mut graph)?;
     }
 
     // Entry-page fallback: synthesise `index.html` from `--template` / inline `--html`
     // only when no source claims that target (a literal root `index.html`, or an
-    // `index.html.tera` when tera runs). Keyed off the claims, not `out/index.html`:
-    // probing the output would wrongly skip the refresh on an incremental rebuild into
-    // a reused output dir (a build script's `OUT_DIR`), leaving a stale page when
-    // `--html`/`--template` or the import map changed.
+    // `index.html.tera` when tera runs) — in effect a synthetic claim at the lowest
+    // precedence, keyed off the preflight rather than probing the stage.
     if !report.claims_target("index.html") {
         let html = match opts.template {
             Some(template) => {
@@ -391,7 +535,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
             }
             None => opts.html.replace("{importmap}", &importmap.to_script_tag()),
         };
-        std::fs::write(opts.out.join("index.html"), html)?;
+        std::fs::write(stage.join("index.html"), html)?;
     }
 
     // Fail the build if any emitted module imports a bare specifier the generated
@@ -416,7 +560,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
 
     #[cfg(feature = "compress")]
     if opts.output.gzip {
-        crate::compress::gzip_dir(opts.out, &GZIP_EXTS)?;
+        crate::compress::gzip_dir(stage, &GZIP_EXTS)?;
     }
 
     // Re-run the build script when any source file changes. A bare `rerun-if-changed`
@@ -430,17 +574,19 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Emit one preflight winner through its claiming step — parent directories created,
-/// the emitted imports recorded in the module graph under the output-relative path.
+/// Emit one preflight winner through its claiming step into `out` (the stage) —
+/// parent directories created, the emitted imports recorded in the module graph
+/// under the output-relative path.
 fn emit_winner(
     steps: &[Box<dyn steps::Step>],
     winner: &steps::ClaimRecord,
     opts: &BuildOptions<'_>,
+    out: &Path,
     importmap: &crate::importmap::Importmap,
     graph: &mut crate::module_graph::ModuleGraph,
 ) -> Result<()> {
     let src = opts.roots[winner.root].join(&winner.rel);
-    let dest = opts.out.join(&winner.out_rel);
+    let dest = out.join(&winner.out_rel);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -463,7 +609,7 @@ pub fn vendor_transform_runtime(out: &Path, mount: &str) -> Result<crate::import
     vendor::vendor(
         &out.join("web_modules"),
         mount,
-        &[PackageSpec::npm("@oxc-project/runtime", OXC_RUNTIME_RANGE)],
+        &[PackageSpec::npm(OXC_RUNTIME_PACKAGE, OXC_RUNTIME_RANGE)],
     )
 }
 
@@ -544,6 +690,144 @@ mod tests {
         let mut o = opts(roots, out);
         o.processors.skip_duplicates = true;
         o
+    }
+
+    #[test]
+    fn build_replaces_stale_outputs_across_rebuilds() {
+        // The stale-file failure sequence from the review: a source removed between
+        // builds must not survive in a reused output directory — its emitted file
+        // (and, with gzip, its sidecar) is gone after the rebuild.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.ts"), "export const x: number = 1;").unwrap();
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.output = Output::new(false, true);
+        build(&o).unwrap();
+        assert!(out.join("app.js").exists());
+        assert!(out.join("app.js.gz").exists());
+        assert!(out.join(OUT_MARKER).exists(), "the output is marked");
+
+        std::fs::remove_file(src.join("app.ts")).unwrap();
+        std::fs::write(src.join("b.txt"), "fresh").unwrap();
+        build(&o).unwrap();
+        assert!(!out.join("app.js").exists(), "the stale module is gone");
+        assert!(!out.join("app.js.gz").exists(), "its sidecar too");
+        assert!(out.join("b.txt").exists(), "the fresh file shipped");
+    }
+
+    #[test]
+    fn build_refuses_a_foreign_output_directory() {
+        // `--out .` in a project dir, a shared OUT_DIR: a non-empty directory without
+        // the marker was not produced by web-modules and must not be replaced.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("page.html"), "<p>hi</p>").unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        std::fs::write(out.join("precious.txt"), "mine").unwrap();
+
+        let err = build(&opts(std::slice::from_ref(&src), &out))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("refusing to replace") && err.contains(OUT_MARKER),
+            "got {err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out.join("precious.txt")).unwrap(),
+            "mine",
+            "the foreign directory is untouched"
+        );
+    }
+
+    #[test]
+    fn build_accepts_empty_and_previously_built_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("page.html"), "<p>hi</p>").unwrap();
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        let o = opts(std::slice::from_ref(&src), &out);
+        build(&o).unwrap();
+        build(&o).unwrap();
+        assert!(out.join("page.html").exists());
+    }
+
+    #[test]
+    fn build_failure_leaves_the_previous_output_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("page.html"), "<p>v1</p>").unwrap();
+        let out = dir.path().join("out");
+        let o = opts(std::slice::from_ref(&src), &out);
+        build(&o).unwrap();
+
+        // Make the next build fail its conflict check, after the previous succeeded.
+        std::fs::write(src.join("page.html.tera"), "<p>v2</p>").unwrap();
+        build(&o).unwrap_err();
+        assert_eq!(
+            std::fs::read_to_string(out.join("page.html")).unwrap(),
+            "<p>v1</p>",
+            "the previous output survives a failed rebuild"
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("web-modules-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no stage/old residue: {leftovers:?}");
+    }
+
+    #[test]
+    fn build_preserves_the_vendor_cache_and_prunes_dropped_packages() {
+        // Runtime-helper vendoring is offline (embedded bytes), so it stands in for
+        // any vendored package: its files and cache marker must survive a rebuild
+        // (seeded, not re-fetched), while a package the build no longer requests —
+        // planted here — is pruned from the seeded stage.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("el.ts"),
+            "function dec(_v: unknown, _c: unknown) {}\nclass El { @dec accessor x = 1; }\nexport { El };",
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        let o = opts(std::slice::from_ref(&src), &out);
+        build(&o).unwrap();
+        let helper_dir = out.join("web_modules/@oxc-project/runtime");
+        let marker = out.join("web_modules/.@oxc-project_runtime.version");
+        assert!(helper_dir.is_dir(), "runtime helpers vendored");
+        assert!(marker.is_file(), "cache marker written");
+        let marker_content = std::fs::read_to_string(&marker).unwrap();
+
+        // A vendored package from a previous configuration, no longer requested.
+        std::fs::create_dir_all(out.join("web_modules/dropped")).unwrap();
+        std::fs::write(out.join("web_modules/dropped/x.js"), "export {};").unwrap();
+        std::fs::write(out.join("web_modules/.dropped.version"), "1.0.0").unwrap();
+
+        build(&o).unwrap();
+        assert!(helper_dir.is_dir(), "helpers survive the rebuild");
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            marker_content,
+            "the cache marker still matches - no re-vendor"
+        );
+        assert!(
+            !out.join("web_modules/dropped").exists(),
+            "the dropped package is pruned"
+        );
+        assert!(
+            !out.join("web_modules/.dropped.version").exists(),
+            "its marker too"
+        );
     }
 
     #[test]
@@ -854,10 +1138,9 @@ mod tests {
                 "missing {expected:?} in: {message}"
             );
         }
-        assert_eq!(
-            std::fs::read_dir(&out).unwrap().count(),
-            0,
-            "the conflict check runs before anything is written"
+        assert!(
+            !out.exists(),
+            "the conflict check runs before anything is written - no output appears"
         );
     }
 

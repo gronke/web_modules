@@ -69,6 +69,14 @@ The generated import map is the contract — available as `importmap.json`, the 
 
 When two sources claim one output path — `index.html` next to `index.html.tera`, `app.js` next to `app.ts`, `style.css` next to `style.scss`, or the same relative path in two roots — `build` fails before writing anything and lists every conflict; `dev` warns on the console instead.
 `--skip-duplicates` opts into precedence: the earlier root wins, and within a root a Tera template beats a literal file beats a transformed sibling — the same rule in `build` and `dev`.
+Generated outputs are reserved regardless: a source claiming `importmap.json`, a path under `web_modules/`, or (with `--gzip`) the `.gz` sidecar of an emitted file fails the build even under `--skip-duplicates`.
+
+### Output directory
+
+Each build is staged in a temporary sibling directory and then **atomically replaces** `--out`, so the output always describes exactly the current sources — nothing from a previous build survives, and a failed build leaves the previous output untouched.
+`--out` must therefore be dedicated: absent, empty, or a previous build's output, which the build recognizes by the `.web-modules-out` marker it writes.
+Anything else — the project directory under `--out .`, a directory with your own files — is refused rather than deleted; delete a pre-existing output directory once when upgrading.
+Vendored packages are not re-downloaded on every build: the `web_modules/` cache carries over from the previous output and is re-validated, and packages you no longer request are pruned.
 
 ## Library
 

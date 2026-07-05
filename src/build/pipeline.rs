@@ -140,6 +140,10 @@ impl Output {
     }
 }
 
+/// Servable extensions the gzip pass writes `.gz` sidecars for — also the set the
+/// sidecar reservation guards, so the two can never disagree.
+const GZIP_EXTS: [&str; 5] = ["js", "css", "html", "json", "svg"];
+
 /// Emit a `cargo:rerun-if-changed` line — but only when running as a build script, which cargo
 /// signals by setting `OUT_DIR`. Outside a build script (e.g. the `web-modules build` subcommand
 /// reusing this pipeline) the directive is meaningless and would just spew one line per source
@@ -281,6 +285,57 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         )));
     }
 
+    // The pipeline's own writes are reserved: the standalone import map, the vendored
+    // `web_modules/` subtree, and (with gzip on) the `.gz` sidecar of every
+    // gzip-eligible output. A source claiming one of those paths would corrupt a
+    // generated artifact in whichever order the two writes happen, so it is a hard
+    // error — `--skip-duplicates` arbitrates source-against-source precedence and
+    // never lets a source replace generated metadata. The fallback `index.html` is
+    // the deliberate exception, modelled the other way around: it is synthesised only
+    // when no source claims that target, so a source page always wins.
+    let winners = report.winners();
+    let violations: Vec<String> = winners
+        .iter()
+        .filter_map(|winner| {
+            let out_rel = winner.out_rel.as_path();
+            let reserved_for = if out_rel == Path::new("importmap.json") {
+                Some("the generated import map".to_string())
+            } else if out_rel.starts_with("web_modules") {
+                Some("the vendored modules directory (web_modules/)".to_string())
+            } else if cfg!(feature = "compress")
+                && opts.output.gzip
+                && out_rel.extension().and_then(|e| e.to_str()) == Some("gz")
+            {
+                let inner = out_rel.with_extension("");
+                let eligible = inner
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| GZIP_EXTS.contains(&e));
+                let written = report.claims_target(&inner)
+                    || inner == Path::new("importmap.json")
+                    || inner == Path::new("index.html");
+                (eligible && written).then(|| format!("the gzip sidecar of {}", inner.display()))
+            } else {
+                None
+            };
+            reserved_for.map(|what| {
+                format!(
+                    "  {} ({}) claims {} - reserved for {what}",
+                    opts.roots[winner.root].join(&winner.rel).display(),
+                    steps[winner.step].name(),
+                    out_rel.display(),
+                )
+            })
+        })
+        .collect();
+    if !violations.is_empty() {
+        return Err(Error::Build(format!(
+            "web-modules: {} output path(s) are reserved for generated files:\n{}",
+            violations.len(),
+            violations.join("\n")
+        )));
+    }
+
     // Vendor only when there are packages to vendor. A non-vendored source tree (no
     // specs and no `--manifest`) just compiles statically — the same thing the dev
     // server does serving such a tree, only emitted instead of served.
@@ -295,7 +350,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
     // only after helper vendoring below.
     let mut graph = crate::module_graph::ModuleGraph::new();
     let mut tera_winners = Vec::new();
-    for winner in report.winners() {
+    for winner in winners {
         if steps[winner.step].rank() == steps::Rank::Tera {
             tera_winners.push(winner);
             continue;
@@ -361,7 +416,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
 
     #[cfg(feature = "compress")]
     if opts.output.gzip {
-        crate::compress::gzip_dir(opts.out, &["js", "css", "html", "json", "svg"])?;
+        crate::compress::gzip_dir(opts.out, &GZIP_EXTS)?;
     }
 
     // Re-run the build script when any source file changes. A bare `rerun-if-changed`
@@ -489,6 +544,85 @@ mod tests {
         let mut o = opts(roots, out);
         o.processors.skip_duplicates = true;
         o
+    }
+
+    #[test]
+    fn build_reserves_the_generated_import_map() {
+        // `importmap.json.tera` would overwrite the generated map after it is written;
+        // a literal `importmap.json` would be overwritten by it. Both are hard errors,
+        // and `--skip-duplicates` does not bypass them — it arbitrates
+        // source-against-source precedence only.
+        for name in ["importmap.json.tera", "importmap.json"] {
+            let dir = tempfile::tempdir().unwrap();
+            let src = dir.path().join("web");
+            std::fs::create_dir_all(&src).unwrap();
+            let content = if name.ends_with(".tera") {
+                "{{ 1 }}"
+            } else {
+                "{}"
+            };
+            std::fs::write(src.join(name), content).unwrap();
+
+            let out = dir.path().join("out");
+            let err = build(&opts_skip(std::slice::from_ref(&src), &out))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("reserved") && err.contains("importmap.json"),
+                "{name}: got {err}"
+            );
+            let untouched = std::fs::read_dir(&out)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(true);
+            assert!(untouched, "{name}: nothing may be written");
+        }
+    }
+
+    #[test]
+    fn build_reserves_the_vendor_directory() {
+        // `web_modules/` belongs to vendoring (npm packages, runtime helpers) even in
+        // a build that vendors nothing this run — helper vendoring is decided later.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(src.join("web_modules")).unwrap();
+        std::fs::write(src.join("web_modules/shim.js"), "export {};").unwrap();
+
+        let out = dir.path().join("out");
+        let err = build(&opts(std::slice::from_ref(&src), &out))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("reserved") && err.contains("web_modules"),
+            "got {err}"
+        );
+    }
+
+    #[test]
+    fn build_reserves_gzip_sidecars() {
+        // A shipped `app.js.gz` collides with the sidecar the gzip pass writes for the
+        // emitted `app.js`; without `--gzip` the precompressed file ships untouched.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.js"), "export {};").unwrap();
+        std::fs::write(src.join("app.js.gz"), b"\x1f\x8bstale").unwrap();
+
+        let out = dir.path().join("out");
+        let mut gzipped = opts(std::slice::from_ref(&src), &out);
+        gzipped.output = Output::new(false, true);
+        let err = build(&gzipped).unwrap_err().to_string();
+        assert!(
+            err.contains("reserved") && err.contains("gzip sidecar") && err.contains("app.js"),
+            "got {err}"
+        );
+
+        let plain_out = dir.path().join("out-plain");
+        build(&opts(std::slice::from_ref(&src), &plain_out)).unwrap();
+        assert_eq!(
+            std::fs::read(plain_out.join("app.js.gz")).unwrap(),
+            b"\x1f\x8bstale",
+            "without --gzip the shipped .gz is just a static file"
+        );
     }
 
     #[test]

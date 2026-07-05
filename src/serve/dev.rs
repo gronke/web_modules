@@ -33,8 +33,8 @@ use include_dir::Dir;
 use tower_livereload::LiveReloadLayer;
 
 use super::serving::{
-    contained_file, content_type, has_source_extension, has_traversal, is_source_file,
-    relative_under,
+    content_type, has_source_extension, has_traversal, is_source_file, relative_under,
+    resolve_file, Resolved,
 };
 use crate::build::Processors;
 #[cfg(feature = "builder")]
@@ -285,15 +285,41 @@ async fn serve_asset(State(state): State<DevState>, uri: Uri) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
     match resolve(&state, &requested) {
-        Ok(Some((bytes, content_type))) => Response::builder()
+        Ok(Some(Served::Bytes { body, content_type })) => Response::builder()
             .header(header::CONTENT_TYPE, content_type)
-            .body(Body::from(bytes))
+            .body(Body::from(body))
             .expect("valid response"),
+        Ok(Some(Served::Redirect {
+            location,
+            permanent,
+        })) => match super::serving::redirect_response(&location, permanent) {
+            Some(response) => response,
+            // `location_value` pre-sanitized; an unbuildable header is a refusal.
+            None => (StatusCode::NOT_FOUND, format!("404 Not Found: {requested}")).into_response(),
+        },
         Ok(None) => (StatusCode::NOT_FOUND, format!("404 Not Found: {requested}")).into_response(),
         Err(message) => {
             eprintln!("web-modules: compile error for /{requested}:\n{message}");
             (StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
         }
+    }
+}
+
+/// What [`resolve`] produced: response bytes, or — the redirect symlink modes only —
+/// the redirect a symlink stands for.
+enum Served {
+    Bytes { body: Vec<u8>, content_type: String },
+    Redirect { location: String, permanent: bool },
+}
+
+/// A probe for a *source* candidate (a `.tera`, `.ts`, `.scss`): only a real file
+/// counts. Under the redirect modes a symlinked source is skipped — never served,
+/// never redirected (a redirect would name a hidden source) — matching the build,
+/// which skips it with a warning.
+fn source_candidate(mount: &Mount, rel: &str, mode: crate::SymlinkMode) -> Option<PathBuf> {
+    match resolve_file(mount.dir(), rel, mode) {
+        Some(Resolved::File(path)) => Some(path),
+        _ => None,
     }
 }
 
@@ -316,7 +342,7 @@ fn matching<'a>(state: &'a DevState, requested: &str) -> Vec<(&'a Mount, String)
 /// `.ts`/`.scss` — then the embedded fallback. The same within-dir precedence the
 /// build's preflight ranks (Tera over a literal over a transformed sibling), so `dev`
 /// and `build` resolve a shadowed target alike.
-fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)>, String> {
+fn resolve(state: &DevState, requested: &str) -> Result<Option<Served>, String> {
     // Reject list: never serve config / secret / source-code paths (see `reject`). Checked on the
     // request string here, and on the resolved file below, so case-folding / a trailing dot can't
     // smuggle a rejected file past.
@@ -324,6 +350,7 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)
         crate::reject::warn_rejected(requested);
         return Ok(None);
     }
+    let mode = state.config.symlinks;
     for (mount, rel) in matching(state, requested) {
         // `/foo.html` (any rendered target) ← render `foo.html.tera` from this dir, the live
         // counterpart of the build pipeline's `.tera` step. Checked **first** so a `.tera`
@@ -332,15 +359,18 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)
         // serving (it's a source extension).
         #[cfg(feature = "tera")]
         if state.config.tera && !rel.is_empty() {
-            if let Some(src) = contained_file(mount.dir(), &format!("{rel}.tera")) {
+            if let Some(src) = source_candidate(mount, &format!("{rel}.tera"), mode) {
                 // Never render a `_`-prefixed partial as a page (matches the build tree).
                 let is_partial = src
                     .file_name()
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with('_'));
                 if !is_partial {
-                    let html = compile_cached(state, &src, Kind::Tera)?;
-                    return Ok(Some((html, content_type(&rel))));
+                    let body = compile_cached(state, &src, Kind::Tera)?;
+                    return Ok(Some(Served::Bytes {
+                        body,
+                        content_type: content_type(&rel),
+                    }));
                 }
             }
         }
@@ -351,28 +381,45 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)
         // path, not just the request string: on a case-insensitive / name-folding FS
         // the OS can open a source the request didn't reveal (`app.SCSS`, `app.scss.`).
         if !rel.is_empty() && !is_source_file(&rel) {
-            if let Some(path) = contained_file(mount.dir(), &rel) {
-                // Re-check the resolved file *name* (the fold-prone part; not the absolute path,
-                // whose parent dirs are out of our control) so OS case-folding / a trailing dot
-                // can't smuggle a rejected file past the lexical check above.
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if state.config.reject.rejects(name) {
-                    crate::reject::warn_rejected(&rel);
-                    return Ok(None);
+            match resolve_file(mount.dir(), &rel, mode) {
+                Some(Resolved::File(path)) => {
+                    // Re-check the resolved file *name* (the fold-prone part; not the absolute path,
+                    // whose parent dirs are out of our control) so OS case-folding / a trailing dot
+                    // can't smuggle a rejected file past the lexical check above.
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if state.config.reject.rejects(name) {
+                        crate::reject::warn_rejected(&rel);
+                        return Ok(None);
+                    }
+                    if !has_source_extension(&path) {
+                        let body = std::fs::read(&path).map_err(|e| e.to_string())?;
+                        return Ok(Some(Served::Bytes {
+                            body,
+                            content_type: content_type(&rel),
+                        }));
+                    }
                 }
-                if !has_source_extension(&path) {
-                    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-                    return Ok(Some((bytes, content_type(&rel))));
+                // Redirect modes: a symlink on the literal path answers with its
+                // own content as the Location — the target is never opened.
+                Some(Resolved::Redirect(location)) => {
+                    return Ok(Some(Served::Redirect {
+                        location,
+                        permanent: mode == crate::SymlinkMode::Move,
+                    }));
                 }
+                None => {}
             }
         }
         // `/foo.js` ← compile `foo.{ts,tsx,mts}` from this dir.
         if state.config.typescript {
             if let Some(stem) = rel.strip_suffix(".js") {
                 for ext in ["ts", "tsx", "mts"] {
-                    if let Some(src) = contained_file(mount.dir(), &format!("{stem}.{ext}")) {
-                        let js = compile_cached(state, &src, Kind::Ts)?;
-                        return Ok(Some((js, "text/javascript; charset=utf-8".into())));
+                    if let Some(src) = source_candidate(mount, &format!("{stem}.{ext}"), mode) {
+                        let body = compile_cached(state, &src, Kind::Ts)?;
+                        return Ok(Some(Served::Bytes {
+                            body,
+                            content_type: "text/javascript; charset=utf-8".into(),
+                        }));
                     }
                 }
             }
@@ -380,18 +427,25 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<(Vec<u8>, String)
         // `/foo.css` ← compile `foo.scss` from this dir.
         if state.config.scss {
             if let Some(stem) = rel.strip_suffix(".css") {
-                if let Some(src) = contained_file(mount.dir(), &format!("{stem}.scss")) {
-                    let css = compile_cached(state, &src, Kind::Scss)?;
-                    return Ok(Some((css, "text/css; charset=utf-8".into())));
+                if let Some(src) = source_candidate(mount, &format!("{stem}.scss"), mode) {
+                    let body = compile_cached(state, &src, Kind::Scss)?;
+                    return Ok(Some(Served::Bytes {
+                        body,
+                        content_type: "text/css; charset=utf-8".into(),
+                    }));
                 }
             }
         }
     }
     // Baked fallback (vendored modules, index.html, …), keyed by the full path.
+    // Embedded trees carry no symlinks, so the mode has nothing to decide here.
     if let Some(dir) = state.fallback {
         if !is_source_file(requested) {
             if let Some(file) = dir.get_file(requested) {
-                return Ok(Some((file.contents().to_vec(), content_type(requested))));
+                return Ok(Some(Served::Bytes {
+                    body: file.contents().to_vec(),
+                    content_type: content_type(requested),
+                }));
             }
         }
     }
@@ -497,6 +551,18 @@ mod tests {
         state_with(mounts, DevConfig::default())
     }
 
+    impl Served {
+        /// The `(body, content-type)` of a byte response; panics on a redirect.
+        fn bytes(self) -> (Vec<u8>, String) {
+            match self {
+                Served::Bytes { body, content_type } => (body, content_type),
+                Served::Redirect { location, .. } => {
+                    panic!("expected bytes, got a redirect to {location}")
+                }
+            }
+        }
+    }
+
     fn state_with(mounts: Vec<Mount>, config: DevConfig) -> DevState {
         DevState {
             mounts: Arc::new(mounts),
@@ -572,7 +638,7 @@ mod tests {
         std::fs::write(root.join("app.js"), b"literal();").unwrap();
         std::fs::write(root.join("app.ts"), "export const compiled = 1;").unwrap();
         let state = state(vec![Mount::root(root)]);
-        let (bytes, _) = resolve(&state, "app.js").unwrap().unwrap();
+        let (bytes, _) = resolve(&state, "app.js").unwrap().unwrap().bytes();
         assert_eq!(bytes, b"literal();", "the literal file wins");
     }
 
@@ -584,7 +650,7 @@ mod tests {
         std::fs::write(root.join("style.css"), b"a{color:red}").unwrap();
         std::fs::write(root.join("style.scss"), "a { color: blue; }").unwrap();
         let state = state(vec![Mount::root(root)]);
-        let (bytes, _) = resolve(&state, "style.css").unwrap().unwrap();
+        let (bytes, _) = resolve(&state, "style.css").unwrap().unwrap().bytes();
         assert_eq!(bytes, b"a{color:red}", "the literal file wins");
     }
 
@@ -607,6 +673,90 @@ mod tests {
             "got: {}",
             warnings[0]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn follow_unsafe_serves_an_escaping_link_but_keeps_the_other_guards() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("outside.js"), b"outside").unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("outside.js"), root.join("link.js")).unwrap();
+        std::fs::write(root.join(".env"), b"S=1").unwrap();
+
+        let state = state_with(
+            vec![Mount::root(root)],
+            DevConfig {
+                symlinks: crate::SymlinkMode::FollowUnsafe,
+                ..DevConfig::default()
+            },
+        );
+        let (bytes, _) = resolve(&state, "link.js").unwrap().unwrap().bytes();
+        assert_eq!(bytes, b"outside", "the mode's contract: the link serves");
+        assert!(
+            resolve(&state, ".env").unwrap().is_none(),
+            "reject still applies"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn redirect_mode_answers_with_the_link_content_and_hides_symlinked_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("real.txt"), b"data").unwrap();
+        std::os::unix::fs::symlink(Path::new("real.txt"), root.join("link.txt")).unwrap();
+        // A symlinked compile candidate: never served, never redirected.
+        std::fs::write(tmp.path().join("app.ts"), "export const x = 1;").unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("app.ts"), root.join("app.ts")).unwrap();
+
+        let state = state_with(
+            vec![Mount::root(root)],
+            DevConfig {
+                symlinks: crate::SymlinkMode::Redirect,
+                ..DevConfig::default()
+            },
+        );
+        match resolve(&state, "link.txt").unwrap().unwrap() {
+            Served::Redirect {
+                location,
+                permanent,
+            } => {
+                assert_eq!(location, "real.txt", "the link content is the Location");
+                assert!(!permanent, "Redirect is the temporary mode");
+            }
+            Served::Bytes { .. } => panic!("expected a redirect"),
+        }
+        assert!(
+            resolve(&state, "app.js").unwrap().is_none(),
+            "a symlinked source is skipped, not redirected"
+        );
+        let (bytes, _) = resolve(&state, "real.txt").unwrap().unwrap().bytes();
+        assert_eq!(bytes, b"data", "plain files keep the full guard chain");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn move_mode_marks_the_redirect_permanent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("real.txt"), b"data").unwrap();
+        std::os::unix::fs::symlink(Path::new("real.txt"), root.join("link.txt")).unwrap();
+
+        let state = state_with(
+            vec![Mount::root(root)],
+            DevConfig {
+                symlinks: crate::SymlinkMode::Move,
+                ..DevConfig::default()
+            },
+        );
+        match resolve(&state, "link.txt").unwrap().unwrap() {
+            Served::Redirect { permanent, .. } => assert!(permanent),
+            Served::Bytes { .. } => panic!("expected a redirect"),
+        }
     }
 
     #[cfg(unix)]
@@ -707,9 +857,12 @@ mod tests {
         std::fs::write(ui.join("a.json"), b"\"ui\"").unwrap();
         std::fs::write(api.join("a.json"), b"\"api\"").unwrap();
         let state = state(vec![Mount::new("ui", ui), Mount::new("api", api)]);
-        assert_eq!(&resolve(&state, "ui/a.json").unwrap().unwrap().0, b"\"ui\"");
         assert_eq!(
-            &resolve(&state, "api/a.json").unwrap().unwrap().0,
+            &resolve(&state, "ui/a.json").unwrap().unwrap().bytes().0,
+            b"\"ui\""
+        );
+        assert_eq!(
+            &resolve(&state, "api/a.json").unwrap().unwrap().bytes().0,
             b"\"api\""
         );
         assert!(resolve(&state, "nope/a.json").unwrap().is_none());
@@ -726,7 +879,10 @@ mod tests {
         std::fs::write(first.join("page.html"), b"first").unwrap();
         std::fs::write(second.join("page.html"), b"second").unwrap();
         let state = state(vec![Mount::root(first), Mount::root(second)]);
-        assert_eq!(&resolve(&state, "page.html").unwrap().unwrap().0, b"first");
+        assert_eq!(
+            &resolve(&state, "page.html").unwrap().unwrap().bytes().0,
+            b"first"
+        );
     }
 
     #[test]
@@ -758,7 +914,7 @@ mod tests {
         )
         .unwrap();
         let state = state(vec![Mount::root(root)]);
-        let (bytes, ct) = resolve(&state, "index.html").unwrap().unwrap();
+        let (bytes, ct) = resolve(&state, "index.html").unwrap().unwrap().bytes();
         let html = String::from_utf8(bytes).unwrap();
         assert!(
             html.contains("<script type=\"importmap\">"),
@@ -807,7 +963,7 @@ mod tests {
         std::fs::write(root.join("index.html"), "LITERAL").unwrap();
         std::fs::write(root.join("index.html.tera"), "TERA").unwrap();
         let state = state(vec![Mount::root(root)]);
-        let (bytes, _) = resolve(&state, "index.html").unwrap().unwrap();
+        let (bytes, _) = resolve(&state, "index.html").unwrap().unwrap().bytes();
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
             "TERA",

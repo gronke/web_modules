@@ -151,6 +151,9 @@ tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tokio = { version = "1", features = ["rt", "macros"] }
+# Bake an embedded (`include_dir!`) root in the traversal tests. Needed directly (not via the
+# crate's re-export) because the `include_dir!` macro emits `include_dir::`-qualified paths.
+include_dir = "0.7"
 
 [workspace]
 members = ["examples/*"]

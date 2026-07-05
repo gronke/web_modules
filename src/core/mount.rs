@@ -77,6 +77,12 @@ impl Mount {
         {
             Some(json) => {
                 let name = json.get("name").and_then(Value::as_str).map(str::to_string);
+                // `root` is joined onto `dir` as-is (only a leading `./` is trimmed), so a sibling
+                // manifest may point its served root at `../shared` — composing many sibling `web/`
+                // trees is the feature this constructor exists for. The mount root is therefore a
+                // config-trust boundary (only as trusted as the manifest the caller pointed the tool
+                // at), not a lexical containment check; downstream serving stays contained *relative
+                // to* whatever root resolves here (`serving::contained_file`).
                 let root = json
                     .get("web_modules")
                     .and_then(|v| v.get("root"))

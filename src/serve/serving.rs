@@ -106,6 +106,26 @@ mod tests {
     }
 
     #[test]
+    fn has_traversal_is_lexical_and_leaves_encoded_forms_to_layer_two() {
+        // Layer 1 only sees real path components. The request string is never percent-decoded,
+        // so an encoded `..` or `/` and a `%00` are ordinary single segments that pass here; the
+        // resolved `contained_file` (canonicalize + `starts_with`) is what rejects them when they
+        // don't name a real in-root file.
+        assert!(!has_traversal("%2e%2e/secret")); // encoded ".." — a literal segment, not a parent
+        assert!(!has_traversal("a%2f..%2fb")); // encoded "/" — one segment, no traversal
+        assert!(!has_traversal("app.js%00.ts")); // literal "%00", not a NUL byte
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn has_traversal_does_not_treat_backslash_as_a_separator_on_unix() {
+        // On Unix `\` is an ordinary filename character, so a backslash "traversal" is a single
+        // Normal component Layer 1 passes; `contained_file` keeps it in-root. On Windows the same
+        // string's `\` are separators and Layer 1 flags the `..`.
+        assert!(!has_traversal("..\\..\\secret"));
+    }
+
+    #[test]
     fn is_source_file_flags_compiled_inputs() {
         assert!(is_source_file("app.ts"));
         assert!(is_source_file("a/b.scss"));

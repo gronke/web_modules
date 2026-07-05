@@ -408,6 +408,43 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_ignores_traversing_relative_and_absolute_specifiers() {
+        // A relative or absolute specifier is classified structurally and copied through verbatim;
+        // it is never turned into a filesystem path, so a traversing import is inert at build time
+        // (the browser resolves it against the module URL at runtime) and is never reported as an
+        // unresolved bare import to look up. This is the safe-by-design property the path-traversal
+        // audit relies on: import specifiers are strings here, never opened.
+        for spec in [
+            "../../../../etc/passwd",
+            "./../secret",
+            "/etc/shadow",
+            "//host/x.js",
+        ] {
+            assert_eq!(
+                classify(spec),
+                SpecifierClass::Relative,
+                "classify({spec:?})"
+            );
+        }
+        let mut graph = ModuleGraph::new();
+        graph.insert(
+            "app.js",
+            vec![
+                ModuleImport::new("../../../../etc/passwd".into(), false),
+                ModuleImport::new("/etc/shadow".into(), true),
+                ModuleImport::new("missing-package".into(), false),
+            ],
+        );
+        let unresolved = graph.unresolved(&crate::importmap::Importmap::new());
+        assert_eq!(
+            unresolved.len(),
+            1,
+            "traversing paths are not resolution candidates; got {unresolved:?}"
+        );
+        assert_eq!(unresolved[0].1, "missing-package");
+    }
+
+    #[test]
     fn source_imports_static_dynamic_and_runtime_kinds() {
         let js = "import { a } from \"lit\";\n\
                   import _d from \"@oxc-project/runtime/helpers/decorate\";\n\

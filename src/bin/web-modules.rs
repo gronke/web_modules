@@ -171,6 +171,16 @@ struct CompilerConfig {
     /// sibling). Without it `build` fails on a conflict; `dev` warns, and this silences it.
     #[arg(long = "skip-duplicates")]
     skip_duplicates: bool,
+    /// What a symlink in a source tree means: `follow` (default; within its own root only),
+    /// `follow-unsafe` (everywhere), `redirect` (dev/serve answer 307, build skips), or `move`
+    /// (same, 308).
+    #[arg(
+        long = "symlinks",
+        value_enum,
+        default_value = "follow",
+        value_name = "MODE"
+    )]
+    symlinks: web_modules::symlinks::SymlinkModeArg,
 }
 
 /// The resolved toggles + tuning, independent of which features were compiled in — what `build`
@@ -183,6 +193,7 @@ struct ResolvedCompiler {
     gzip: bool,
     ts_decorators: web_modules::typescript::Decorators,
     extra_scss_load_paths: Vec<PathBuf>,
+    symlinks: web_modules::SymlinkMode,
     skip_duplicates: bool,
 }
 
@@ -208,6 +219,7 @@ impl CompilerConfig {
                 paths.extend(cfg.scss_load_paths.iter().cloned());
                 paths
             },
+            symlinks: self.symlinks.into(),
             skip_duplicates: self.skip_duplicates,
         }
     }
@@ -233,6 +245,7 @@ impl ResolvedCompiler {
         p.tera = self.tera;
         p.ts_decorators = self.ts_decorators;
         p.extra_scss_load_paths = self.extra_scss_load_paths;
+        p.symlinks = self.symlinks;
         p.skip_duplicates = self.skip_duplicates;
         p
     }
@@ -664,6 +677,43 @@ mod tests {
                         .resolve_with(&PkgConfig::default())
                         .into_processors()
                         .skip_duplicates
+                );
+            }
+            _ => panic!("expected Dev"),
+        }
+    }
+
+    #[test]
+    fn symlinks_flag_reaches_the_processors_from_build_and_dev() {
+        use web_modules::SymlinkMode;
+        assert_eq!(
+            resolve_build(&[]).symlinks,
+            SymlinkMode::Follow,
+            "safe by default"
+        );
+        // Every value string parses, `move` included (a keyword as a word, not as a value).
+        for (value, mode) in [
+            ("follow", SymlinkMode::Follow),
+            ("follow-unsafe", SymlinkMode::FollowUnsafe),
+            ("redirect", SymlinkMode::Redirect),
+            ("move", SymlinkMode::Move),
+        ] {
+            let resolved = resolve_build(&["--symlinks", value]);
+            assert_eq!(resolved.symlinks, mode, "--symlinks {value}");
+            assert_eq!(resolved.into_processors().symlinks, mode);
+        }
+
+        let cli =
+            Cli::try_parse_from(["web-modules", "dev", "web", "--symlinks", "redirect"]).unwrap();
+        match cli.command {
+            Command::Dev { compiler, .. } => {
+                assert_eq!(
+                    compiler
+                        .resolve_with(&PkgConfig::default())
+                        .into_processors()
+                        .symlinks,
+                    SymlinkMode::Redirect,
+                    "the flag lands on the Processors both subcommands consume"
                 );
             }
             _ => panic!("expected Dev"),

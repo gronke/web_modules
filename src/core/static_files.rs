@@ -9,7 +9,7 @@ use std::path::Path;
 
 use walkdir::WalkDir;
 
-use crate::module_graph::imports_from_source;
+use crate::module_graph::{imports_for_emitted_js, is_emitted_js};
 use crate::Result;
 
 /// Extensions the source processors consume. Never shipped raw — even when the
@@ -97,12 +97,12 @@ impl crate::build::steps::Preflight for StaticStep {
 }
 
 impl crate::build::steps::Step for StaticStep {
-    /// Copy byte-for-byte; read a `.js`/`.mjs` for the graph first. An `.mjs` that
-    /// fails to parse is a build error (it is unambiguously a module and the browser
-    /// would fail on it); a `.js` falls back to the classic-script goal inside
-    /// `imports_from_source`, and a file that defies both goals — or is not UTF-8 —
-    /// contributes an empty import set plus a warning, because an empty set from a
-    /// parse failure means "unknown", not "imports nothing".
+    /// Copy byte-for-byte; read a `.js`/`.mjs` for the graph first, through the shared
+    /// [`imports_for_emitted_js`]: an `.mjs` that fails to parse is a build error, and
+    /// a file nothing parsed warns that its imports are not validated. A file that is
+    /// not UTF-8 text cannot be read for imports at all, so it contributes an empty
+    /// import set plus the same style of warning — an empty set from an unread file
+    /// means "unknown", not "imports nothing".
     fn emit(
         &self,
         _cx: &crate::build::steps::EmitCx<'_>,
@@ -111,28 +111,19 @@ impl crate::build::steps::Step for StaticStep {
         dest: &Path,
     ) -> Result<crate::build::steps::Emitted> {
         let ext = rel.extension().and_then(|x| x.to_str()).unwrap_or("");
-        let imports = if ["js", "mjs"].iter().any(|e| ext.eq_ignore_ascii_case(e)) {
-            let module_only = ext.eq_ignore_ascii_case("mjs");
-            let (imports, unanalyzable) = match std::fs::read_to_string(src) {
-                Ok(source) => {
-                    let read = imports_from_source(&source, module_only).map_err(|reason| {
-                        crate::Error::Build(format!("web-modules: {}: {reason}", rel.display()))
-                    })?;
-                    let reason =
-                        (!read.parsed).then_some("does not parse as a module or classic script");
-                    (read.imports, reason)
-                }
-                Err(_) => (Vec::new(), Some("is not UTF-8 text")),
-            };
-            if let Some(reason) = unanalyzable {
-                build_warning(&format!(
-                    "web-modules: {}: {reason}; its imports are not validated",
-                    rel.display()
-                ));
-            }
-            Some(imports)
-        } else {
+        let imports = if !is_emitted_js(ext) {
             None
+        } else {
+            match std::fs::read_to_string(src) {
+                Ok(source) => imports_for_emitted_js(&source, ext, rel)?,
+                Err(_) => {
+                    build_warning(&format!(
+                        "web-modules: {}: is not UTF-8 text; its imports are not validated",
+                        rel.display()
+                    ));
+                    Some(Vec::new())
+                }
+            }
         };
         std::fs::copy(src, dest)?;
         Ok(crate::build::steps::Emitted { imports })

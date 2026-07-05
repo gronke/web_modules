@@ -431,11 +431,7 @@ fn compile_cached(state: &DevState, src: &Path, kind: Kind) -> Result<Vec<u8>, S
             // dev doesn't vendor, so the import map is empty here (a no-op `<script>`).
             // Live TS/SCSS still load by their relative URLs; a baked fallback may carry
             // a real map, but live source serving doesn't need one.
-            let mut ctx = crate::templates::Context::new();
-            ctx.insert(
-                "importmap",
-                &crate::importmap::Importmap::new().to_script_tag(),
-            );
+            let ctx = crate::templates::importmap_context(&crate::importmap::Importmap::new());
             crate::templates::render_file(src, &ctx)
                 .map_err(|e| e.to_string())?
                 .into_bytes()

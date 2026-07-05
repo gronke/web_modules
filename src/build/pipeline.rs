@@ -32,6 +32,14 @@ use super::steps;
 use crate::vendor::{self, PackageSpec};
 use crate::{Error, Result};
 
+/// The default fallback `index.html`, used only when the source tree produces no
+/// `index.html` of its own. The entry script is RELATIVE (`./app.js`) so the page also
+/// loads under a subpath (e.g. a GitHub *project* page served at `/<repo>/`); the
+/// literal `{importmap}` is replaced with the generated import-map `<script>`. The one
+/// definition the `Build` builder and the CLI share.
+pub const DEFAULT_HTML: &str =
+    "<!doctype html>{importmap}<script type=module src=./app.js></script>";
+
 /// Inputs for [`build`].
 pub struct BuildOptions<'a> {
     /// Packages to vendor into `<out>/web_modules/`. **Empty ⇒ no vendoring** — the
@@ -617,8 +625,7 @@ pub fn vendor_transform_runtime(out: &Path, mount: &str) -> Result<crate::import
 /// as an `importmap` variable.
 #[cfg(feature = "tera")]
 fn render_template(template: &Path, importmap: &crate::importmap::Importmap) -> Result<String> {
-    let mut ctx = crate::templates::Context::new();
-    ctx.insert("importmap", &importmap.to_script_tag());
+    let ctx = crate::templates::importmap_context(importmap);
     crate::templates::render_file(template, &ctx)
 }
 

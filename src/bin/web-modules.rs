@@ -15,15 +15,11 @@ use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand};
 use serde_json::Value;
+use web_modules::build::DEFAULT_HTML;
 use web_modules::vendor::{vendor, PackageSpec};
 
 /// This binary's fallible return, `()` by default.
 type Res<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
-
-/// `build`'s default inline `index.html`. The entry script is RELATIVE (`./app.js`) so the page
-/// also loads under a subpath (e.g. a GitHub *project* page served at `/<repo>/`). The literal
-/// `{importmap}` is replaced with the generated import-map `<script>`.
-const DEFAULT_HTML: &str = "<!doctype html>{importmap}<script type=module src=./app.js></script>";
 
 #[derive(Parser)]
 #[command(

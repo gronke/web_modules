@@ -44,6 +44,9 @@ pub struct ModuleImport {
 }
 
 impl ModuleImport {
+    // Only the AST readers construct imports outside tests, so without the
+    // `typescript` feature the constructor is compiled but unused.
+    #[cfg_attr(not(feature = "typescript"), allow(dead_code))]
     fn new(specifier: String, dynamic: bool) -> Self {
         let kind = if dynamic {
             SpecifierKind::Dynamic
@@ -147,9 +150,9 @@ fn is_runtime_import(spec: &str) -> bool {
 #[derive(Debug)]
 pub struct SourceImports {
     pub imports: Vec<ModuleImport>,
-    /// False when the file parsed under neither the module nor the classic-script
-    /// goal, so nothing is known about its imports. The lexical fallback (without the
-    /// `typescript` feature) cannot detect a parse failure and always reports true.
+    /// False when nothing is known about the file's imports: it parsed under neither
+    /// the module nor the classic-script goal, or the crate is built without the
+    /// `typescript` feature and no parser exists at all.
     pub parsed: bool,
 }
 
@@ -169,11 +172,10 @@ pub struct SourceImports {
 /// Never reads from a recovered AST: a partial import set from error recovery would
 /// look authoritative without being it.
 ///
-/// Without the `typescript` feature there is no parser, and this falls back to a
-/// lexical scan of the authored text (no minifier exists in that configuration, so
-/// spacing is as written). The fallback is best-effort: `import`/`from` text inside a
-/// comment or string can false-positive, only the spaced authored forms match, and
-/// `module_only` cannot be enforced.
+/// Without the `typescript` feature there is no parser: every file yields an empty
+/// import set with `parsed == false`, so the caller's "imports are not validated"
+/// warning fires. `module_only` is not enforced there — with no parser there is no
+/// judgment, so a broken `.mjs` warns instead of failing the build.
 pub fn imports_from_source(
     js: &str,
     module_only: bool,
@@ -182,13 +184,10 @@ pub fn imports_from_source(
     return imports_from_source_ast(js, module_only);
     #[cfg(not(feature = "typescript"))]
     {
-        let _ = module_only;
-        let mut imports = Vec::new();
-        static_lexical(js, &mut imports);
-        dynamic_lexical(js, &mut imports);
+        let _ = (js, module_only);
         Ok(SourceImports {
-            imports,
-            parsed: true,
+            imports: Vec::new(),
+            parsed: false,
         })
     }
 }
@@ -300,50 +299,6 @@ impl<'a> oxc_ast_visit::Visit<'a> for DynamicImports<'_> {
     }
 }
 
-/// Dynamic `import("…")` / `import('…')` specifiers, matched lexically — the fallback
-/// when the crate is built without the `typescript` feature (no oxc parser, and no
-/// minifier, so sources keep authored spacing). The call parenthesis is stable, so both
-/// spaced and space-less forms are found.
-#[cfg(not(feature = "typescript"))]
-fn dynamic_lexical(js: &str, imports: &mut Vec<ModuleImport>) {
-    for spec in scan_quoted(js, &["import(\"", "import('"]) {
-        imports.push(ModuleImport::new(spec, true));
-    }
-}
-
-/// Static specifiers via substring scan — the fallback when the crate is built without
-/// the `typescript` feature (and thus without a minifier, so sources keep their spaces).
-#[cfg(not(feature = "typescript"))]
-fn static_lexical(js: &str, imports: &mut Vec<ModuleImport>) {
-    for spec in scan_quoted(js, &["from \"", "from '", "import \"", "import '"]) {
-        imports.push(ModuleImport::new(spec, false));
-    }
-}
-
-/// The quoted string following each occurrence of any pattern (each pattern ends in its
-/// opening quote; the value runs to the next matching quote).
-#[cfg(not(feature = "typescript"))]
-fn scan_quoted(js: &str, patterns: &[&str]) -> Vec<String> {
-    let mut specs = Vec::new();
-    for pat in patterns {
-        let Some(quote) = pat.chars().last() else {
-            continue;
-        };
-        let mut from = 0;
-        while let Some(p) = js[from..].find(pat) {
-            let start = from + p + pat.len();
-            match js[start..].find(quote) {
-                Some(end) => {
-                    specs.push(js[start..start + end].to_string());
-                    from = start + end + 1;
-                }
-                None => break,
-            }
-        }
-    }
-    specs
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +399,7 @@ mod tests {
         assert_eq!(unresolved[0].1, "missing-package");
     }
 
+    #[cfg(feature = "typescript")]
     #[test]
     fn source_imports_static_dynamic_and_runtime_kinds() {
         let js = "import { a } from \"lit\";\n\
@@ -467,6 +423,17 @@ mod tests {
             SpecifierKind::OxcRuntime
         );
         assert_eq!(kind("bootstrap"), SpecifierKind::Dynamic);
+    }
+
+    /// Without a parser nothing is known about a file's imports: the contract is an
+    /// empty set with `parsed == false`, which makes the callers' "imports are not
+    /// validated" warning fire instead of inventing edges from a text scan.
+    #[cfg(not(feature = "typescript"))]
+    #[test]
+    fn no_parser_reports_unparsed_and_no_imports() {
+        let read = imports_from_source("import { a } from \"lit\";", true).unwrap();
+        assert!(read.imports.is_empty());
+        assert!(!read.parsed);
     }
 
     #[cfg(feature = "typescript")]

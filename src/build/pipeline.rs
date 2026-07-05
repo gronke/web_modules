@@ -1164,7 +1164,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "tera")]
+    #[cfg(all(feature = "tera", feature = "typescript"))]
     #[test]
     fn build_analyzes_tera_rendered_js() {
         // JavaScript rendered from a template joins the graph: its unresolvable bare
@@ -1227,7 +1227,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "tera")]
+    #[cfg(all(feature = "tera", feature = "typescript"))]
     #[test]
     fn build_graph_follows_root_precedence() {
         // Under `--skip-duplicates` the first root wins a path conflict, and the graph

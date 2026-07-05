@@ -20,6 +20,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - The unresolved-import check runs after Tera rendering, and JavaScript rendered from a template joins the module graph — an unresolvable import in it now fails the build
 - `build` warns when a copied `.js` parses under neither the module nor the classic-script goal — its imports cannot be validated
 - The import map's `{ "imports": … }` wire shape is a serde derive on `Importmap` itself, so serialization and parsing share one definition; fragment parse errors now carry serde_json's line/column diagnostics
+- Without the `typescript` feature, emitted `.js`/`.mjs` is no longer scanned lexically for imports — each such file warns that its imports are not validated, instead of risking phantom bare specifiers from `import` text inside comments or strings
 
 ### Fixed
 

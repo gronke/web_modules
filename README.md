@@ -79,6 +79,22 @@ Each build is staged in a temporary sibling directory and then **atomically repl
 Anything else — the project directory under `--out .`, a directory with your own files — is refused rather than deleted; delete a pre-existing output directory once when upgrading.
 Vendored packages are not re-downloaded on every build: the `web_modules/` cache carries over from the previous output and is re-validated, and packages you no longer request are pruned.
 
+### Symlinks
+
+What a symlink in a source tree means is selectable with `--symlinks` (also `Processors::symlinks`, the builders' `.symlinks(…)`, and `Frontend::symlinks`), consistently across `build`, `dev`, and the static router:
+
+| Mode | build | serving |
+|---|---|---|
+| `follow` (default) | a link resolving outside its own root fails the build | 404 |
+| `follow-unsafe` | every link publishes; a dangling one warns and skips | a dangling one 404s |
+| `redirect` | links are skipped with a warning | `307 Temporary Redirect`, the link content is the `Location` |
+| `move` | links are skipped with a warning | `308 Permanent Redirect`, same rule |
+
+Under `follow` a link works within its own source root and never across roots.
+The redirect modes answer without ever opening the target — the link content is the `Location`, taken literally (plus the request's remaining components when a directory link is on the way) — which is also why a static build has nothing to emit for a link and skips it.
+In every mode, request-path traversal, the reject list, source-hiding, the SCSS import sandbox, and vendor-extraction hardening are unaffected: a symlink mode never relaxes a security sandbox.
+The live-reload watcher's behavior through links is backend-defined; under `follow-unsafe` an edit behind an out-of-tree link may not trigger a reload.
+
 ## Library
 
 ```toml

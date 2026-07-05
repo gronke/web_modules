@@ -20,7 +20,9 @@ pub(crate) const SOURCE_EXTENSIONS: [&str; 5] = ["ts", "tsx", "mts", "scss", "te
 /// Copy files from `src` to `out` (preserving structure), skipping things a build step
 /// produces or ignores: `.ts`/`.tsx`/`.mts`/`.scss`/`.tera` sources, `_`-prefixed partials,
 /// and any path the [`reject`](crate::reject) list excludes (config / secrets / source).
-/// Returns the number of files copied.
+/// Symlinks are not followed (fixed — the pipeline's preflight, not this standalone
+/// helper, honors [`SymlinkMode`](crate::SymlinkMode)). Returns the number of files
+/// copied.
 pub fn copy_static(src: &Path, out: &Path, reject: &crate::reject::Reject) -> Result<usize> {
     let step = StaticStep::new(reject.clone());
     let mut count = 0;

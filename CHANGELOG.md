@@ -21,7 +21,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 ### Fixed
 
 - fix(build): find import specifiers in minified output by reading the AST
-- fix(build): specifiers with a URL scheme (`blob:`, `node:`, `about:`, …) are no longer reported as unresolved bare imports
+- fix(build): specifiers with a URL scheme (`blob:`, `node:`, `about:`, …) are no longer reported as unresolved bare imports — classification asks the WHATWG URL parser (the `url` crate), the browser's own first resolution step
 
 ## [0.4.0] - 2026-06-28
 

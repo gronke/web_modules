@@ -44,6 +44,95 @@ pub(crate) fn contained_file(root: &Path, relative: &str) -> Option<PathBuf> {
     (real.is_file() && real.starts_with(&real_root)).then_some(real)
 }
 
+/// How a request resolved against a root under a [`SymlinkMode`](crate::SymlinkMode):
+/// a real servable file, or — in the redirect modes — the redirect a symlink stands
+/// for.
+pub(crate) enum Resolved {
+    File(PathBuf),
+    /// A sanitized, header-safe `Location` value (the symlink's own content).
+    Redirect(String),
+}
+
+/// [`contained_file`], under a symlink mode.
+///
+/// `Follow` is exactly `contained_file`. `FollowUnsafe` resolves wherever the link
+/// points — only the containment refusal is dropped; a dangling or missing path is
+/// still `None`. `Redirect`/`Move` never open anything through a link: the request's
+/// components are walked with `symlink_metadata`, and the first symlink on the chain
+/// (a file, or a directory on the way) answers with its content as the redirect;
+/// when no component is a link, `contained_file` decides — plain files keep the
+/// identical guard chain in every mode.
+pub(crate) fn resolve_file(
+    root: &Path,
+    relative: &str,
+    mode: crate::SymlinkMode,
+) -> Option<Resolved> {
+    match mode {
+        crate::SymlinkMode::Follow => contained_file(root, relative).map(Resolved::File),
+        crate::SymlinkMode::FollowUnsafe => {
+            let real = root.join(relative).canonicalize().ok()?;
+            real.is_file().then_some(Resolved::File(real))
+        }
+        crate::SymlinkMode::Redirect | crate::SymlinkMode::Move => {
+            // Request paths are URL-shaped (`/`-separated; `has_traversal` already
+            // rejected `..`), so the component split mirrors the request exactly.
+            let components: Vec<&str> = relative.split('/').filter(|c| !c.is_empty()).collect();
+            let mut current = root.to_path_buf();
+            for (index, component) in components.iter().enumerate() {
+                current.push(component);
+                let meta = std::fs::symlink_metadata(&current).ok()?;
+                if meta.file_type().is_symlink() {
+                    let target = std::fs::read_link(&current).ok()?;
+                    let suffix = components[index + 1..].join("/");
+                    return location_value(&target, &suffix).map(Resolved::Redirect);
+                }
+            }
+            contained_file(root, relative).map(Resolved::File)
+        }
+    }
+}
+
+/// The `Location` a symlink stands for in the redirect modes: the link content taken
+/// **literally** (an absolute target becomes a site-absolute URL path; a relative
+/// target is a relative reference the client resolves against the request URL), with
+/// the request's remaining components appended when the link named a directory on
+/// the way. Refuses content that cannot be a safe header value — empty, non-UTF-8,
+/// or any control byte (CR/LF response splitting). The target is never opened;
+/// whether it exists is the client's follow-up request to find out.
+pub(crate) fn location_value(target: &Path, suffix: &str) -> Option<String> {
+    let mut location = target.to_str()?.to_string();
+    if !suffix.is_empty() {
+        if !location.ends_with('/') {
+            location.push('/');
+        }
+        location.push_str(suffix);
+    }
+    if location.is_empty() || location.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return None;
+    }
+    Some(location)
+}
+
+/// The `307`/`308` a symlink resolves to in the redirect modes: status plus
+/// `Location`, **empty body** — the target is never read, so a redirect cannot
+/// disclose content. Built through the fallible `HeaderValue` path
+/// (`axum::response::Redirect` would panic on an invalid value); [`location_value`]
+/// pre-sanitizes, this is the second net.
+pub(crate) fn redirect_response(
+    location: &str,
+    permanent: bool,
+) -> Option<axum::response::Response> {
+    use axum::http::{header, HeaderValue, StatusCode};
+    use axum::response::IntoResponse;
+    let value = HeaderValue::try_from(location).ok()?;
+    let status = if permanent {
+        StatusCode::PERMANENT_REDIRECT
+    } else {
+        StatusCode::TEMPORARY_REDIRECT
+    };
+    Some((status, [(header::LOCATION, value)]).into_response())
+}
+
 /// MIME type from a path's extension, defaulting to `application/octet-stream`.
 pub(crate) fn content_type(path: &str) -> String {
     mime_guess::from_path(path)
@@ -186,5 +275,109 @@ mod tests {
         symlink(tmp.path().join("outside.js"), root.join("link.js")).unwrap();
         // Reachable through the root, but resolves outside it → rejected.
         assert!(contained_file(&root, "link.js").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_file_modes_diverge_on_an_escaping_link() {
+        use crate::SymlinkMode;
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(tmp.path().join("outside.js"), b"x").unwrap();
+        symlink(tmp.path().join("outside.js"), root.join("link.js")).unwrap();
+
+        // Follow: refused, exactly `contained_file`.
+        assert!(resolve_file(&root, "link.js", SymlinkMode::Follow).is_none());
+        // FollowUnsafe: the link resolves and serves.
+        match resolve_file(&root, "link.js", SymlinkMode::FollowUnsafe) {
+            Some(Resolved::File(real)) => assert!(real.ends_with("outside.js")),
+            other => panic!("expected the escaped file, got {:?}", other.is_some()),
+        }
+        // Redirect: the link content is the Location; nothing is opened.
+        match resolve_file(&root, "link.js", SymlinkMode::Redirect) {
+            Some(Resolved::Redirect(location)) => {
+                assert_eq!(
+                    location,
+                    tmp.path().join("outside.js").display().to_string()
+                );
+            }
+            other => panic!("expected a redirect, got {:?}", other.is_some()),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_file_redirects_through_a_directory_link_with_the_suffix_joined() {
+        use crate::SymlinkMode;
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(root.join("theme")).unwrap();
+        std::fs::write(root.join("theme/site.css"), b"x").unwrap();
+        symlink(Path::new("theme"), root.join("styles")).unwrap();
+
+        match resolve_file(&root, "styles/site.css", SymlinkMode::Redirect) {
+            Some(Resolved::Redirect(location)) => assert_eq!(location, "theme/site.css"),
+            other => panic!("expected a redirect, got {:?}", other.is_some()),
+        }
+        // Plain files under redirect mode keep the full contained guard chain.
+        match resolve_file(&root, "theme/site.css", SymlinkMode::Redirect) {
+            Some(Resolved::File(real)) => assert!(real.ends_with("theme/site.css")),
+            other => panic!("expected the plain file, got {:?}", other.is_some()),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_file_handles_dangling_links_per_mode() {
+        use crate::SymlinkMode;
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        symlink(Path::new("missing.js"), root.join("dangling.js")).unwrap();
+
+        // Follow / FollowUnsafe: nothing resolves → 404.
+        assert!(resolve_file(&root, "dangling.js", SymlinkMode::Follow).is_none());
+        assert!(resolve_file(&root, "dangling.js", SymlinkMode::FollowUnsafe).is_none());
+        // Redirect: the Location need not exist — the client finds out.
+        match resolve_file(&root, "dangling.js", SymlinkMode::Move) {
+            Some(Resolved::Redirect(location)) => assert_eq!(location, "missing.js"),
+            other => panic!("expected a redirect, got {:?}", other.is_some()),
+        }
+    }
+
+    #[test]
+    fn location_value_joins_and_sanitizes() {
+        assert_eq!(
+            location_value(Path::new("theme"), "sub/site.css").as_deref(),
+            Some("theme/sub/site.css")
+        );
+        assert_eq!(
+            location_value(Path::new("theme/"), "site.css").as_deref(),
+            Some("theme/site.css"),
+            "no doubled slash"
+        );
+        assert_eq!(
+            location_value(Path::new("/etc/passwd"), "").as_deref(),
+            Some("/etc/passwd"),
+            "absolute targets are literal URL paths - never opened"
+        );
+        // Header-injection guard: control bytes kill the redirect entirely.
+        assert!(location_value(Path::new("x\r\nSet-Cookie: a=b"), "").is_none());
+        assert!(location_value(Path::new(""), "").is_none());
+    }
+
+    #[test]
+    fn redirect_response_sets_status_and_location_with_an_empty_body() {
+        let temporary = redirect_response("target.js", false).unwrap();
+        assert_eq!(temporary.status(), 307);
+        assert_eq!(temporary.headers()["location"], "target.js");
+        let permanent = redirect_response("target.js", true).unwrap();
+        assert_eq!(permanent.status(), 308);
+        // An invalid header value is refused, not panicked on.
+        assert!(redirect_response("bad\nvalue", true).is_none());
     }
 }

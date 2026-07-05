@@ -269,6 +269,24 @@ impl PreflightReport {
             .collect()
     }
 
+    /// Claims whose output path is not a purely normal relative path — a root, prefix,
+    /// `.` or `..` component would let a write land outside the output directory. The
+    /// bundled steps cannot produce one (their targets derive from walk-relative source
+    /// paths, and a file name cannot contain a separator), but the invariant is
+    /// enforced by the build rather than assumed of every step.
+    pub(crate) fn escaping(&self) -> Vec<&ClaimRecord> {
+        self.claims
+            .iter()
+            .filter(|claim| {
+                !claim
+                    .out_rel
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+                    || claim.out_rel.as_os_str().is_empty()
+            })
+            .collect()
+    }
+
     /// One claim per output path — the winner under the unified precedence — in
     /// output-path order.
     pub(crate) fn winners(&self) -> Vec<&ClaimRecord> {
@@ -417,6 +435,53 @@ mod tests {
             Path::new("x.one"),
             "the lower tiebreak wins"
         );
+    }
+
+    #[test]
+    fn escaping_claims_are_flagged_and_honest_ones_are_not() {
+        // A step that (wrongly) derives a traversing or absolute target: the report
+        // flags every such claim, so the build can refuse it before any write. The
+        // real steps never produce one — their targets come from walk-relative paths.
+        struct Hostile;
+        impl Preflight for Hostile {
+            fn name(&self) -> &'static str {
+                "hostile"
+            }
+            fn rank(&self) -> Rank {
+                Rank::Static
+            }
+            fn claim(&self, rel: &Path) -> Option<Claim> {
+                let ext = rel.extension().and_then(|x| x.to_str()).unwrap_or("");
+                match ext {
+                    "up" => Some(Claim {
+                        out_rel: PathBuf::from("../evil.txt"),
+                        tiebreak: 0,
+                    }),
+                    "abs" => Some(Claim {
+                        out_rel: PathBuf::from("/etc/evil.txt"),
+                        tiebreak: 0,
+                    }),
+                    _ => None,
+                }
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.up"), "x").unwrap();
+        std::fs::write(root.join("b.abs"), "x").unwrap();
+        std::fs::write(root.join("fine.txt"), "x").unwrap();
+
+        let report = preflight(std::slice::from_ref(&root), &[&Hostile, &CopyLike]);
+        let escaping = report.escaping();
+        assert_eq!(escaping.len(), 2, "got {escaping:?}");
+        assert!(escaping
+            .iter()
+            .all(|claim| claim.out_rel.starts_with("..") || claim.out_rel.is_absolute()));
+
+        // The honest steps' walk-derived claims never escape.
+        let honest = scan(std::slice::from_ref(&root));
+        assert!(honest.escaping().is_empty());
     }
 
     #[test]

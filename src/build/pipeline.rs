@@ -194,6 +194,28 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         .collect();
     let report = steps::preflight(opts.roots, &preflights);
 
+    // Writes may only land inside the output directory: a claim whose target is not a
+    // purely normal relative path is refused outright, before anything is written.
+    let escaping = report.escaping();
+    if !escaping.is_empty() {
+        let lines = escaping
+            .iter()
+            .map(|claim| {
+                format!(
+                    "  {} (from {}, {})",
+                    claim.out_rel.display(),
+                    opts.roots[claim.root].join(&claim.rel).display(),
+                    steps[claim.step].name(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(Error::Build(format!(
+            "web-modules: {} output path(s) would escape the output directory:\n{lines}",
+            escaping.len()
+        )));
+    }
+
     // Duplicate output paths fail the build before the first write, naming every
     // claimant; `--skip-duplicates` opts into precedence instead — earlier root first,
     // then a Tera template over a literal file over a transformed sibling, the order

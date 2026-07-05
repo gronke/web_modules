@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 
 use npm_utils::package_json::{spec::Range, Entry, PackageJson};
-use npm_utils::{cache, download, extract, registry::Registry};
+use npm_utils::{cache, download, extract, path_safety, registry::Registry};
 
 use crate::importmap::Importmap;
 use crate::mount::Mount;
@@ -473,10 +473,26 @@ fn vendor_inner(
     std::fs::create_dir_all(vendor_dir)?;
 
     for spec in specs {
+        // Confine the vendored destination to `vendor_dir`. `spec.dir` defaults to an npm package
+        // name / `package.json` dependency key (untrusted), and a relative `spec.dest` is likewise
+        // caller-relative; a `..` in either would place the destination — which is then wiped with
+        // `remove_dir_all` and re-extracted — outside `vendor_dir`. An absolute `spec.dest` is an
+        // explicit operator choice (never derived from manifest data), so it stays honored.
         let dest_dir = match &spec.dest {
             Some(d) if d.is_absolute() => d.clone(),
-            Some(d) => vendor_dir.join(d),
-            None => vendor_dir.join(&spec.dir),
+            Some(d) => {
+                let rel =
+                    d.to_str()
+                        .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
+                            format!("vendor destination {d:?} is not valid UTF-8").into()
+                        })?;
+                path_safety::ensure_within(rel)?;
+                vendor_dir.join(d)
+            }
+            None => {
+                path_safety::ensure_within(&spec.dir)?;
+                vendor_dir.join(&spec.dir)
+            }
         };
 
         // Build-script integration: declare the vendored destination as a

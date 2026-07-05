@@ -76,6 +76,31 @@ fn read_package_json_routes_registry_path_and_git() {
     assert!(sib.dir().ends_with("sibling"));
 }
 
+#[test]
+fn vendor_refuses_a_destination_escaping_the_vendor_dir() {
+    // A `..` in `spec.dir` (which defaults to an untrusted npm name / package.json key) or a
+    // relative `spec.dest` must be refused before any directory is created, wiped with
+    // `remove_dir_all`, or extracted — and before the network is touched.
+    let tmp = tempfile::tempdir().unwrap();
+    let vendor_dir = tmp.path().join("web_modules");
+    // A sentinel beside the vendor dir stands in for whatever a traversal could clobber.
+    let sentinel = tmp.path().join("keep.txt");
+    std::fs::write(&sentinel, "precious").unwrap();
+
+    for spec in [
+        PackageSpec::npm("anything", "1").dir("../escape"),
+        PackageSpec::npm("anything", "1").dest("../escape"),
+        PackageSpec::npm("anything", "1").dest("../keep.txt"),
+    ] {
+        let result = vendor(&vendor_dir, "/web_modules", &[spec]);
+        assert!(result.is_err(), "a traversing destination must be refused");
+    }
+
+    // Nothing outside the vendor dir was created or overwritten.
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"precious");
+    assert!(!tmp.path().join("escape").exists());
+}
+
 // ---- network-gated: real download + extract over each staging shape ----
 
 #[test]

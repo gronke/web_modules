@@ -15,7 +15,7 @@
 //! directory may retain files from earlier builds that the current run never touched.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The npm package the oxc transform imports its runtime helpers from (Runtime helper
 /// mode, oxc's default and web_modules' setting).
@@ -190,6 +190,40 @@ pub fn imports_from_source(
             parsed: false,
         })
     }
+}
+
+/// Whether an output path with this extension is JavaScript the graph records — the
+/// emitted `.js`/`.mjs` a browser loads as a module or classic script.
+pub(crate) fn is_emitted_js(ext: &str) -> bool {
+    ["js", "mjs"].iter().any(|e| ext.eq_ignore_ascii_case(e))
+}
+
+/// The graph record for one emitted JavaScript file, shared by every step that holds
+/// the text in memory (a copied source, a rendered template): `None` for a non-JS
+/// extension, otherwise the imports [`imports_from_source`] reads. An `.mjs` that
+/// fails to parse is a build error — the browser would fail on it too — and a file
+/// nothing parsed warns that its imports are not validated. One implementation, so
+/// the steps cannot drift apart in wording or behavior.
+pub(crate) fn imports_for_emitted_js(
+    source: &str,
+    ext: &str,
+    rel: &Path,
+) -> crate::Result<Option<Vec<ModuleImport>>> {
+    if !is_emitted_js(ext) {
+        return Ok(None);
+    }
+    let module_only = ext.eq_ignore_ascii_case("mjs");
+    let read = imports_from_source(source, module_only).map_err(|reason| {
+        crate::Error::Build(format!("web-modules: {}: {reason}", rel.display()))
+    })?;
+    if !read.parsed {
+        crate::static_files::build_warning(&format!(
+            "web-modules: {}: was not parsed as a module or classic script; \
+             its imports are not validated",
+            rel.display()
+        ));
+    }
+    Ok(Some(read.imports))
 }
 
 /// The parser-backed body of [`imports_from_source`]: module goal first, classic-script

@@ -11,6 +11,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 - feat(build): duplicate output detection — `build` fails before writing anything when two sources claim one output path, listing every conflict; `dev` warns about each conflict at startup instead of failing; `--skip-duplicates` (both commands, `Processors`, and the builders) keeps the highest-precedence source silently
 - feat(build): generated outputs are reserved — a source claiming `importmap.json`, a path under `web_modules/`, or (with `--gzip`) the `.gz` sidecar of an emitted file fails the build even under `--skip-duplicates`, which arbitrates source-against-source precedence only
+- `web_modules::build::DEFAULT_HTML` — the fallback inline `index.html` the `Build` builder and the CLI share, as a public constant
 
 ### Changed
 

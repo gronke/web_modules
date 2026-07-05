@@ -34,6 +34,16 @@ pub fn render_file(path: &Path, context: &Context) -> Result<String> {
     render_str(&template, context)
 }
 
+/// The context every page template renders with: the single `importmap` variable,
+/// holding the map's inline `<script>` element (emit it with `{{ importmap | safe }}`).
+/// One constructor, so the build's `.tera` step, the `--template` fallback, and the
+/// dev server cannot diverge in what a template sees.
+pub(crate) fn importmap_context(importmap: &crate::importmap::Importmap) -> Context {
+    let mut ctx = Context::new();
+    ctx.insert("importmap", &importmap.to_script_tag());
+    ctx
+}
+
 // Tera has no flags of its own beyond the on/off toggle, so it uses the `NoConfig`
 // placeholder. (`--tera` / `--no-tera`.)
 #[cfg(feature = "cli")]

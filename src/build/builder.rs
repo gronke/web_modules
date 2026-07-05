@@ -8,15 +8,10 @@
 
 use std::path::PathBuf;
 
-use super::{build, BuildOptions, Output, Processors};
+use super::{build, BuildOptions, Output, Processors, DEFAULT_HTML};
 use crate::builder_shared::source_builder_methods;
 use crate::vendor::PackageSpec;
 use crate::{Error, Result};
-
-/// `Build`'s default fallback `index.html` (used only when the source tree has no
-/// `index.html` / `index.html.tera`). The entry script is RELATIVE (`./app.js`) so the
-/// page also loads under a subpath; `{importmap}` is replaced with the import-map `<script>`.
-const DEFAULT_HTML: &str = "<!doctype html>{importmap}<script type=module src=./app.js></script>";
 
 /// Fluent builder for a static [`build`](super::build).
 ///

@@ -206,7 +206,7 @@ fn preflight_warnings(mounts: &[Mount], config: &DevConfig) -> Vec<String> {
     let mut lines = Vec::new();
     for prefix in prefixes {
         let roots = &groups[prefix];
-        let report = crate::build::steps::preflight(roots, &preflights);
+        let report = crate::build::steps::preflight(roots, &preflights, &config.reject);
         for error in report.walk_errors() {
             lines.push(format!("web-modules: preflight: {error}"));
         }
@@ -516,6 +516,27 @@ mod tests {
         assert!(
             resolve(&state, ".env").unwrap().is_none(),
             "dotfile rejected"
+        );
+    }
+
+    #[test]
+    fn dev_rejects_templated_and_compiled_secret_targets() {
+        // Parity with `build`: a `.env.tera` template or a `.env.ts` source must not
+        // make the rejected target reachable — the target check fires before any
+        // candidate resolution.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".env.tera"), "SECRET={{ 1 }}").unwrap();
+        std::fs::write(root.join(".env.ts"), "export const x = 1;").unwrap();
+        let state = state(vec![Mount::root(root)]);
+        assert!(
+            resolve(&state, ".env").unwrap().is_none(),
+            "templated target rejected"
+        );
+        assert!(
+            resolve(&state, ".env.js").unwrap().is_none(),
+            "compiled target rejected"
         );
     }
 

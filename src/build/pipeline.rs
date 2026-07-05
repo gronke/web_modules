@@ -192,7 +192,7 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         .iter()
         .map(|step| step.as_ref() as &dyn steps::Preflight)
         .collect();
-    let report = steps::preflight(opts.roots, &preflights);
+    let report = steps::preflight(opts.roots, &preflights, &opts.processors.reject);
 
     // A walk problem means the preflight may be incomplete — surface it instead of
     // silently building from a partial picture (a dangling link, an unreadable dir).
@@ -489,6 +489,47 @@ mod tests {
         let mut o = opts(roots, out);
         o.processors.skip_duplicates = true;
         o
+    }
+
+    #[test]
+    fn build_rejects_secret_targets_from_every_step() {
+        // The reject list guards what may be *emitted*, no matter which step produces
+        // it: a template or a compiled source cannot materialize `.env` or
+        // `private.key` — the same targets the dev server refuses to serve.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join(".env.tera"), "SECRET={{ 1 }}").unwrap();
+        std::fs::write(src.join(".env.ts"), "export const x = 1;").unwrap();
+        std::fs::write(src.join(".env.scss"), "b { color: red; }").unwrap();
+        std::fs::write(src.join("private.key.tera"), "{{ 2 }}").unwrap();
+        std::fs::write(src.join("page.html"), "<p>hi</p>").unwrap();
+
+        let out = dir.path().join("out");
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+
+        for target in [".env", ".env.js", ".env.css", "private.key"] {
+            assert!(!out.join(target).exists(), "{target} must not be emitted");
+        }
+        assert!(out.join("page.html").exists(), "the page still ships");
+    }
+
+    #[test]
+    fn reject_none_opts_rejected_targets_back_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("private.key.tera"), "key: {{ 40 + 2 }}").unwrap();
+
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors.reject = crate::reject::Reject::none();
+        build(&o).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(out.join("private.key")).unwrap(),
+            "key: 42",
+            "an explicit `none` reject list opts the target back in"
+        );
     }
 
     #[cfg(unix)]

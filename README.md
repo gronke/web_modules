@@ -64,6 +64,7 @@ Options:
 The build never reads or rewrites your HTML.
 Pages are only generated where you opt in: a `*.tera` template (rendered with the generated import map as the `{{ importmap }}` variable), or the `--html`/`--template` fallback when no source provides an `index.html` at all.
 The generated import map is the contract — available as `importmap.json`, the `{{ importmap }}` Tera variable, and the `{importmap}` placeholder — and it is the only map the unresolved-import check validates against; a hand-authored page owns its own inline map.
+JavaScript rendered from a template joins the module graph and is validated like any other emitted module, with one ordering rule: runtime-helper vendoring is decided before templates render, so an `@oxc-project/runtime` import appearing only in template-rendered JavaScript fails the unresolved-import check instead of vendoring the runtime — put such code in a `.ts`/`.js` source instead.
 
 ### Duplicate output paths
 

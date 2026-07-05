@@ -100,6 +100,11 @@ pub struct Processors {
     /// Paths to keep out of the output and out of serving — config / secrets / source-code.
     /// Defaults to all presets. See [`Reject`](crate::reject::Reject).
     pub reject: crate::reject::Reject,
+    /// What a symlink in a source tree means — for the build preflight, the dev
+    /// server, and the static router alike. Defaults to the safe
+    /// [`Follow`](crate::SymlinkMode::Follow): a link resolves only within its own
+    /// root. See [`SymlinkMode`](crate::SymlinkMode).
+    pub symlinks: crate::SymlinkMode,
     /// Allow duplicate output paths (default off). `build` then keeps the
     /// highest-precedence source for each contested path — earlier root first, then a
     /// Tera template over a literal file over a transformed sibling — instead of
@@ -117,6 +122,7 @@ impl Default for Processors {
             ts_decorators: crate::Decorators::Lit,
             extra_scss_load_paths: Vec::new(),
             reject: crate::reject::Reject::all(),
+            symlinks: crate::SymlinkMode::default(),
             skip_duplicates: false,
         }
     }

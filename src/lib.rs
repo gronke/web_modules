@@ -41,7 +41,8 @@ pub use error::{Error, Result};
 // use `web_modules::vendor` etc. — the `core` module itself is private.
 mod core;
 pub use core::mount::Mount;
-pub use core::{importmap, mount, reject, static_files, tsconfig, vendor};
+pub use core::symlinks::SymlinkMode;
+pub use core::{importmap, mount, reject, static_files, symlinks, tsconfig, vendor};
 // Crate-internal for now: the graph's overwrite/ownership semantics are still
 // settling, so it is not part of the public API yet.
 pub(crate) use core::module_graph;

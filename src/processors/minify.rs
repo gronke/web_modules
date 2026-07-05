@@ -56,6 +56,8 @@ pub fn minify_str(source: &str, path: &Path) -> Result<String> {
 /// [`super::typescript::compile_directory`] convention for the emitted-JS tree of a
 /// release/embedded build. Note this rewrites *every* `.js` it finds; point it at
 /// the subtree you want minified (e.g. exclude an already-minified vendored tree).
+/// Symlinks are followed unconditionally (fixed — this standalone helper is off the
+/// pipeline path and does not honor [`SymlinkMode`](crate::SymlinkMode)).
 pub fn minify_directory(dir: &Path) -> Result<usize> {
     let mut count = 0;
     for entry in WalkDir::new(dir)

@@ -10,6 +10,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 ### Added
 
 - feat(build): duplicate output detection — `build` fails before writing anything when two sources claim one output path, listing every conflict; `dev` warns about each conflict at startup instead of failing; `--skip-duplicates` (both commands, `Processors`, and the builders) keeps the highest-precedence source silently
+- feat: selectable symlink modes — `--symlinks follow|follow-unsafe|redirect|move` (also `Processors::symlinks`, the builders, and `Frontend::symlinks`) choose what a source-tree symlink means, consistently across `build`, `dev`, and the static router: `follow` (default) keeps the within-root containment, `follow-unsafe` follows everywhere, `redirect`/`move` answer `307`/`308` with the link content as the `Location` while a build skips the link with a warning
 - feat(build): generated outputs are reserved — a source claiming `importmap.json`, a path under `web_modules/`, or (with `--gzip`) the `.gz` sidecar of an emitted file fails the build even under `--skip-duplicates`, which arbitrates source-against-source precedence only
 - `web_modules::build::DEFAULT_HTML` — the fallback inline `index.html` the `Build` builder and the CLI share, as a public constant
 

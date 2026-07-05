@@ -233,7 +233,9 @@ pub fn compile_directory(src_dir: &Path, out_dir: &Path) -> Result<usize> {
     compile_directory_with(src_dir, out_dir, &TranspileOptions::default())
 }
 
-/// Like [`compile_directory`], but with explicit [`TranspileOptions`].
+/// Like [`compile_directory`], but with explicit [`TranspileOptions`]. Symlinks are
+/// followed unconditionally (fixed — the pipeline's preflight, not this standalone
+/// helper, honors [`SymlinkMode`](crate::SymlinkMode)).
 pub fn compile_directory_with(
     src_dir: &Path,
     out_dir: &Path,

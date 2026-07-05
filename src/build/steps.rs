@@ -196,35 +196,82 @@ impl ClaimRecord {
 }
 
 /// Every claim from one walk of the source roots, plus every visited path (the
-/// `cargo:rerun-if-changed` set).
+/// `cargo:rerun-if-changed` set), the files that resolve outside their root, and
+/// the walk problems that would make the preflight incomplete.
 pub(crate) struct PreflightReport {
     claims: Vec<ClaimRecord>,
     walked: Vec<PathBuf>,
+    escaping_sources: Vec<EscapingSource>,
+    walk_errors: Vec<String>,
 }
 
-/// Walk each root once (following symlinks, dropping unreadable entries as every walk
-/// before it did) and offer every file to every step. Infallible: classification is
-/// pure, and I/O problems surface at emission time.
+/// A source file whose canonical location is not under its canonical root — a
+/// symlink pointing outside the tree. No step gets to claim such a file: the build
+/// refuses to publish it, matching the dev server's canonical containment
+/// (`contained_file`), which refuses to serve it.
+#[derive(Debug)]
+pub(crate) struct EscapingSource {
+    pub root: usize,
+    pub rel: PathBuf,
+    /// Where the path actually resolves.
+    pub target: PathBuf,
+}
+
+/// Walk each root once (following symlinks) and offer every file to every step.
+/// Containment is canonical: each root resolves once, every file must resolve under
+/// it, and one that does not is recorded as an [`EscapingSource`] instead of being
+/// offered. In-root symlinks work; a link out of the tree never publishes.
+/// Unreadable entries and unresolvable links land in `walk_errors` rather than being
+/// silently dropped — a partial preflight would otherwise pass for a complete one.
 pub(crate) fn preflight(roots: &[PathBuf], steps: &[&dyn Preflight]) -> PreflightReport {
-    let mut claims = Vec::new();
-    let mut walked = Vec::new();
+    let mut report = PreflightReport {
+        claims: Vec::new(),
+        walked: Vec::new(),
+        escaping_sources: Vec::new(),
+        walk_errors: Vec::new(),
+    };
     for (root_index, root) in roots.iter().enumerate() {
-        for entry in walkdir::WalkDir::new(root)
-            .follow_links(true)
-            .into_iter()
-            .filter_map(|e| e.ok())
-        {
+        let canonical_root = match std::fs::canonicalize(root) {
+            Ok(canonical) => canonical,
+            Err(e) => {
+                report.walk_errors.push(format!("{}: {e}", root.display()));
+                continue;
+            }
+        };
+        for entry in walkdir::WalkDir::new(root).follow_links(true) {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    report.walk_errors.push(e.to_string());
+                    continue;
+                }
+            };
             let path = entry.path();
-            walked.push(path.to_path_buf());
+            report.walked.push(path.to_path_buf());
             if !path.is_file() {
                 continue;
             }
             let Ok(rel) = path.strip_prefix(root) else {
                 continue;
             };
+            let canonical = match std::fs::canonicalize(path) {
+                Ok(canonical) => canonical,
+                Err(e) => {
+                    report.walk_errors.push(format!("{}: {e}", path.display()));
+                    continue;
+                }
+            };
+            if !canonical.starts_with(&canonical_root) {
+                report.escaping_sources.push(EscapingSource {
+                    root: root_index,
+                    rel: rel.to_path_buf(),
+                    target: canonical,
+                });
+                continue;
+            }
             for (step_index, step) in steps.iter().enumerate() {
                 if let Some(claim) = step.claim(rel) {
-                    claims.push(ClaimRecord {
+                    report.claims.push(ClaimRecord {
                         root: root_index,
                         rel: rel.to_path_buf(),
                         step: step_index,
@@ -236,7 +283,7 @@ pub(crate) fn preflight(roots: &[PathBuf], steps: &[&dyn Preflight]) -> Prefligh
             }
         }
     }
-    PreflightReport { claims, walked }
+    report
 }
 
 /// Two or more sources claiming one output path.
@@ -303,6 +350,17 @@ impl PreflightReport {
     /// `cargo:rerun-if-changed` set.
     pub(crate) fn walked_paths(&self) -> &[PathBuf] {
         &self.walked
+    }
+
+    /// Files whose canonical location is outside their canonical source root.
+    pub(crate) fn escaping_sources(&self) -> &[EscapingSource] {
+        &self.escaping_sources
+    }
+
+    /// Walk problems — unreadable directories, unresolvable links. The preflight
+    /// describes the complete output only when this is empty.
+    pub(crate) fn walk_errors(&self) -> &[String] {
+        &self.walk_errors
     }
 }
 
@@ -500,5 +558,70 @@ mod tests {
         // The walk records the root, the subdirectory and the file — directory mtimes
         // catch add/remove for rerun-if-changed.
         assert!(report.walked_paths().len() >= 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_flags_files_resolving_outside_the_root() {
+        // `root/exposed -> ../private`: reachable through the root lexically, but
+        // canonically outside it — recorded as escaping, never offered to a step.
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("credentials.txt"), "secret").unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&private, root.join("exposed")).unwrap();
+
+        let report = scan(std::slice::from_ref(&root));
+        let escaping = report.escaping_sources();
+        assert_eq!(escaping.len(), 1, "one file resolves outside the root");
+        assert_eq!(escaping[0].rel, Path::new("exposed/credentials.txt"));
+        assert!(escaping[0].target.ends_with("private/credentials.txt"));
+        assert!(
+            !report.claims_target("exposed/credentials.txt"),
+            "no step may claim an escaping file"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_allows_symlinks_resolving_inside_the_root() {
+        // In-root links are legitimate tree layout: the linked file and the file
+        // inside the linked dir both claim normally.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        std::fs::write(root.join("real/a.txt"), "data").unwrap();
+        std::os::unix::fs::symlink(root.join("real/a.txt"), root.join("alias.txt")).unwrap();
+        std::os::unix::fs::symlink(root.join("real"), root.join("linked")).unwrap();
+
+        let report = scan(std::slice::from_ref(&root));
+        assert!(report.escaping_sources().is_empty(), "nothing escapes");
+        assert!(report.walk_errors().is_empty(), "no walk problems");
+        assert!(report.claims_target("alias.txt"), "linked file claims");
+        assert!(
+            report.claims_target("linked/a.txt"),
+            "file in a linked dir claims"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_surfaces_a_dangling_link_as_a_walk_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(root.join("missing"), root.join("dangling")).unwrap();
+
+        let report = scan(std::slice::from_ref(&root));
+        assert_eq!(
+            report.walk_errors().len(),
+            1,
+            "got {:?}",
+            report.walk_errors()
+        );
+        assert!(report.escaping_sources().is_empty());
+        assert!(report.conflicts().is_empty(), "the tree still preflights");
     }
 }

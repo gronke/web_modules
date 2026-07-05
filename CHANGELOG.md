@@ -22,6 +22,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 - fix(build): find import specifiers in minified output by reading the AST
 - fix(build): specifiers with a URL scheme (`blob:`, `node:`, `about:`, …) are no longer reported as unresolved bare imports — classification asks the WHATWG URL parser (the `url` crate), the browser's own first resolution step
+- fix(build): a source file that canonically resolves outside its root (a symlink out of the tree) fails the build instead of being published — the dev server's containment already refused to serve such a path; source-walk problems surface as warnings instead of being silently dropped
 
 ## [0.4.0] - 2026-06-28
 

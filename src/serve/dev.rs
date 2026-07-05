@@ -157,8 +157,9 @@ fn build_router(
     config: DevConfig,
 ) -> Router {
     // The same preflight the build runs, warn-only: a contested target is served by
-    // its winner, but the ambiguity is worth a line on the console.
-    for warning in duplicate_warnings(&mounts, &config) {
+    // its winner and an escaping symlink is refused per-request, but both are worth
+    // a line on the console.
+    for warning in preflight_warnings(&mounts, &config) {
         eprintln!("{warning}");
     }
     let livereload = LiveReloadLayer::new();
@@ -175,15 +176,15 @@ fn build_router(
         .layer(livereload)
 }
 
-/// The duplicate-target warnings the dev server prints at startup: per URL prefix, the
-/// mounted dirs (declaration order) run through the same preflight the build uses, and
-/// every contested target is reported once with its winner. Empty when
-/// `skip_duplicates` is set. Mounts at different prefixes are never compared —
-/// most-specific-prefix routing is deliberate composition, not an accident.
-fn duplicate_warnings(mounts: &[Mount], config: &DevConfig) -> Vec<String> {
-    if config.skip_duplicates {
-        return Vec::new();
-    }
+/// The preflight warnings the dev server prints at startup: per URL prefix, the
+/// mounted dirs (declaration order) run through the same preflight the build uses.
+/// Every contested target is reported once with its winner — those lines are silenced
+/// by `skip_duplicates`. A source resolving outside its mount (an escaping symlink,
+/// which per-request containment will refuse) and any walk problem are always
+/// reported; the flag arbitrates precedence, not containment. Mounts at different
+/// prefixes are never compared — most-specific-prefix routing is deliberate
+/// composition, not an accident.
+fn preflight_warnings(mounts: &[Mount], config: &DevConfig) -> Vec<String> {
     let steps = crate::build::steps::enabled_steps(config, Default::default());
     let preflights: Vec<&dyn crate::build::steps::Preflight> = steps
         .iter()
@@ -206,6 +207,19 @@ fn duplicate_warnings(mounts: &[Mount], config: &DevConfig) -> Vec<String> {
     for prefix in prefixes {
         let roots = &groups[prefix];
         let report = crate::build::steps::preflight(roots, &preflights);
+        for error in report.walk_errors() {
+            lines.push(format!("web-modules: preflight: {error}"));
+        }
+        for source in report.escaping_sources() {
+            lines.push(format!(
+                "web-modules: {} resolves outside its mount ({}) - not served",
+                roots[source.root].join(&source.rel).display(),
+                source.target.display(),
+            ));
+        }
+        if config.skip_duplicates {
+            continue;
+        }
         for conflict in report.conflicts() {
             let target = if prefix.ends_with('/') {
                 format!("{prefix}{}", conflict.out_rel.display())
@@ -553,13 +567,41 @@ mod tests {
         std::fs::write(root.join("app.ts"), "export const compiled = 1;").unwrap();
 
         let mounts = vec![Mount::root(root)];
-        let warnings = duplicate_warnings(&mounts, &DevConfig::default());
+        let warnings = preflight_warnings(&mounts, &DevConfig::default());
         assert_eq!(warnings.len(), 1, "got {warnings:?}");
         assert!(
             warnings[0].contains("/app.js")
                 && warnings[0].contains("app.js wins over")
                 && warnings[0].contains("app.ts")
                 && warnings[0].contains("--skip-duplicates"),
+            "got: {}",
+            warnings[0]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dev_warns_about_a_symlink_escaping_the_mount() {
+        // Containment warnings are not silenced by `skip_duplicates` — the flag
+        // arbitrates precedence, not the sandbox boundary.
+        let tmp = tempfile::tempdir().unwrap();
+        let private = tmp.path().join("private");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("credentials.txt"), "secret").unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::os::unix::fs::symlink(&private, root.join("exposed")).unwrap();
+
+        let config = DevConfig {
+            skip_duplicates: true,
+            ..DevConfig::default()
+        };
+        let warnings = preflight_warnings(&[Mount::root(root)], &config);
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            warnings[0].contains("exposed/credentials.txt")
+                && warnings[0].contains("outside its mount")
+                && warnings[0].contains("not served"),
             "got: {}",
             warnings[0]
         );
@@ -577,7 +619,7 @@ mod tests {
             skip_duplicates: true,
             ..DevConfig::default()
         };
-        let warnings = duplicate_warnings(&[Mount::root(root)], &config);
+        let warnings = preflight_warnings(&[Mount::root(root)], &config);
         assert!(warnings.is_empty(), "got {warnings:?}");
     }
 

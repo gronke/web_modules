@@ -194,6 +194,36 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
         .collect();
     let report = steps::preflight(opts.roots, &preflights);
 
+    // A walk problem means the preflight may be incomplete — surface it instead of
+    // silently building from a partial picture (a dangling link, an unreadable dir).
+    for error in report.walk_errors() {
+        crate::static_files::build_warning(&format!("web-modules: preflight: {error}"));
+    }
+
+    // Sources may only come from inside their root: a file that canonically resolves
+    // elsewhere (a symlink out of the tree) is refused outright — the dev server's
+    // canonical containment already refuses to serve such a path, and publishing what
+    // dev refuses would make `build` the wider gate.
+    let escaping_sources = report.escaping_sources();
+    if !escaping_sources.is_empty() {
+        let lines = escaping_sources
+            .iter()
+            .map(|source| {
+                format!(
+                    "  {} -> {}",
+                    opts.roots[source.root].join(&source.rel).display(),
+                    source.target.display(),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        return Err(Error::Build(format!(
+            "web-modules: {} source path(s) resolve outside the source root - remove \
+             the symlink or move the files into the tree:\n{lines}",
+            escaping_sources.len()
+        )));
+    }
+
     // Writes may only land inside the output directory: a claim whose target is not a
     // purely normal relative path is refused outright, before anything is written.
     let escaping = report.escaping();
@@ -459,6 +489,54 @@ mod tests {
         let mut o = opts(roots, out);
         o.processors.skip_duplicates = true;
         o
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_refuses_a_symlink_escaping_the_source_root() {
+        // The review's repro: `web/exposed -> ../private` must not publish
+        // `private/credentials.txt`, and the error names the path and its target.
+        let dir = tempfile::tempdir().unwrap();
+        let private = dir.path().join("private");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::write(private.join("credentials.txt"), "secret").unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("page.html"), "<p>hi</p>").unwrap();
+        std::os::unix::fs::symlink(&private, src.join("exposed")).unwrap();
+
+        let out = dir.path().join("out");
+        let err = build(&opts(std::slice::from_ref(&src), &out))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("resolve outside the source root")
+                && err.contains("exposed/credentials.txt")
+                && err.contains("private"),
+            "got: {err}"
+        );
+        let untouched = std::fs::read_dir(&out)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(true);
+        assert!(untouched, "nothing may be written");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn build_ships_symlinks_resolving_inside_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(src.join("real")).unwrap();
+        std::fs::write(src.join("real/data.txt"), "data").unwrap();
+        std::os::unix::fs::symlink(src.join("real/data.txt"), src.join("alias.txt")).unwrap();
+
+        let out = dir.path().join("out");
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(out.join("alias.txt")).unwrap(),
+            "data",
+            "an in-root link publishes its content"
+        );
     }
 
     #[test]

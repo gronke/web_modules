@@ -68,6 +68,12 @@ pub(crate) fn resolve_file(
     relative: &str,
     mode: crate::SymlinkMode,
 ) -> Option<Resolved> {
+    // An `npm://` link (or a request reaching one, or reaching through a directory
+    // mount) resolves into node_modules in every mode — a package reference, not a
+    // filesystem link the mode governs.
+    if let Some(file) = crate::npm_link::serve_target(root, Path::new(relative)) {
+        return Some(Resolved::File(file));
+    }
     match mode {
         crate::SymlinkMode::Follow => contained_file(root, relative).map(Resolved::File),
         crate::SymlinkMode::FollowUnsafe => {

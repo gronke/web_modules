@@ -11,6 +11,7 @@
 pub mod importmap;
 pub mod module_graph;
 pub mod mount;
+pub mod npm_link;
 pub mod reject;
 pub mod static_files;
 pub mod symlinks;

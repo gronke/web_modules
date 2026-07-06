@@ -533,6 +533,51 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
         emit_winner(&steps, winner, opts, stage, &importmap, &mut graph)?;
     }
 
+    // Emit every `npm://` asset symlink: resolve it into node_modules and write the
+    // file(s) at the link's own output path. These are package references rather than
+    // filesystem links, so the symlink mode never applied to them in the preflight; a
+    // target that lands on a path the build already produces is a hard error.
+    for asset in report.npm_assets() {
+        let link = opts.roots[asset.root].join(&asset.rel);
+        // Node resolution walks up from the link's own directory; canonicalize it so the
+        // ascent reaches the real node_modules regardless of the invocation's cwd.
+        let from_dir = link
+            .parent()
+            .map(std::fs::canonicalize)
+            .transpose()?
+            .unwrap_or_else(|| opts.roots[asset.root].clone());
+        let reference = crate::npm_link::parse(&asset.target).ok_or_else(|| {
+            Error::Build(format!(
+                "{}: malformed npm:// target {:?}",
+                link.display(),
+                asset.target
+            ))
+        })?;
+        for (sub, source) in crate::npm_link::resolve(&from_dir, &reference)? {
+            let out_rel = if sub.as_os_str().is_empty() {
+                asset.rel.clone()
+            } else {
+                asset.rel.join(&sub)
+            };
+            if report.claims_target(&out_rel)
+                || out_rel == Path::new("importmap.json")
+                || out_rel.starts_with("web_modules")
+            {
+                return Err(Error::Build(format!(
+                    "web-modules: {} (npm://{}) resolves onto {}, which the build already produces",
+                    link.display(),
+                    reference.package,
+                    out_rel.display()
+                )));
+            }
+            let dest = stage.join(&out_rel);
+            if let Some(parent) = dest.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::copy(&source, &dest)?;
+        }
+    }
+
     // Vendor the transform-runtime helpers the graph shows were injected (the decorator
     // helper, etc.) — even a non-vendored build may need these. Tera renders later, so
     // a runtime import appearing only in rendered JS is not auto-vendored — it surfaces

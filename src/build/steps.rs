@@ -192,6 +192,7 @@ pub(crate) struct PreflightReport {
     walk_errors: Vec<String>,
     skipped_symlinks: Vec<SkippedSymlink>,
     rejected: Vec<RejectedClaim>,
+    npm_assets: Vec<NpmAsset>,
 }
 
 /// The walk-level policies [`preflight`] enforces, bundled so the signature does not
@@ -210,6 +211,16 @@ pub(crate) struct WalkPolicy<'a> {
 pub(crate) struct SkippedSymlink {
     pub root: usize,
     pub rel: PathBuf,
+}
+
+/// A symlink whose target is an `npm://<package>/<subpath>` URL — a reference into
+/// `node_modules`, not a filesystem link. The build resolves it through
+/// [`crate::npm_link`] and writes the file(s) at `rel`, in every symlink mode.
+#[derive(Debug)]
+pub(crate) struct NpmAsset {
+    pub root: usize,
+    pub rel: PathBuf,
+    pub target: String,
 }
 
 /// A source file whose canonical location is not under its canonical root — a
@@ -280,6 +291,7 @@ pub(crate) fn preflight(
         walk_errors: Vec::new(),
         skipped_symlinks: Vec::new(),
         rejected: Vec::new(),
+        npm_assets: Vec::new(),
     };
     let follow = matches!(
         policy.symlinks,
@@ -302,6 +314,21 @@ pub(crate) fn preflight(
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(e) => {
+                    // A dangling link whose target is an `npm://` reference is not a walk
+                    // error: under a following mode walkdir fails to stat the (virtual)
+                    // target, so intercept it here before it is reported as one.
+                    if let Some(path) = e.path() {
+                        if let Some(target) = crate::npm_link::link_target(path) {
+                            if let Ok(rel) = path.strip_prefix(root) {
+                                report.npm_assets.push(NpmAsset {
+                                    root: root_index,
+                                    rel: rel.to_path_buf(),
+                                    target,
+                                });
+                            }
+                            continue;
+                        }
+                    }
                     report.walk_errors.push(e.to_string());
                     continue;
                 }
@@ -312,6 +339,18 @@ pub(crate) fn preflight(
             // served and nothing when built — record it and move on. Checked before
             // `is_file`, which would stat *through* the link.
             if !follow && entry.path_is_symlink() {
+                // An `npm://` link is a package reference, resolved in every mode; a
+                // filesystem link here is a redirect a static build cannot express.
+                if let Some(target) = crate::npm_link::link_target(path) {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        report.npm_assets.push(NpmAsset {
+                            root: root_index,
+                            rel: rel.to_path_buf(),
+                            target,
+                        });
+                    }
+                    continue;
+                }
                 if let Ok(rel) = path.strip_prefix(root) {
                     report.skipped_symlinks.push(SkippedSymlink {
                         root: root_index,
@@ -455,6 +494,12 @@ impl PreflightReport {
     pub(crate) fn rejected_claims(&self) -> &[RejectedClaim] {
         &self.rejected
     }
+
+    /// `npm://` symlink references found in the tree — resolved into `node_modules` and
+    /// emitted after the step winners, each at its own output path.
+    pub(crate) fn npm_assets(&self) -> &[NpmAsset] {
+        &self.npm_assets
+    }
 }
 
 #[cfg(test)]
@@ -513,6 +558,40 @@ mod tests {
                 symlinks,
             },
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preflight_records_an_npm_link_as_an_asset_not_an_error() {
+        use std::os::unix::fs::symlink;
+        // A dangling `npm://` link would otherwise surface as a walk error under the
+        // following mode; it must be captured as an asset instead, and the sibling
+        // real file still claimed.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("web");
+        std::fs::create_dir_all(root.join("icons/bi")).unwrap();
+        symlink(
+            "npm://bootstrap-icons/icons/eye.svg",
+            root.join("icons/bi/eye.svg"),
+        )
+        .unwrap();
+        std::fs::write(root.join("app.js"), "export {};").unwrap();
+
+        let report = scan(std::slice::from_ref(&root));
+        assert!(
+            report.walk_errors().is_empty(),
+            "an npm:// link is not a walk error"
+        );
+        assert!(report.escaping_sources().is_empty());
+        let assets = report.npm_assets();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].rel, Path::new("icons/bi/eye.svg"));
+        assert_eq!(assets[0].target, "npm://bootstrap-icons/icons/eye.svg");
+        // The real sibling is still claimed for emission.
+        assert!(report
+            .winners()
+            .iter()
+            .any(|w| w.out_rel == Path::new("app.js")));
     }
 
     #[test]

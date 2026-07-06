@@ -46,6 +46,9 @@ pub use core::{importmap, mount, reject, static_files, symlinks, tsconfig, vendo
 // Crate-internal for now: the graph's overwrite/ownership semantics are still
 // settling, so it is not part of the public API yet.
 pub(crate) use core::module_graph;
+// Crate-internal: resolving `npm://` symlink targets into node_modules, used by the
+// build's preflight walk/emit and the dev/static server.
+pub(crate) use core::npm_link;
 
 /// Feature-gated source/asset processors, each re-exported at the crate root (e.g.
 /// `web_modules::scss`). Grouped to separate "what we apply to your source" from the

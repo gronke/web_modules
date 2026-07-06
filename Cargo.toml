@@ -1,6 +1,6 @@
 [package]
 name = "web_modules"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Stefan Grönke <stefan@gronke.net>"]
 homepage = "https://github.com/gronke/web_modules"
 repository = "https://github.com/gronke/web_modules"

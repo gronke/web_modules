@@ -73,11 +73,30 @@ pub(crate) fn resolve(from_dir: &Path, reference: &Reference) -> Result<Vec<(Pat
     if reference.directory {
         let dir = npm_utils::resolve::package_dir(from_dir, &reference.package)
             .map_err(|e| Error::Build(format!("npm://{}: {e}", reference.package)))?;
+        // Resolve the mounted directory through the package's canonical location and
+        // require it to stay inside — the subpath is attacker-influenced, so an
+        // in-package symlink must not redirect the mount outside the module.
+        let package_root = dir
+            .canonicalize()
+            .map_err(|e| Error::Build(format!("npm://{}: {e}", reference.package)))?;
         let base = if reference.subpath.is_empty() {
-            dir
+            package_root.clone()
         } else {
-            npm_utils::path_safety::safe_join(&dir, &reference.subpath)
-                .map_err(|e| Error::Build(format!("npm://{}: {e}", reference.package)))?
+            let joined = npm_utils::path_safety::safe_join(&dir, &reference.subpath)
+                .map_err(|e| Error::Build(format!("npm://{}: {e}", reference.package)))?;
+            let real = joined.canonicalize().map_err(|e| {
+                Error::Build(format!(
+                    "npm://{}/{}: {e}",
+                    reference.package, reference.subpath
+                ))
+            })?;
+            if !real.starts_with(&package_root) {
+                return Err(Error::Build(format!(
+                    "npm://{}/{}: resolves outside the package",
+                    reference.package, reference.subpath
+                )));
+            }
+            real
         };
         if !base.is_dir() {
             return Err(Error::Build(format!(
@@ -86,6 +105,9 @@ pub(crate) fn resolve(from_dir: &Path, reference: &Reference) -> Result<Vec<(Pat
             )));
         }
         let mut files = Vec::new();
+        // `follow_links` defaults to false, so a symlink inside the mount is neither
+        // descended nor (being a symlink, not a file) emitted — only the real files
+        // physically under the contained base ship.
         for entry in walkdir::WalkDir::new(&base).sort_by_file_name() {
             let entry =
                 entry.map_err(|e| Error::Build(format!("npm://{}: {e}", reference.package)))?;
@@ -124,16 +146,25 @@ pub(crate) fn serve_target(root: &Path, relative: &Path) -> Option<PathBuf> {
         let remainder = components.as_path();
         let file = if reference.directory || !remainder.as_os_str().is_empty() {
             // A directory mount, or a file reached through one: the package directory,
-            // plus the reference's own subpath, plus the request's remaining components.
-            let dir = npm_utils::resolve::package_dir(&from_dir, &reference.package).ok()?;
-            let mut file = dir;
+            // plus the reference's own subpath, plus the request's remaining components —
+            // then resolved through the package's canonical location and refused if it
+            // escapes, so an in-package symlink cannot serve a file outside the module.
+            let package_root = npm_utils::resolve::package_dir(&from_dir, &reference.package)
+                .ok()?
+                .canonicalize()
+                .ok()?;
+            let mut file = package_root.clone();
             if !reference.subpath.is_empty() {
                 file = npm_utils::path_safety::safe_join(&file, &reference.subpath).ok()?;
             }
             if !remainder.as_os_str().is_empty() {
                 file = npm_utils::path_safety::safe_join(&file, remainder.to_str()?).ok()?;
             }
-            file
+            let real = file.canonicalize().ok()?;
+            if !real.starts_with(&package_root) {
+                return None;
+            }
+            real
         } else {
             npm_utils::resolve::package_file(&from_dir, &reference.package, &reference.subpath)
                 .ok()?
@@ -165,6 +196,35 @@ mod tests {
 
         assert!(parse("./icons/eye.svg").is_none());
         assert!(parse("npm://").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_mount_skips_an_escaping_symlink() {
+        use std::os::unix::fs::symlink;
+        use tempfile::tempdir;
+        let tmp = tempdir().unwrap();
+        let icons = tmp.path().join("node_modules/pkg/icons");
+        std::fs::create_dir_all(&icons).unwrap();
+        std::fs::write(
+            tmp.path().join("node_modules/pkg/package.json"),
+            r#"{"name":"pkg"}"#,
+        )
+        .unwrap();
+        std::fs::write(icons.join("real.svg"), "<svg/>").unwrap();
+        std::fs::write(tmp.path().join("secret.txt"), "secret").unwrap();
+        symlink(tmp.path().join("secret.txt"), icons.join("leak.svg")).unwrap();
+        let web = tmp.path().join("web");
+        std::fs::create_dir_all(&web).unwrap();
+
+        let reference = parse("npm://pkg/icons/").unwrap();
+        let out = resolve(&web, &reference).unwrap();
+        // The escaping symlink is skipped; only the real in-package file ships.
+        let names: Vec<_> = out
+            .iter()
+            .map(|(rel, _)| rel.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["real.svg"]);
     }
 
     #[cfg(all(unix, feature = "axum"))]

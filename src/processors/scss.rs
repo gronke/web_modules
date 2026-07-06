@@ -113,7 +113,9 @@ pub fn compile_file(path: &Path, load_paths: &[&Path]) -> Result<String> {
 }
 
 /// Compile every `.scss` under `src_dir` (skipping `_` partials) into a mirrored
-/// `.css` under `out_dir`. Returns the number of files written.
+/// `.css` under `out_dir`. Symlinks are skipped entirely — file or directory; the
+/// pipeline's preflight, not this standalone helper, honors
+/// [`SymlinkMode`](crate::SymlinkMode). Returns the number of files written.
 pub fn compile_directory(src_dir: &Path, out_dir: &Path, load_paths: &[&Path]) -> Result<usize> {
     // Every entry file lives under `src_dir`, so one sandbox covering the load paths plus
     // `src_dir` keeps each file and its in-tree imports reachable while refusing escapes.
@@ -123,9 +125,9 @@ pub fn compile_directory(src_dir: &Path, out_dir: &Path, load_paths: &[&Path]) -
     let opts = options(&sandbox, load_paths);
     let mut count = 0;
     for entry in WalkDir::new(src_dir)
-        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
+        .filter(|e| !e.path_is_symlink())
         .filter(|e| {
             e.path()
                 .extension()
@@ -240,6 +242,24 @@ mod tests {
         assert_eq!(n, 1);
         assert!(out.join("app.css").exists());
         assert!(!out.join("_vars.css").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_skips_symlinks_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        create_dir_all(&src).unwrap();
+        write(src.join("app.scss"), "a { color: red; }").unwrap();
+        write(dir.path().join("outside.scss"), "b { color: blue; }").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("outside.scss"), src.join("linked.scss"))
+            .unwrap();
+
+        let n = compile_directory(&src, &out, &[]).unwrap();
+        assert_eq!(n, 1, "the link contributes nothing");
+        assert!(out.join("app.css").exists());
+        assert!(!out.join("linked.css").exists());
     }
 
     #[test]

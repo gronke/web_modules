@@ -235,8 +235,8 @@ pub fn compile_directory(src_dir: &Path, out_dir: &Path) -> Result<usize> {
 }
 
 /// Like [`compile_directory`], but with explicit [`TranspileOptions`]. Symlinks are
-/// followed unconditionally (fixed — the pipeline's preflight, not this standalone
-/// helper, honors [`SymlinkMode`](crate::SymlinkMode)).
+/// skipped entirely — file or directory; the pipeline's preflight, not this
+/// standalone helper, honors [`SymlinkMode`](crate::SymlinkMode).
 pub fn compile_directory_with(
     src_dir: &Path,
     out_dir: &Path,
@@ -244,9 +244,9 @@ pub fn compile_directory_with(
 ) -> Result<usize> {
     let mut count = 0;
     for entry in WalkDir::new(src_dir)
-        .follow_links(true)
         .into_iter()
         .filter_map(|e| e.ok())
+        .filter(|e| !e.path_is_symlink())
     {
         let path = entry.path();
         let rel = path
@@ -360,6 +360,33 @@ mod tests {
             "used bare import retained for the import map; got:\n{js}"
         );
         assert!(!js.contains(": string"), "type annotations stripped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compile_directory_skips_symlinks_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        create_dir_all(src.join("real")).unwrap();
+        write(src.join("app.ts"), "export const x: number = 1;").unwrap();
+        write(src.join("real/mod.ts"), "export const real = 1;").unwrap();
+        write(dir.path().join("outside.ts"), "export const outside = 1;").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("outside.ts"), src.join("linked.ts")).unwrap();
+        std::os::unix::fs::symlink(src.join("real"), src.join("aliased")).unwrap();
+
+        let n = compile_directory(&src, &out).unwrap();
+        assert_eq!(n, 2, "app.ts and real/mod.ts; links contribute nothing");
+        assert!(out.join("app.js").exists());
+        assert!(out.join("real/mod.js").exists());
+        assert!(
+            !out.join("linked.js").exists(),
+            "a file link is never compiled"
+        );
+        assert!(
+            !out.join("aliased").exists(),
+            "a directory link is not descended"
+        );
     }
 
     #[test]

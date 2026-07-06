@@ -11,6 +11,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 - fix(serve): filesystem reads and on-the-fly compiles run on tokio's blocking pool — concurrent requests no longer queue behind one slow read or compile
 - fix(dev): a response that fails to build is a `500`, not a panic
+- fix(build,dev): reject-list drops are warned on stderr (`build` per file, `dev` at startup) instead of requiring the `tracing` feature and a subscriber
 
 ## [0.5.0] - 2026-07-06
 

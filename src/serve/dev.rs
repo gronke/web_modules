@@ -179,8 +179,8 @@ pub(crate) fn build_router(
 /// mounted dirs (declaration order) run through the same preflight the build uses.
 /// Every contested target is reported once with its winner — those lines are silenced
 /// by `skip_duplicates`. A source resolving outside its mount (an escaping symlink,
-/// which per-request containment will refuse) and any walk problem are always
-/// reported; the flag arbitrates precedence, not containment. Mounts at different
+/// which per-request containment will refuse), any walk problem, and every reject-list
+/// drop are always reported; the flag arbitrates precedence, not policy. Mounts at different
 /// prefixes are never compared — most-specific-prefix routing is deliberate
 /// composition, not an accident.
 fn preflight_warnings(mounts: &[Mount], config: &DevConfig) -> Vec<String> {
@@ -228,6 +228,11 @@ fn preflight_warnings(mounts: &[Mount], config: &DevConfig) -> Vec<String> {
                 "web-modules: {} is a symlink - served as a redirect, skipped by build",
                 roots[skipped.root].join(&skipped.rel).display(),
             ));
+        }
+        // Reject-list drops are policy, not precedence — `skip_duplicates` (below)
+        // never silences them.
+        for rejected in report.rejected_claims() {
+            lines.push(format!("web-modules: {}", rejected.describe(roots)));
         }
         if config.skip_duplicates {
             continue;
@@ -864,6 +869,48 @@ mod tests {
         };
         let warnings = preflight_warnings(&[Mount::root(root)], &config);
         assert!(warnings.is_empty(), "got {warnings:?}");
+    }
+
+    #[test]
+    fn dev_reports_reject_list_drops_even_under_skip_duplicates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.html"), b"<x>").unwrap();
+        std::fs::write(root.join(".env"), b"S=1").unwrap();
+
+        let warnings = preflight_warnings(&[Mount::root(root.clone())], &DevConfig::default());
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            warnings[0].contains(".env") && warnings[0].contains("dropped by the reject list"),
+            "got: {}",
+            warnings[0]
+        );
+
+        // Policy, not precedence: the flag silences duplicate lines only.
+        let config = DevConfig {
+            skip_duplicates: true,
+            ..DevConfig::default()
+        };
+        let warnings = preflight_warnings(&[Mount::root(root)], &config);
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn dev_reports_a_template_materializing_a_rejected_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".env.tera"), "S={{ 1 }}").unwrap();
+
+        let warnings = preflight_warnings(&[Mount::root(root)], &DevConfig::default());
+        assert_eq!(warnings.len(), 1, "got {warnings:?}");
+        assert!(
+            warnings[0].contains(".env.tera") && warnings[0].contains("would emit .env"),
+            "got: {}",
+            warnings[0]
+        );
     }
 
     #[test]

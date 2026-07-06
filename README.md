@@ -100,7 +100,7 @@ The live-reload watcher's behavior through links is backend-defined; under `foll
 
 ```toml
 [dependencies]
-web_modules = "0.4"   # Rust 1.95+
+web_modules = "0.5"   # Rust 1.95+
 ```
 
 `typescript`, `scss` and `tera` are on by default; `full` enables everything except `bundle`.

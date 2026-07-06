@@ -7,6 +7,8 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-07-06
+
 ### Added
 
 - feat(build): duplicate output detection — `build` fails before writing anything when two sources claim one output path, listing every conflict; `dev` warns about each conflict at startup instead of failing; `--skip-duplicates` (both commands, `Processors`, and the builders) keeps the highest-precedence source silently
@@ -90,6 +92,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 - Initial release: a pure-Rust, buildless toolchain for ES modules and Web Components.
 
+[0.5.0]: https://github.com/gronke/web_modules/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/gronke/web_modules/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/gronke/web_modules/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/gronke/web_modules/compare/v0.1.0...v0.2.0

@@ -41,7 +41,8 @@ pub struct TranspileOptions {
     /// Emit minified JS (an *output* option, like SCSS's compressed style). With the
     /// `minify` feature this runs the full `oxc_minifier` (compress + mangle) in the
     /// same pass; without it, codegen still strips whitespace. Defaults to `false`.
-    /// For minifying JS the compiler didn't produce (vendored), use [`crate::minify`].
+    /// For minifying JS the compiler didn't produce (vendored), use
+    /// [`crate::minify::minify_str`] on the file's content.
     pub minify: bool,
 }
 

@@ -32,6 +32,10 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - fix(build): a source file that canonically resolves outside its root (a symlink out of the tree) fails the build instead of being published — the dev server's containment already refused to serve such a path; source-walk problems surface as warnings instead of being silently dropped
 - fix(build): the reject list applies to every emitted target, not only static copies — a template or compiled source can no longer materialize a rejected path (`.env.tera` → `.env`, `.env.ts` → `.env.js`), matching what the dev server refuses to serve
 
+### Removed
+
+- `minify::minify_directory`, the in-place, symlink-following tree walk — minification happens inline in the transform, and `minify_str` covers JavaScript the compiler didn't produce
+
 ## [0.4.0] - 2026-06-28
 
 ### Added

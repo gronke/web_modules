@@ -1666,8 +1666,9 @@ dependencies = [
 
 [[package]]
 name = "npm-utils"
-version = "0.6.0"
-source = "git+https://github.com/gronke/npm-utils?branch=main#0c0ded280e18f204276e6c22ecf8dc9e1bd7ca3f"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "484cf50294f6b5f6ad2cfe801c6668b614a2cbfaad01cb86f5b4e8fd6df7f2bb"
 dependencies = [
  "base64",
  "clap",

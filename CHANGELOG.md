@@ -10,6 +10,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 ### Changed
 
 - The standalone tree helpers (`static_files::copy_static`, `compress::gzip_dir`, `typescript::compile_directory`, `scss::compile_directory`) skip symlinks entirely instead of reading through file links — `SymlinkMode` decisions live in the pipeline, `dev`, and the router
+- oxc 0.138 and quick-xml 0.41 — quick-xml 0.40 carried RUSTSEC-2026-0194/-0195 (quadratic attribute-name checks); the dependency lock refreshed alongside
 
 ### Fixed
 

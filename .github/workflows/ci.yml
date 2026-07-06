@@ -35,10 +35,13 @@ jobs:
       # Cargo cache via the shared first-party action: registry/git + a bounded `target/` (keyed on
       # Cargo.toml, no whole-target restore→save ratchet) with CARGO_INCREMENTAL defaulted off.
       # `prefix` keeps the build and tauri jobs in separate cache families.
+      # The `-1` generation abandons caches whose example `$OUT_DIR/dist` trees predate the
+      # `.web-modules-out` marker: the staged build refuses to replace an unmarked output, and
+      # `restore-keys` would keep resurrecting the old target under the same prefix.
       - name: Rust cache
         uses: gronke/rust-ci/.github/actions/rust-cache@main
         with:
-          prefix: build
+          prefix: build-1
           cache-target: "true"
           lockfiles: "**/Cargo.toml"
 
@@ -222,10 +225,11 @@ jobs:
 
       # Cargo cache via the shared action — the tauri crate's own release `target/` (a separate dir
       # from the test job's workspace target), bounded and keyed on Cargo.toml; incremental off.
+      # `-1` for the same reason as the build job: drop targets carrying pre-marker frontend output.
       - name: Rust cache
         uses: gronke/rust-ci/.github/actions/rust-cache@main
         with:
-          prefix: tauri
+          prefix: tauri-1
           cache-target: "true"
           target-dir: examples/tauri/src-tauri/target
           lockfiles: "**/Cargo.toml"

@@ -1,10 +1,10 @@
 //! JavaScript minification via [`oxc_minifier`] + minified codegen.
 //!
 //! Compresses the AST (constant folding, dead-code elimination) and prints
-//! whitespace-free output. Intended for release/embedded builds over the `.js`
-//! emitted by [`super::typescript`].
+//! whitespace-free output. The build pipeline minifies inline during the
+//! TypeScript transform; [`minify_str`] is the string-level entry for
+//! JavaScript the compiler didn't produce.
 
-use std::fs::{read_to_string, write};
 use std::path::Path;
 
 use oxc_allocator::Allocator;
@@ -12,7 +12,6 @@ use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_minifier::{Minifier, MinifierOptions};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
-use walkdir::WalkDir;
 
 use crate::{Error, Result};
 
@@ -52,29 +51,6 @@ pub fn minify_str(source: &str, path: &Path) -> Result<String> {
     Ok(code)
 }
 
-/// Minify every `.js` under `dir` **in place**, returning the count. Mirrors the
-/// [`super::typescript::compile_directory`] convention for the emitted-JS tree of a
-/// release/embedded build. Note this rewrites *every* `.js` it finds; point it at
-/// the subtree you want minified (e.g. exclude an already-minified vendored tree).
-/// Symlinks are followed unconditionally (fixed — this standalone helper is off the
-/// pipeline path and does not honor [`SymlinkMode`](crate::SymlinkMode)).
-pub fn minify_directory(dir: &Path) -> Result<usize> {
-    let mut count = 0;
-    for entry in WalkDir::new(dir)
-        .follow_links(true)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|x| x == "js"))
-    {
-        let path = entry.path();
-        let source = read_to_string(path)?;
-        let minified = minify_str(&source, path)?;
-        write(path, minified)?;
-        count += 1;
-    }
-    Ok(count)
-}
-
 // Minify has no flags of its own beyond the on/off toggle (it's off by default).
 // (`--minify` / `--no-minify`.)
 #[cfg(feature = "cli")]
@@ -97,15 +73,5 @@ mod tests {
         let min = minify_str("export const sum = 1 + 2;\n\n", Path::new("x.js")).unwrap();
         assert!(min.contains('3'), "constant folded; got: {min}");
         assert!(!min.contains(" = "), "whitespace stripped; got: {min}");
-    }
-
-    #[test]
-    fn minify_directory_processes_js_in_place() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("a.js");
-        write(&f, "export const sum = 1 + 2;\n").unwrap();
-        let n = minify_directory(dir.path()).unwrap();
-        assert_eq!(n, 1);
-        assert!(read_to_string(&f).unwrap().contains('3'));
     }
 }

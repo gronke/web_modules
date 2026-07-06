@@ -23,7 +23,6 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use axum::{
-    body::Body,
     extract::State,
     http::{header, StatusCode, Uri},
     response::{IntoResponse, Response},
@@ -296,10 +295,9 @@ async fn serve_asset(State(state): State<DevState>, uri: Uri) -> Response {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     match resolved {
-        Ok(Some(Served::Bytes { body, content_type })) => Response::builder()
-            .header(header::CONTENT_TYPE, content_type)
-            .body(Body::from(body))
-            .expect("valid response"),
+        Ok(Some(Served::Bytes { body, content_type })) => {
+            ([(header::CONTENT_TYPE, content_type)], body).into_response()
+        }
         #[cfg(feature = "symlink-move")]
         Ok(Some(Served::Redirect {
             location,

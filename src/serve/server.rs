@@ -211,20 +211,42 @@ struct StaticState {
     symlinks: SymlinkMode,
 }
 
-/// Static handler: resolve a request against the roots (most-specific prefix first,
-/// same-prefix ties in declaration order) and serve the first match, staying inside
-/// each root (per the symlink mode).
+/// Static handler: answer via [`respond`] — on the blocking pool when filesystem
+/// roots are involved, directly when every root is embedded (in-memory, nothing
+/// blocks).
 async fn serve_static(
     State(state): State<Arc<StaticState>>,
     headers: HeaderMap,
     uri: Uri,
 ) -> Response {
+    let gzip_ok = accepts_gzip(&headers);
+    // Filesystem roots resolve with blocking syscalls (canonicalize, read); run them
+    // on the blocking pool so a slow disk doesn't stall the async workers.
+    if state
+        .roots
+        .iter()
+        .any(|root| matches!(root.source, Source::Dir(_)))
+    {
+        let path = uri.path().to_string();
+        return match tokio::task::spawn_blocking(move || respond(&state, &path, gzip_ok)).await {
+            Ok(response) => response,
+            // A panic inside the responder is this request's 500, not a dead worker.
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+    }
+    respond(&state, uri.path(), gzip_ok)
+}
+
+/// The response for a request path: resolve it against the roots (most-specific
+/// prefix first, same-prefix ties in declaration order) and serve the first match,
+/// staying inside each root (per the symlink mode).
+fn respond(state: &StaticState, path: &str, gzip_ok: bool) -> Response {
     let StaticState {
         roots,
         reject,
         symlinks,
-    } = &*state;
-    let raw = uri.path().trim_start_matches('/');
+    } = state;
+    let raw = path.trim_start_matches('/');
     let requested = if raw.is_empty() || raw.ends_with('/') {
         format!("{raw}index.html")
     } else {
@@ -239,7 +261,6 @@ async fn serve_static(
         crate::reject::warn_rejected(&requested);
         return StatusCode::NOT_FOUND.into_response();
     }
-    let gzip_ok = accepts_gzip(&headers);
     let mut candidates: Vec<(&Root, String)> = roots
         .iter()
         .filter_map(|root| relative_under(&root.prefix, &requested).map(|rel| (root, rel)))

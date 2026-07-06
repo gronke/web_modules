@@ -25,6 +25,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The dry-run below cannot catch an un-bumped version - crates.io rejects a duplicate
+      # only on the real upload. Fail fast when the tag and the manifest disagree.
+      # `--no-deps` reads the manifests without resolving, so a stale Cargo.lock cannot mask it.
+      - name: Tag matches the crate version
+        run: |
+          crate="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "web_modules") | .version')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$crate" != "$tag" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} but Cargo.toml says ${crate} - bump the version before tagging"
+            exit 1
+          fi
+
       - name: MSRV check (compiles on the declared rust-version)
         uses: gronke/rust-ci/.github/actions/msrv@main
         with:

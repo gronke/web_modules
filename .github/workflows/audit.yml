@@ -1,0 +1,30 @@
+name: audit
+
+# RustSec advisory scan of the locked dependency tree. Runs when the manifests or the
+# lock change, and weekly - an advisory can land without any commit here. Plain
+# `cargo install` over a third-party installer action: slower, but nothing new to trust.
+on:
+  push:
+    branches: [main]
+    paths: ["Cargo.toml", "Cargo.lock", ".github/workflows/audit.yml"]
+  pull_request:
+    paths: ["Cargo.toml", "Cargo.lock", ".github/workflows/audit.yml"]
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+# Least-privilege: the audit only reads the repo; findings surface as the job result.
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit the locked tree
+        run: cargo audit

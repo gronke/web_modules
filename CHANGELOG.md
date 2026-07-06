@@ -7,6 +7,10 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+### Added
+
+- CI: a `cargo audit` job scans the locked tree for RustSec advisories — on manifest/lock changes and weekly
+
 ### Changed
 
 - The standalone tree helpers (`static_files::copy_static`, `compress::gzip_dir`, `typescript::compile_directory`, `scss::compile_directory`) skip symlinks entirely instead of reading through file links — `SymlinkMode` decisions live in the pipeline, `dev`, and the router

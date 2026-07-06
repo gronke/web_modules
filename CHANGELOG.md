@@ -7,6 +7,10 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+### Fixed
+
+- fix(serve): filesystem reads and on-the-fly compiles run on tokio's blocking pool — concurrent requests no longer queue behind one slow read or compile
+
 ## [0.5.0] - 2026-07-06
 
 ### Added

@@ -284,7 +284,18 @@ async fn serve_asset(State(state): State<DevState>, uri: Uri) -> Response {
     if has_traversal(&requested) {
         return StatusCode::NOT_FOUND.into_response();
     }
-    match resolve(&state, &requested) {
+    // Resolution reads sources and compiles them on the calling thread; run it on the
+    // blocking pool so one slow compile doesn't stall unrelated requests.
+    let task = {
+        let state = state.clone();
+        let requested = requested.clone();
+        tokio::task::spawn_blocking(move || resolve(&state, &requested)).await
+    };
+    let Ok(resolved) = task else {
+        // A panic inside resolution is this request's 500, not a dead worker.
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    match resolved {
         Ok(Some(Served::Bytes { body, content_type })) => Response::builder()
             .header(header::CONTENT_TYPE, content_type)
             .body(Body::from(body))

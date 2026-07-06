@@ -47,11 +47,26 @@ pub fn copy_static(src: &Path, out: &Path, reject: &crate::reject::Reject) -> Re
 }
 
 /// The static-copy stage as a pipeline step: claims everything that is not a source
-/// file, a `_` partial, or reject-listed, and copies it byte-for-byte. A copied
-/// `.js`/`.mjs` is read for the module graph on the way — the record marks the WRITE,
-/// independent of whether the bytes are readable as a module.
+/// file or a `_` partial (the preflight drops reject-listed targets centrally, and
+/// reports them), and copies it byte-for-byte. A copied `.js`/`.mjs` is read for the
+/// module graph on the way — the record marks the WRITE, independent of whether the
+/// bytes are readable as a module.
 pub(crate) struct StaticStep {
     reject: crate::reject::Reject,
+}
+
+/// The shape of a static-copy candidate: not a `_` partial, not a processor source.
+fn static_candidate(rel: &Path) -> Option<()> {
+    let name = rel.file_name()?.to_str()?;
+    let ext = rel.extension().and_then(|x| x.to_str()).unwrap_or("");
+    if name.starts_with('_')
+        || SOURCE_EXTENSIONS
+            .iter()
+            .any(|e| ext.eq_ignore_ascii_case(e))
+    {
+        return None;
+    }
+    Some(())
 }
 
 impl StaticStep {
@@ -59,18 +74,11 @@ impl StaticStep {
         Self { reject }
     }
 
-    /// The claim rule, shared with [`copy_static`]'s walk. Warns per reject-listed
-    /// path, exactly as the copy loop always has.
+    /// The standalone [`copy_static`] claim rule: [`static_candidate`] plus the reject
+    /// list, which the walk enforces itself here — outside the pipeline there is no
+    /// preflight to do it centrally.
     fn claims_source(&self, rel: &Path) -> Option<()> {
-        let name = rel.file_name()?.to_str()?;
-        let ext = rel.extension().and_then(|x| x.to_str()).unwrap_or("");
-        if name.starts_with('_')
-            || SOURCE_EXTENSIONS
-                .iter()
-                .any(|e| ext.eq_ignore_ascii_case(e))
-        {
-            return None;
-        }
+        static_candidate(rel)?;
         // Reject list: never publish config / secret / source-code files into the output.
         if self.reject.rejects_path(rel) {
             crate::reject::warn_rejected(&rel.display().to_string());
@@ -90,7 +98,7 @@ impl crate::build::steps::Preflight for StaticStep {
     }
 
     fn claim(&self, rel: &Path) -> Option<crate::build::steps::Claim> {
-        self.claims_source(rel)?;
+        static_candidate(rel)?;
         Some(crate::build::steps::Claim {
             out_rel: rel.to_path_buf(),
             tiebreak: 0,
@@ -203,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn step_claims_everything_but_sources_partials_and_rejected() {
+    fn step_claims_everything_but_sources_and_partials() {
         use crate::build::steps::Preflight;
         let step = StaticStep::new(crate::reject::Reject::all());
         assert!(step.claim(Path::new("page.html")).is_some());
@@ -226,9 +234,12 @@ mod tests {
             );
         }
         assert!(step.claim(Path::new("_partial.html")).is_none());
+        // A reject-listed path still claims by shape: the preflight drops it centrally
+        // (and reports the drop), so the decision is one rule for every step.
+        assert!(step.claim(Path::new(".env")).is_some());
         assert!(
-            step.claim(Path::new(".env")).is_none(),
-            "reject-listed paths make no claim"
+            step.claims_source(Path::new(".env")).is_none(),
+            "the standalone copy_static rule enforces the reject list itself"
         );
     }
 

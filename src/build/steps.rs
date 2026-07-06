@@ -46,9 +46,10 @@ pub(crate) trait Preflight {
     fn rank(&self) -> Rank;
     /// The claim this step makes on the source file at root-relative `rel`, or `None`
     /// when the file is not its input (wrong extension, `_` partial, `.d.ts`, …).
-    /// Steps need not consult the reject list: the driver drops every claim whose
-    /// *target* is rejected, centrally. (The static step still applies it to its
-    /// sources, because a raw copy ships the source file itself.)
+    /// Steps never consult the reject list: the driver drops every claim whose
+    /// *target* is rejected, centrally, and records the drop for reporting. (The
+    /// standalone [`copy_static`](crate::static_files::copy_static) walk applies the
+    /// list itself — it runs without a driver.)
     fn claim(&self, rel: &Path) -> Option<Claim>;
 }
 
@@ -190,6 +191,7 @@ pub(crate) struct PreflightReport {
     escaping_sources: Vec<EscapingSource>,
     walk_errors: Vec<String>,
     skipped_symlinks: Vec<SkippedSymlink>,
+    rejected: Vec<RejectedClaim>,
 }
 
 /// The walk-level policies [`preflight`] enforces, bundled so the signature does not
@@ -222,6 +224,32 @@ pub(crate) struct EscapingSource {
     pub target: PathBuf,
 }
 
+/// A claim dropped because its output path is on the reject list — recorded so
+/// `build` and `dev` can say aloud what they excluded.
+#[derive(Debug)]
+pub(crate) struct RejectedClaim {
+    pub root: usize,
+    pub rel: PathBuf,
+    pub out_rel: PathBuf,
+}
+
+impl RejectedClaim {
+    /// The warning line for this drop: the source path, plus the target when it
+    /// differs (a template or compiled source materializing a rejected path).
+    pub(crate) fn describe(&self, roots: &[PathBuf]) -> String {
+        let source = roots[self.root].join(&self.rel);
+        if self.rel == self.out_rel {
+            format!("{} dropped by the reject list", source.display())
+        } else {
+            format!(
+                "{} would emit {} - dropped by the reject list",
+                source.display(),
+                self.out_rel.display()
+            )
+        }
+    }
+}
+
 /// Walk each root once and offer every file to every step, under the walk policy.
 ///
 /// Symlinks follow the mode: under [`Follow`](crate::SymlinkMode::Follow) (default)
@@ -251,6 +279,7 @@ pub(crate) fn preflight(
         escaping_sources: Vec::new(),
         walk_errors: Vec::new(),
         skipped_symlinks: Vec::new(),
+        rejected: Vec::new(),
     };
     let follow = matches!(
         policy.symlinks,
@@ -318,6 +347,11 @@ pub(crate) fn preflight(
                 if let Some(claim) = step.claim(rel) {
                     if policy.reject.rejects_path(&claim.out_rel) {
                         crate::reject::warn_rejected(&claim.out_rel.display().to_string());
+                        report.rejected.push(RejectedClaim {
+                            root: root_index,
+                            rel: rel.to_path_buf(),
+                            out_rel: claim.out_rel,
+                        });
                         continue;
                     }
                     report.claims.push(ClaimRecord {
@@ -415,6 +449,11 @@ impl PreflightReport {
     /// Symlinks the mode told the walk not to follow (Redirect/Move modes only).
     pub(crate) fn skipped_symlinks(&self) -> &[SkippedSymlink] {
         &self.skipped_symlinks
+    }
+
+    /// Claims dropped because their output path is on the reject list.
+    pub(crate) fn rejected_claims(&self) -> &[RejectedClaim] {
+        &self.rejected
     }
 }
 
@@ -522,6 +561,54 @@ mod tests {
             "the earlier root outranks the later one"
         );
         assert_eq!(report.winners().len(), 1);
+    }
+
+    #[test]
+    fn preflight_records_a_rejected_claim_instead_of_claiming() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join(".env"), "S=1").unwrap();
+        std::fs::write(root.join("ok.md"), "fine").unwrap();
+
+        let reject = crate::reject::Reject::default();
+        let report = preflight(
+            std::slice::from_ref(&root),
+            &[&CopyLike, &TransformLike],
+            WalkPolicy {
+                reject: &reject,
+                symlinks: crate::SymlinkMode::Follow,
+            },
+        );
+        assert!(
+            report.claims.iter().all(|c| c.out_rel != Path::new(".env")),
+            "a rejected target never claims"
+        );
+        let rejected = report.rejected_claims();
+        assert_eq!(rejected.len(), 1, "got {rejected:?}");
+        assert_eq!(rejected[0].rel, Path::new(".env"));
+        assert_eq!(rejected[0].out_rel, Path::new(".env"));
+        assert_eq!(
+            rejected[0].describe(std::slice::from_ref(&root)),
+            format!("{} dropped by the reject list", root.join(".env").display())
+        );
+    }
+
+    #[test]
+    fn a_rejected_transform_target_names_both_paths() {
+        // `.env.tera` → `.env`: the drop line names the source and the target it
+        // would have materialized.
+        let rejected = RejectedClaim {
+            root: 0,
+            rel: PathBuf::from(".env.tera"),
+            out_rel: PathBuf::from(".env"),
+        };
+        let line = rejected.describe(&[PathBuf::from("web")]);
+        assert!(
+            line.contains(".env.tera")
+                && line.contains("would emit .env - dropped by the reject list"),
+            "got: {line}"
+        );
     }
 
     #[test]

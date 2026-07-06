@@ -364,6 +364,15 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
         ));
     }
 
+    // The reject list drops claims by target — each drop is said aloud, so a missing
+    // `.env` or `server.key` in the output is an explained absence, not a silent one.
+    // Straight to stderr, never `cargo:warning`: inside a build script the drop is the
+    // configured tree's normal shape (a manifest in the web root), and cargo replays
+    // build-script warnings on every compile.
+    for rejected in report.rejected_claims() {
+        eprintln!("web-modules: {}", rejected.describe(opts.roots));
+    }
+
     // Sources may only come from inside their root: a file that canonically resolves
     // elsewhere (a symlink out of the tree) is refused outright — the dev server's
     // canonical containment already refuses to serve such a path, and publishing what

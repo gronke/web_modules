@@ -251,8 +251,7 @@ impl ResolvedCompiler {
     }
 }
 
-/// Default `roots` to the current dir when none were given (matching the dev server and the old
-/// `compile` command).
+/// Default `roots` to the current dir when none were given, matching the dev server.
 fn roots_or_cwd(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
     if roots.is_empty() {
         roots.push(PathBuf::from("."));

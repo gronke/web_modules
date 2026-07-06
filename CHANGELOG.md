@@ -7,8 +7,11 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-06
+
 ### Added
 
+- feat(build,serve): `npm://` symlink assets — a source symlink whose target is an `npm://<package>/<subpath>` URL is resolved from `node_modules` (exports-aware, via `npm-utils`) and emitted at the link's own path by `build` / served by `dev`, so a project sources specific files from an installed package (e.g. bootstrap-icons SVGs) without committing copies — a single file, or a whole directory with a trailing slash. Resolution is confined to the package's canonical directory, so an in-package symlink that escapes the module is refused
 - CI: a `cargo audit` job scans the locked tree for RustSec advisories — on manifest/lock changes and weekly
 
 ### Changed

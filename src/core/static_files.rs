@@ -20,15 +20,17 @@ pub(crate) const SOURCE_EXTENSIONS: [&str; 5] = ["ts", "tsx", "mts", "scss", "te
 /// Copy files from `src` to `out` (preserving structure), skipping things a build step
 /// produces or ignores: `.ts`/`.tsx`/`.mts`/`.scss`/`.tera` sources, `_`-prefixed partials,
 /// and any path the [`reject`](crate::reject) list excludes (config / secrets / source).
-/// Symlinks are not followed (fixed — the pipeline's preflight, not this standalone
-/// helper, honors [`SymlinkMode`](crate::SymlinkMode)). Returns the number of files
-/// copied.
+/// Symlinks are skipped entirely — file or directory; the pipeline's preflight, not
+/// this standalone helper, honors [`SymlinkMode`](crate::SymlinkMode). Returns the
+/// number of files copied.
 pub fn copy_static(src: &Path, out: &Path, reject: &crate::reject::Reject) -> Result<usize> {
     let step = StaticStep::new(reject.clone());
     let mut count = 0;
     for entry in WalkDir::new(src).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !path.is_file() {
+        // The link check comes first: `is_file` stats *through* a file link, and a
+        // copy would read the target's content.
+        if entry.path_is_symlink() || !path.is_file() {
             continue;
         }
         // WalkDir yields paths under `src`, so the strip is infallible.
@@ -172,6 +174,31 @@ mod tests {
         assert!(out.join("sub/data.json").exists());
         assert!(!out.join("app.ts").exists());
         assert!(!out.join("_partial.scss").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_static_skips_symlinks_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(src.join("theme")).unwrap();
+        std::fs::write(dir.path().join("outside.txt"), b"secret").unwrap();
+        std::fs::write(src.join("theme/site.css"), b"b{}").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("outside.txt"), src.join("linked.txt")).unwrap();
+        std::os::unix::fs::symlink(src.join("theme"), src.join("styles")).unwrap();
+
+        let n = copy_static(&src, &out, &crate::reject::Reject::none()).unwrap();
+        assert_eq!(n, 1, "only the real file is copied");
+        assert!(out.join("theme/site.css").exists());
+        assert!(
+            !out.join("linked.txt").exists(),
+            "a file link is never read through"
+        );
+        assert!(
+            !out.join("styles").exists(),
+            "a directory link is not descended"
+        );
     }
 
     #[test]

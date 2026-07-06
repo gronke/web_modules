@@ -37,12 +37,16 @@ pub fn gzip_file(path: &Path) -> Result<u64> {
 
 /// Gzip every file under `dir` whose extension is in `exts` (e.g.
 /// `&["js", "css", "html", "json", "svg"]`), writing `<file>.gz` sidecars. Already
-/// `.gz` files are skipped. Returns the number of sidecars written.
+/// `.gz` files are skipped, and so are symlinks — a sidecar's bytes come from real
+/// files only (the pipeline's output contains none; standalone use gets the same
+/// rule). Returns the number of sidecars written.
 pub fn gzip_dir(dir: &Path, exts: &[&str]) -> Result<usize> {
     let mut count = 0;
     for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
-        if !path.is_file() {
+        // The link check comes first: `is_file` stats *through* a file link, and the
+        // gzip would read the target's content.
+        if entry.path_is_symlink() || !path.is_file() {
             continue;
         }
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
@@ -104,5 +108,17 @@ mod tests {
         assert_eq!(n, 1);
         assert!(dir.path().join("a.js.gz").exists());
         assert!(!dir.path().join("b.png.gz").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn gzip_dir_skips_symlinked_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.js"), b"x").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("a.js"), dir.path().join("link.js")).unwrap();
+        let n = gzip_dir(dir.path(), &["js"]).unwrap();
+        assert_eq!(n, 1, "the link contributes no sidecar");
+        assert!(dir.path().join("a.js.gz").exists());
+        assert!(!dir.path().join("link.js.gz").exists());
     }
 }

@@ -14,6 +14,7 @@ use axum::http::{header, Request, StatusCode};
 use axum::Router;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
+use web_modules::include_dir::{include_dir, Dir};
 use web_modules::Frontend;
 
 struct Resp {
@@ -180,6 +181,42 @@ async fn live_serves_compiled_targets_and_hides_sources() {
     assert_eq!(js.status, StatusCode::OK);
     assert!(js.content_type.contains("javascript"));
     assert!(js.text().contains("x"));
+}
+
+/// The embedded fallback of a production bake, standing in for a `build.rs`-baked dist:
+/// it carries the `importmap.json` the build emitted next to its vendored modules.
+static EMBEDDED_MAP: Dir = include_dir!("$CARGO_MANIFEST_DIR/tests/embedded_map_fixture");
+
+#[tokio::test]
+async fn live_renders_tera_with_the_embedded_import_map() {
+    // The `Frontend::embedded(&DIST).source("web")` composition: a live-edited
+    // `index.html.tera` must render with the bake's import map, or the page cannot
+    // resolve the bare specifiers (`import ... from 'lit'`) the fallback's vendored
+    // modules exist to serve.
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        &tmp.path().join("index.html.tera"),
+        "<head>{{ importmap | safe }}</head>",
+    );
+    let app = Frontend::embedded(&EMBEDDED_MAP).source(tmp.path()).dev();
+
+    let page = fetch(app.clone(), "/", None).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(
+        page.text().contains("/web_modules/lit/index.js"),
+        "the baked map reaches the live render; got:\n{}",
+        page.text()
+    );
+
+    // Without an embedded fallback the map stays empty — a pure source tree.
+    let bare = Frontend::new().source(tmp.path()).dev();
+    let page = fetch(bare, "/", None).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(
+        !page.text().contains("lit") && page.text().contains("importmap"),
+        "no fallback, empty map; got:\n{}",
+        page.text()
+    );
 }
 
 #[tokio::test]

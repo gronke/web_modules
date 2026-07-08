@@ -11,7 +11,8 @@
 //! dirs at one prefix resolves "first dir wins", as a side-effect; contested targets
 //! are reported once at startup (silence with `skip_duplicates`). An optional embedded
 //! fallback (a baked `include_dir!` tree) supplies whatever the source dirs don't:
-//! vendored `web_modules/`, a baked `index.html`. The watcher watches every source dir
+//! vendored `web_modules/`, a baked `index.html` — and its baked `importmap.json` is
+//! the import map live `.tera` renders receive. The watcher watches every source dir
 //! identically and reloads on any change.
 //!
 //! Enable the `dev` feature.
@@ -101,6 +102,10 @@ struct DevState {
     cache: Arc<Cache>,
     /// Baked assets to fall back to when a request isn't a source file.
     fallback: Option<&'static Dir<'static>>,
+    /// The import map live `.tera` renders receive: the embedded fallback's baked
+    /// `importmap.json` (the contract artifact `build` emits), or empty without one.
+    #[cfg(feature = "tera")]
+    importmap: Arc<crate::importmap::Importmap>,
     /// Which processors to apply (and how), shared with the bin's `--<name>` toggles.
     config: Arc<DevConfig>,
 }
@@ -166,6 +171,8 @@ pub(crate) fn build_router(
     let state = DevState {
         mounts: Arc::new(mounts),
         cache: Arc::new(Mutex::new(HashMap::new())),
+        #[cfg(feature = "tera")]
+        importmap: Arc::new(fallback_importmap(fallback)),
         fallback,
         config: Arc::new(config),
     };
@@ -173,6 +180,26 @@ pub(crate) fn build_router(
         .fallback(serve_asset)
         .with_state(state)
         .layer(livereload)
+}
+
+/// The import map live `.tera` renders receive: the embedded fallback's baked
+/// `importmap.json` (the contract artifact `build` emits next to the vendored
+/// `web_modules/` this fallback also serves), parsed once at router build. Without a
+/// fallback — or with an unparseable map, which is warned about — templates render
+/// with an empty map, like a build that vendors nothing.
+#[cfg(feature = "tera")]
+fn fallback_importmap(fallback: Option<&'static Dir<'static>>) -> crate::importmap::Importmap {
+    let Some(file) = fallback.and_then(|dir| dir.get_file("importmap.json")) else {
+        return crate::importmap::Importmap::new();
+    };
+    let text = String::from_utf8_lossy(file.contents());
+    match crate::importmap::Importmap::from_json_str(&text, "embedded importmap.json") {
+        Ok(map) => map,
+        Err(err) => {
+            eprintln!("web-modules: {err}; live templates render with an empty import map");
+            crate::importmap::Importmap::new()
+        }
+    }
 }
 
 /// The preflight warnings the dev server prints at startup: per URL prefix, the
@@ -477,7 +504,8 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<Served>, String> 
 
 /// Compile `src` (TS, SCSS, or Tera), caching by modification time. SCSS `@use`/`@import`
 /// load paths span every mounted dir (plus any `extra_scss_load_paths`); Tera renders
-/// with an empty `importmap` variable (the dev server doesn't vendor).
+/// with the `importmap` variable from the embedded fallback's baked map (empty
+/// without one — a pure source tree vendors nothing).
 fn compile_cached(state: &DevState, src: &Path, kind: Kind) -> Result<Vec<u8>, String> {
     let mtime = std::fs::metadata(src)
         .and_then(|m| m.modified())
@@ -518,10 +546,12 @@ fn compile_cached(state: &DevState, src: &Path, kind: Kind) -> Result<Vec<u8>, S
         }
         #[cfg(feature = "tera")]
         Kind::Tera => {
-            // dev doesn't vendor, so the import map is empty here (a no-op `<script>`).
-            // Live TS/SCSS still load by their relative URLs; a baked fallback may carry
-            // a real map, but live source serving doesn't need one.
-            let ctx = crate::templates::importmap_context(&crate::importmap::Importmap::new());
+            // The live counterpart of the build's final Tera pass: templates receive
+            // the import map the embedded fallback was baked with, so a page loading
+            // bare specifiers (`import { LitElement } from 'lit'`) resolves them
+            // against the vendored modules that same fallback serves. Without a
+            // fallback the map is empty, like a build that vendors nothing.
+            let ctx = crate::templates::importmap_context(&state.importmap);
             crate::templates::render_file(src, &ctx)
                 .map_err(|e| e.to_string())?
                 .into_bytes()
@@ -592,6 +622,8 @@ mod tests {
             mounts: Arc::new(mounts),
             cache: Arc::new(Mutex::new(HashMap::new())),
             fallback: None,
+            #[cfg(feature = "tera")]
+            importmap: Arc::new(crate::importmap::Importmap::new()),
             config: Arc::new(config),
         }
     }
@@ -970,7 +1002,7 @@ mod tests {
     #[test]
     fn dev_renders_tera_to_target() {
         // The live counterpart of the build pipeline's tree-wide `.tera`: a request for
-        // the stripped target renders the `.tera` (the dev import map is empty).
+        // the stripped target renders the `.tera` (without a fallback the map is empty).
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join("web");
         std::fs::create_dir_all(&root).unwrap();
@@ -987,6 +1019,27 @@ mod tests {
             "rendered with the importmap var; got:\n{html}"
         );
         assert!(ct.starts_with("text/html"), "served as html; got {ct}");
+    }
+
+    #[cfg(feature = "tera")]
+    #[test]
+    fn dev_renders_tera_with_the_state_import_map() {
+        // The map carried by the state (in production: the embedded fallback's baked
+        // `importmap.json`) reaches every live `.tera` render.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("index.html.tera"), "{{ importmap | safe }}").unwrap();
+        let mut map = crate::importmap::Importmap::new();
+        map.insert("lit", "/web_modules/lit/index.js");
+        let mut state = state(vec![Mount::root(root)]);
+        state.importmap = Arc::new(map);
+        let (bytes, _) = resolve(&state, "index.html").unwrap().unwrap().bytes();
+        let html = String::from_utf8(bytes).unwrap();
+        assert!(
+            html.contains("/web_modules/lit/index.js"),
+            "the state map is rendered; got:\n{html}"
+        );
     }
 
     #[cfg(feature = "tera")]

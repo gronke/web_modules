@@ -7,6 +7,12 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+### Fixed
+
+- fix(dev): live `.tera` renders receive the import map baked into the embedded fallback (its `importmap.json`, the contract artifact `build` emits) instead of always an empty one.
+  In the `Frontend::embedded(&DIST).source("web")` composition, an edited page previously rendered `{"imports":{}}` while the fallback kept serving the vendored modules, so bare specifiers (`import { LitElement } from 'lit'`) failed to resolve in live mode.
+  Without an embedded fallback the map stays empty as before; an unparseable baked map warns and falls back to empty
+
 ## [0.5.1] - 2026-07-06
 
 ### Added

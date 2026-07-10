@@ -60,7 +60,7 @@ jobs:
       - name: Feature-isolation check
         run: |
           cargo check -p web_modules --no-default-features
-          for f in axum dev minify i18n builder scss tera; do
+          for f in axum dev minify i18n builder scss tera md-tmpl; do
             cargo check -p web_modules --no-default-features --features "$f"
           done
           # the processor-agnostic build pipeline + the fluent builders (gated on `builder`) paired

@@ -27,7 +27,8 @@
 //! - [`build`]: vendor, transform and render into an output dir.
 //! - `bundle`: fold an app plus its `node_modules/` (CommonJS and all) into one
 //!   browser ESM file via rolldown, for React-class packages that ship only CommonJS.
-//! - [`templates`]: HTML templating (importmap injection).
+//! - [`templates`]: HTML templating (importmap injection); `md_tmpl`: typed markdown
+//!   templating (`*.tmpl.md` → `*.md`).
 //! - [`server`] / [`dev`]: serve embedded assets, or compile on the fly with
 //!   file-watching and live-reload.
 //!
@@ -97,6 +98,8 @@ pub use build::Build;
 pub use build::bundle;
 #[cfg(feature = "compress")]
 pub use build::compress;
+#[cfg(feature = "md-tmpl")]
+pub use build::md_tmpl;
 #[cfg(feature = "tera")]
 pub use build::templates;
 

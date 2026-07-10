@@ -24,6 +24,7 @@ Each is a Cargo `--features` flag:
 
 - **typescript / scss** - compile to browser JS and CSS
 - **tera** - HTML and [import map] templating
+- **md-tmpl** *(opt-in)* - typed markdown templating: `*.tmpl.md` → `*.md` via [md-tmpl]
 - **minify · dts · i18n · icons** - optional processors
 - **compress** - gzip sidecars for static serving
 - **bundle** - CommonJS to ESM
@@ -45,7 +46,7 @@ Buildless web frontend toolchain (no Node)
 Usage: web-modules <COMMAND>
 
 Commands:
-  dev     Dev server: compile TS/SCSS on the fly, render `*.tera`, watch the tree, live-reload
+  dev     Dev server: compile TS/SCSS on the fly, render `*.tera` / `*.tmpl.md`, watch the tree, live-reload
   build   Build a deployable output tree — the static counterpart of `dev`
   vendor  Vendor npm packages into web_modules/ + an import map
   ci      Install a package-lock.json's exact tree into node_modules/ - a pure-Rust npm ci
@@ -57,19 +58,19 @@ Options:
   -V, --version  Print version
 ```
 
-`build` is the **static counterpart of `dev`** — same source roots and processors, emitted to `--out` instead of served — and it vendors npm only when you pass `--package`/`--manifest`; `vendor` just fetches dependencies into `web_modules/`. Each compiler processor (typescript, scss, tera, minify, gzip) has a `--<name>` / `--no-<name>` toggle, and `--no-default-features` turns the default-on set (typescript, scss, tera) off so you re-enable them individually. Run `web-modules <command> --help` for flags.
+`build` is the **static counterpart of `dev`** — same source roots and processors, emitted to `--out` instead of served — and it vendors npm only when you pass `--package`/`--manifest`; `vendor` just fetches dependencies into `web_modules/`. Each compiler processor (typescript, scss, tera, md-tmpl, minify, gzip) has a `--<name>` / `--no-<name>` toggle, and `--no-default-features` turns the default-on set (typescript, scss, tera, md-tmpl) off so you re-enable them individually. Run `web-modules <command> --help` for flags.
 
 ### HTML policy
 
 The build never reads or rewrites your HTML.
-Pages are only generated where you opt in: a `*.tera` template (rendered with the generated import map as the `{{ importmap }}` variable), or the `--html`/`--template` fallback when no source provides an `index.html` at all.
-The generated import map is the contract — available as `importmap.json`, the `{{ importmap }}` Tera variable, and the `{importmap}` placeholder — and it is the only map the unresolved-import check validates against; a hand-authored page owns its own inline map.
+Pages are only generated where you opt in: a `*.tera` template (rendered with the generated import map as the `{{ importmap }}` variable), a `*.tmpl.md` typed markdown template (feature `md-tmpl`; rendered from its declared defaults, with the map offered as the `importmap` env var), or the `--html`/`--template` fallback when no source provides an `index.html` at all.
+The generated import map is the contract — available as `importmap.json`, the `{{ importmap }}` Tera variable, the `importmap` md-tmpl env var, and the `{importmap}` placeholder — and it is the only map the unresolved-import check validates against; a hand-authored page owns its own inline map.
 JavaScript rendered from a template joins the module graph and is validated like any other emitted module, with one ordering rule: runtime-helper vendoring is decided before templates render, so an `@oxc-project/runtime` import appearing only in template-rendered JavaScript fails the unresolved-import check instead of vendoring the runtime — put such code in a `.ts`/`.js` source instead.
 
 ### Duplicate output paths
 
 When two sources claim one output path — `index.html` next to `index.html.tera`, `app.js` next to `app.ts`, `style.css` next to `style.scss`, or the same relative path in two roots — `build` fails before writing anything and lists every conflict; `dev` warns on the console instead.
-`--skip-duplicates` opts into precedence: the earlier root wins, and within a root a Tera template beats a literal file beats a transformed sibling — the same rule in `build` and `dev`.
+`--skip-duplicates` opts into precedence: the earlier root wins, and within a root a Tera template beats an md-tmpl template beats a literal file beats a transformed sibling — the same rule in `build` and `dev`.
 Generated outputs are reserved regardless: a source claiming `importmap.json`, a path under `web_modules/`, or (with `--gzip`) the `.gz` sidecar of an emitted file fails the build even under `--skip-duplicates`.
 
 ### Output directory
@@ -103,7 +104,7 @@ The live-reload watcher's behavior through links is backend-defined; under `foll
 web_modules = "0.5"   # Rust 1.95+
 ```
 
-`typescript`, `scss` and `tera` are on by default; `full` enables everything except `bundle`.
+`typescript`, `scss` and `tera` are on by default; `md-tmpl` (typed markdown templates) is opt-in; `full` enables everything except `bundle`.
 
 The fluent `Build` and `Dev` builders (feature `builder`, on by default) are the promoted entry points — `Build` from a `build.rs` (bake a `dist/`), `Dev` for a live-reload server:
 
@@ -172,6 +173,7 @@ The [`examples/`](examples/) tree is full of runnable demos; `cargo run` and ope
 - [**d3**](examples/d3) - a bar chart with D3, a non-Lit npm dependency vendored and served as-is.
 - [**react-esm**](examples/react-esm) - React from npm bundled into one browser ES module, entirely in Rust (the `bundle` feature).
 - [**embedded**](examples/embedded) - the whole frontend baked into the binary; no filesystem, no network.
+- [**md-tmpl**](examples/md-tmpl) - typed markdown pages: the pipeline renders `*.tmpl.md`, and `build.rs` feeds the repository's last commits into a strictly typed template via [gix].
 - [**tauri**](examples/tauri) - a Tauri v2 desktop app, frontend live-served (and release-baked) by web_modules.
 
 ## License
@@ -179,6 +181,8 @@ The [`examples/`](examples/) tree is full of runnable demos; `cargo run` and ope
 MIT. See [LICENSE](LICENSE).
 
 [import map]: https://developer.mozilla.org/en-US/docs/Web/HTML/Reference/Elements/script/type/importmap
+[md-tmpl]: https://docs.rs/md-tmpl
+[gix]: https://docs.rs/gix
 [`npm-utils`]: https://github.com/gronke/rust-npm-utils
 [oxc]: https://oxc.rs
 [`grass`]: https://github.com/connorskees/grass

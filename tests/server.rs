@@ -219,6 +219,38 @@ async fn live_renders_tera_with_the_embedded_import_map() {
     );
 }
 
+#[cfg(feature = "md-tmpl")]
+#[tokio::test]
+async fn live_renders_md_tmpl_with_the_embedded_import_map() {
+    // The md-tmpl mirror of the `.tera` case above: a live-edited `guide.tmpl.md`
+    // renders with the bake's import map (declared as the `importmap` env var) and is
+    // served at its `.md` target; the source stays hidden.
+    let tmp = tempfile::tempdir().unwrap();
+    write(
+        &tmp.path().join("guide.tmpl.md"),
+        "---\nenv:\n  - importmap = str\n---\n# Guide\n\n{{ importmap }}\n",
+    );
+    let app = Frontend::embedded(&EMBEDDED_MAP).source(tmp.path()).dev();
+
+    let page = fetch(app.clone(), "/guide.md", None).await;
+    assert_eq!(page.status, StatusCode::OK);
+    assert!(
+        page.content_type.contains("markdown"),
+        "got {}",
+        page.content_type
+    );
+    assert!(
+        page.text().contains("/web_modules/lit/index.js"),
+        "the baked map reaches the live render; got:\n{}",
+        page.text()
+    );
+    assert_eq!(
+        fetch(app, "/guide.tmpl.md", None).await.status,
+        StatusCode::NOT_FOUND,
+        "the raw source is hidden"
+    );
+}
+
 #[tokio::test]
 async fn live_recompiles_after_a_source_changes() {
     let tmp = tempfile::tempdir().unwrap();

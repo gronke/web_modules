@@ -19,14 +19,29 @@ use std::path::{Path, PathBuf};
 use crate::module_graph::ModuleImport;
 use crate::Result;
 
-/// Within-root precedence, lowest wins: a `*.tera` beats a literal file, which beats a
-/// transformed sibling (a copied `app.js` over the output of `app.ts`) — the order the
-/// dev server probes candidates in, so `dev` and `build` resolve a shadowed path alike.
+/// Within-root precedence, lowest wins: a `*.tera` beats a `*.tmpl.md`, which beats a
+/// literal file, which beats a transformed sibling (a copied `app.js` over the output
+/// of `app.ts`) — the order the dev server probes candidates in, so `dev` and `build`
+/// resolve a shadowed path alike.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Rank {
     Tera = 0,
-    Static = 1,
-    Transform = 2,
+    // Gated like the step that constructs it (cf. dev's `Kind`), so the default
+    // (md-tmpl-less) build carries no dead variant. The discriminants are explicit,
+    // so the ordering is identical either way.
+    #[cfg(feature = "md-tmpl")]
+    MdTmpl = 1,
+    Static = 2,
+    Transform = 3,
+}
+
+impl Rank {
+    /// The template ranks — everything ordered before [`Rank::Static`]: the steps
+    /// that read the import map, and therefore emit only after vendoring finalized
+    /// it. Named here so the pipeline's deferral cannot drift from the ordering.
+    pub(crate) fn is_template(self) -> bool {
+        self < Rank::Static
+    }
 }
 
 /// What one step would emit for one source file.
@@ -58,7 +73,7 @@ pub(crate) trait Step: Preflight {
     /// Emit the source at `src` (absolute; `rel` names it in messages) to `dest`,
     /// returning what the module graph should record. The caller creates `dest`'s
     /// parent directories. `cx` carries the generated import map — final only by the
-    /// time the Tera step runs, which is the only step reading it.
+    /// time the template steps (Tera, md-tmpl) run, the only steps reading it.
     fn emit(&self, cx: &EmitCx<'_>, src: &Path, rel: &Path, dest: &Path) -> Result<Emitted>;
 }
 
@@ -96,6 +111,10 @@ pub(crate) fn enabled_steps(
     #[cfg(feature = "tera")]
     if processors.tera {
         steps.push(Box::new(TeraStep));
+    }
+    #[cfg(feature = "md-tmpl")]
+    if processors.md_tmpl {
+        steps.push(Box::new(crate::build::md_tmpl::MdTmplStep));
     }
     steps.push(Box::new(crate::static_files::StaticStep::new(
         processors.reject.clone(),
@@ -174,8 +193,9 @@ pub(crate) struct ClaimRecord {
 }
 
 impl ClaimRecord {
-    /// The precedence key, lowest wins: earlier root, then rank (tera < static <
-    /// transform), then the step's own tiebreak, then the source path for stability.
+    /// The precedence key, lowest wins: earlier root, then rank (tera < md-tmpl <
+    /// static < transform), then the step's own tiebreak, then the source path for
+    /// stability.
     fn precedence(&self) -> (usize, Rank, u8, &Path) {
         (self.root, self.rank, self.tiebreak, &self.rel)
     }

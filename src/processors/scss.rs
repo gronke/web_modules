@@ -12,10 +12,16 @@
 //! from outside the tree into the compiled CSS (which the dev server would then
 //! serve). The sandbox confines every probe and read to the source roots and their
 //! load paths — the SCSS counterpart of the serving layer's `contained_file`.
+//!
+//! A refusal deliberately reads as a missing file to `grass` (fail-closed), but not
+//! to the caller: the compile error names every real path a probe was refused on,
+//! so a forgotten load path explains itself instead of surfacing as a bare
+//! "Can't find stylesheet to import".
 
 use std::fs::{create_dir_all, write};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use grass::{Fs, Options, OutputStyle};
 use walkdir::WalkDir;
@@ -26,9 +32,19 @@ use crate::{Error, Result};
 /// canonicalized directories, so SCSS resolution cannot climb out of the source roots and their
 /// load paths. The containment mirrors the serving layer's `contained_file`: canonicalize the
 /// probed path and require it to stay under one of the allowed `roots`.
+///
+/// A refusal is invisible to `grass` itself: imports resolve through [`is_file`](Fs::is_file)
+/// probes, so a refused candidate reads exactly like a missing file and the refusal message in
+/// [`read`](Fs::read) is unreachable for imports. To keep that diagnosable the sandbox records
+/// every probe that hit something real outside the roots, and the compile error carries the
+/// list — see [`refusal_note`](SandboxFs::refusal_note).
 #[derive(Debug)]
 struct SandboxFs {
     roots: Vec<PathBuf>,
+    /// Probes that resolved to a real file or directory outside every root, in probe order —
+    /// the difference between "the import is a typo" and "a load path is missing", kept as
+    /// data instead of silence.
+    refused: Mutex<Vec<PathBuf>>,
 }
 
 impl SandboxFs {
@@ -37,18 +53,61 @@ impl SandboxFs {
     fn new(roots: &[&Path]) -> Self {
         Self {
             roots: roots.iter().filter_map(|p| p.canonicalize().ok()).collect(),
+            refused: Mutex::new(Vec::new()),
         }
     }
 
     /// The real location of `path` if it resolves inside an allowed root, else `None`. A path that
     /// does not resolve — a probe for a candidate that isn't on disk — is not contained, matching
-    /// how a missing file reads on the default [`grass::StdFs`].
+    /// how a missing file reads on the default [`grass::StdFs`]. A path that resolves but sits
+    /// outside every root is recorded for [`refusal_note`](SandboxFs::refusal_note).
     fn contained(&self, path: &Path) -> Option<PathBuf> {
         let real = path.canonicalize().ok()?;
-        self.roots
+        if self.roots.iter().any(|root| real.starts_with(root)) {
+            return Some(real);
+        }
+        let mut refused = self.refused.lock().expect("sandbox refusal log poisoned");
+        if !refused.contains(&real) {
+            refused.push(real);
+        }
+        None
+    }
+
+    /// One `note:` block naming what the sandbox refused since the last
+    /// [`reset_refusals`](SandboxFs::reset_refusals), or `None` when nothing was.
+    fn refusal_note(&self) -> Option<String> {
+        let refused = self.refused.lock().expect("sandbox refusal log poisoned");
+        if refused.is_empty() {
+            return None;
+        }
+        let list = refused
             .iter()
-            .any(|root| real.starts_with(root))
-            .then_some(real)
+            .map(|p| format!("  {}", p.display()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(format!(
+            "note: the sandbox refused {} path(s) that exist outside the source roots and load \
+             paths; if an import should reach them, add their tree as a load path:\n{list}",
+            refused.len()
+        ))
+    }
+
+    /// Forget recorded refusals — [`compile_directory`] resets between entry files so a note
+    /// names only the failing file's probes.
+    fn reset_refusals(&self) {
+        self.refused
+            .lock()
+            .expect("sandbox refusal log poisoned")
+            .clear();
+    }
+}
+
+/// Map a `grass` failure to [`Error::Scss`], appending the sandbox's refusal note when there is
+/// one — without it, a refused import is indistinguishable from a missing file.
+fn scss_error(sandbox: &SandboxFs, error: Box<grass::Error>) -> Error {
+    match sandbox.refusal_note() {
+        Some(note) => Error::Scss(format!("{error}\n{note}")),
+        None => Error::Scss(error.to_string()),
     }
 }
 
@@ -99,7 +158,7 @@ fn options<'a>(fs: &'a dyn Fs, load_paths: &[&Path]) -> Options<'a> {
 pub fn compile_str(input: &str, load_paths: &[&Path]) -> Result<String> {
     let sandbox = SandboxFs::new(load_paths);
     grass::from_string(input.to_string(), &options(&sandbox, load_paths))
-        .map_err(|e| Error::Scss(e.to_string()))
+        .map_err(|e| scss_error(&sandbox, e))
 }
 
 /// Compile a single `.scss` file to CSS. Imports resolve within `load_paths` and the file's own
@@ -109,7 +168,7 @@ pub fn compile_file(path: &Path, load_paths: &[&Path]) -> Result<String> {
     let mut roots = load_paths.to_vec();
     roots.push(entry.as_path());
     let sandbox = SandboxFs::new(&roots);
-    grass::from_path(path, &options(&sandbox, load_paths)).map_err(|e| Error::Scss(e.to_string()))
+    grass::from_path(path, &options(&sandbox, load_paths)).map_err(|e| scss_error(&sandbox, e))
 }
 
 /// Compile every `.scss` under `src_dir` (skipping `_` partials) into a mirrored
@@ -150,7 +209,10 @@ pub fn compile_directory(src_dir: &Path, out_dir: &Path, load_paths: &[&Path]) -
         if let Some(parent) = out.parent() {
             create_dir_all(parent)?;
         }
-        let css = grass::from_path(path, &opts).map_err(|e| Error::Scss(e.to_string()))?;
+        // Per-file refusal scope: a note on the eventual error names only the failing
+        // file's probes, not leftovers from files that compiled.
+        sandbox.reset_refusals();
+        let css = grass::from_path(path, &opts).map_err(|e| scss_error(&sandbox, e))?;
         write(&out, css)?;
         count += 1;
     }
@@ -296,12 +358,39 @@ mod tests {
         create_dir_all(&src).unwrap();
         write(tmp.path().join("_secret.scss"), "$leak: red;").unwrap();
         write(src.join("app.scss"), "@import '../secret';").unwrap();
-        // `grass` reports the escaping import as an unfindable stylesheet rather than reading it.
+        // `grass` reports the escaping import as an unfindable stylesheet rather than reading
+        // it; the error's refusal note is what tells the two failure modes apart, naming the
+        // existing file and pointing at the fix.
         let err = compile_file(&src.join("app.scss"), &[]).unwrap_err();
-        assert!(
-            matches!(err, Error::Scss(_)),
-            "expected an SCSS error, got {err:?}"
-        );
+        let message = err.to_string();
+        assert!(message.contains("_secret.scss"), "{message}");
+        assert!(message.contains("load path"), "{message}");
+    }
+
+    #[test]
+    fn a_truly_missing_import_carries_no_refusal_note() {
+        // The note is evidence, not boilerplate: an import that exists nowhere stays a plain
+        // "can't find stylesheet" with nothing to blame on the sandbox.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        create_dir_all(&src).unwrap();
+        write(src.join("app.scss"), "@import '../nonexistent';").unwrap();
+        let err = compile_file(&src.join("app.scss"), &[]).unwrap_err();
+        let message = err.to_string();
+        assert!(!message.contains("note:"), "{message}");
+    }
+
+    #[test]
+    fn directory_error_carries_the_refusal_note() {
+        // The same diagnosis through the tree API — the consumer that hit this in the wild.
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let out = tmp.path().join("out");
+        create_dir_all(&src).unwrap();
+        write(tmp.path().join("_outside.scss"), "$c: red;").unwrap();
+        write(src.join("app.scss"), "@import '../outside';").unwrap();
+        let err = compile_directory(&src, &out, &[]).unwrap_err();
+        assert!(err.to_string().contains("_outside.scss"), "{err}");
     }
 
     #[cfg(unix)]
@@ -318,9 +407,12 @@ mod tests {
         symlink(outside.join("_theme.scss"), src.join("_theme.scss")).unwrap();
         write(src.join("app.scss"), "@use 'theme';").unwrap();
         let err = compile_file(&src.join("app.scss"), &[]).unwrap_err();
+        // The note names the link's real target — where the file actually lives.
+        let message = err.to_string();
+        assert!(message.contains("outside"), "{message}");
         assert!(
-            matches!(err, Error::Scss(_)),
-            "expected an SCSS error, got {err:?}"
+            message.contains("_theme.scss"),
+            "expected the refused target in {message}"
         );
     }
 }

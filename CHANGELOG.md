@@ -12,6 +12,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - fix(dev): live `.tera` renders receive the import map baked into the embedded fallback (its `importmap.json`, the contract artifact `build` emits) instead of always an empty one.
   In the `Frontend::embedded(&DIST).source("web")` composition, an edited page previously rendered `{"imports":{}}` while the fallback kept serving the vendored modules, so bare specifiers (`import { LitElement } from 'lit'`) failed to resolve in live mode.
   Without an embedded fallback the map stays empty as before; an unparseable baked map warns and falls back to empty
+- fix(scss): a sandbox-refused `@use`/`@import` no longer reads like a missing file — the compile error appends a `note:` naming every existing path a probe was refused on and points at the missing load path (`grass` resolves imports through `is_file` probes, so the refusal in `read` was unreachable and the failure surfaced only as "Can't find stylesheet to import")
 
 ## [0.5.1] - 2026-07-06
 

@@ -249,6 +249,59 @@ fn dynamic_imports_split_and_unanalyzable_ones_survive() {
 }
 
 #[test]
+fn relative_imports_of_external_locations_stay_external() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("dist");
+    let out = tmp.path().join("out");
+    let write = |rel: &str, content: &str| {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    // An entry reaching an external file through a RELATIVE import — the
+    // specifier form bypasses list matching, so externality must hold by
+    // resolved location or config.js gets folded (evaluated twice next to
+    // the still-served original) and reported for pruning.
+    write(
+        "elements/app/page.js",
+        r#"import '../../config.js';
+export const page = (globalThis.__m ?? 'MARKER_PAGE_IMPL').length;
+"#,
+    );
+    write("config.js", "globalThis.__config = 'MARKER_CONFIG_IMPL';\n");
+
+    let entries = [PathBuf::from("elements/app/page.js")];
+    let map = importmap();
+    let report = bundle_split(&SplitBundleOptions {
+        entries: &entries,
+        root: &root,
+        out_dir: &out,
+        importmap: Some(&map),
+        external: &["lit".into(), "web_modules/".into(), "/config.js".into()],
+        chunk_filenames: "chunks/[name]-[hash].js",
+        minify: false,
+    })
+    .unwrap();
+
+    let page = std::fs::read_to_string(out.join("elements/app/page.js")).unwrap();
+    assert!(
+        !page.contains("MARKER_CONFIG_IMPL"),
+        "external location must not be folded: {page}"
+    );
+    assert!(
+        page.contains("../../config.js"),
+        "the relative import must be re-relativized to the emitted file: {page}"
+    );
+    assert!(
+        !report
+            .bundled_modules
+            .iter()
+            .any(|p| p.ends_with("config.js")),
+        "external location must not be reported for pruning"
+    );
+}
+
+#[test]
 fn importmap_specifiers_resolve_into_the_bundle() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("dist");

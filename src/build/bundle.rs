@@ -228,6 +228,24 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
     // when it (or the URL the import map gives it) matches the external list; otherwise a
     // mapped URL under `/` is rewritten to the file under `root` and gets bundled.
     let external_list: Arc<[String]> = opts.external.to_vec().into();
+    // Externality also holds by RESOLVED LOCATION: a relative import that lands on an
+    // external file's location (an entry importing '../config.js') must stay external too,
+    // or the file would be folded (and evaluated twice next to its still-served original).
+    // rolldown re-relativizes resolved-absolute externals per emitted chunk, so the emitted
+    // import stays correct wherever the importer ends up.
+    let external_paths: Arc<[(PathBuf, bool)]> = opts
+        .external
+        .iter()
+        .filter_map(|e| {
+            let (is_prefix, name) = match e.strip_suffix('/') {
+                Some(p) => (true, p),
+                None => (false, e.as_str()),
+            };
+            let path = root.join(name.trim_start_matches('/'));
+            Some((path.canonicalize().ok()?, is_prefix))
+        })
+        .collect::<Vec<_>>()
+        .into();
     let map_pairs: Arc<[(String, String)]> = opts
         .importmap
         .map(|m| {
@@ -241,17 +259,26 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
     let is_external = rolldown::IsExternal::Fn(Some(Arc::new(
         move |specifier: &str, _importer: Option<&str>, resolved: bool| {
             let external_list = Arc::clone(&external_list);
+            let external_paths = Arc::clone(&external_paths);
             let map_pairs = Arc::clone(&map_pairs);
             let root = Arc::clone(&root_for_resolve);
             let specifier = specifier.to_string();
             Box::pin(async move {
                 // Second pass: rolldown re-asks with the resolver's filesystem
-                // path. Externality was decided on the raw specifier below;
-                // a path that got resolved is part of the bundle graph.
+                // path. External locations stay external however they were
+                // reached; anything else that resolved is part of the graph.
                 if resolved {
-                    return Ok(false);
+                    let path = Path::new(&specifier);
+                    return Ok(external_paths.iter().any(|(external, is_prefix)| {
+                        if *is_prefix {
+                            path.starts_with(external)
+                        } else {
+                            path == external
+                        }
+                    }));
                 }
-                // Relative imports resolve within the bundle.
+                // Relative imports resolve within the bundle (the resolved
+                // pass above re-checks their final location).
                 if specifier.starts_with('.') {
                     return Ok(false);
                 }

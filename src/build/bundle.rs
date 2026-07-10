@@ -144,9 +144,17 @@ pub struct SplitBundleOptions<'a> {
     pub minify: bool,
 }
 
+/// What [`bundle_split`] produced.
+pub struct SplitBundleOutput {
+    /// Absolute paths of every source module folded into the output (entries included).
+    /// External modules never appear. Callers that bundle a served tree in place can prune
+    /// exactly these files (minus the entries) — nothing else — from the original layout.
+    pub bundled_modules: Vec<PathBuf>,
+}
+
 /// Bundle [`SplitBundleOptions::entries`] into facades + shared chunks under `out_dir`,
 /// preserving each entry's relative path and export signature. See [`SplitBundleOptions`].
-pub fn bundle_split(opts: &SplitBundleOptions<'_>) -> Result<()> {
+pub fn bundle_split(opts: &SplitBundleOptions<'_>) -> Result<SplitBundleOutput> {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -195,7 +203,7 @@ fn importmap_resolve(pairs: &[(String, String)], specifier: &str) -> Option<Stri
     })
 }
 
-async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<()> {
+async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundleOutput> {
     let root = opts
         .root
         .canonicalize()
@@ -300,9 +308,25 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<()> {
     })
     .map_err(|e| Error::Bundle(format!("{e:?}")))?;
 
-    bundler
+    let output = bundler
         .write()
         .await
         .map_err(|e| Error::Bundle(format!("{e:?}")))?;
-    Ok(())
+
+    // Report which source files got folded: chunk module ids are absolute
+    // filesystem paths for file modules; externals never join a chunk.
+    let mut bundled_modules = Vec::new();
+    for asset in &output.assets {
+        if let rolldown_common::Output::Chunk(chunk) = asset {
+            for id in &chunk.module_ids {
+                let path = PathBuf::from(id.to_string());
+                if path.is_absolute() && path.exists() {
+                    bundled_modules.push(path);
+                }
+            }
+        }
+    }
+    bundled_modules.sort();
+    bundled_modules.dedup();
+    Ok(SplitBundleOutput { bundled_modules })
 }

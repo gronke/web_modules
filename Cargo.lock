@@ -4177,6 +4177,7 @@ dependencies = [
  "oxc_transformer",
  "quick-xml",
  "rolldown",
+ "rolldown_common",
  "semver",
  "serde",
  "serde_json",

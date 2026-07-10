@@ -69,7 +69,7 @@ fn run_split(root: &Path, out: &Path) -> BTreeMap<String, String> {
         PathBuf::from("elements/app/b.js"),
     ];
     let map = importmap();
-    bundle_split(&SplitBundleOptions {
+    let report = bundle_split(&SplitBundleOptions {
         entries: &entries,
         root,
         out_dir: out,
@@ -79,6 +79,31 @@ fn run_split(root: &Path, out: &Path) -> BTreeMap<String, String> {
         minify: false,
     })
     .unwrap();
+
+    // The report lists exactly the folded source files: the two entries, the
+    // shared module, and the import-map-resolved util — never the external.
+    let folded: Vec<String> = report
+        .bundled_modules
+        .iter()
+        .map(|p| {
+            p.strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    assert!(
+        folded.contains(&"elements/lib/shared.js".to_string()),
+        "{folded:?}"
+    );
+    assert!(
+        folded.contains(&"elements/app/util.js".to_string()),
+        "{folded:?}"
+    );
+    assert!(
+        !folded.iter().any(|f| f.contains("web_modules")),
+        "externals must not be reported as bundled: {folded:?}"
+    );
 
     let mut files = BTreeMap::new();
     for entry in walkdir::WalkDir::new(out)

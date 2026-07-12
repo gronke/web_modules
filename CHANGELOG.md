@@ -9,6 +9,8 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Fixed
 
+- fix(typescript): an `_`-prefixed `.ts`/`.tsx`/`.mts` source compiles like any other module — the underscore-partial convention belongs to SCSS, where `_x.scss` is an import-only fragment; ES modules have no such concept, and skipping `_Base.ts` stranded every `import './_Base.js'` in the emitted tree (surfacing only at bundle time, as an unresolved import). `.d.ts` declarations remain no-emit
+
 - fix(dev): live `.tera` renders receive the import map baked into the embedded fallback (its `importmap.json`, the contract artifact `build` emits) instead of always an empty one.
   In the `Frontend::embedded(&DIST).source("web")` composition, an edited page previously rendered `{"imports":{}}` while the fallback kept serving the vendored modules, so bare specifiers (`import { LitElement } from 'lit'`) failed to resolve in live mode.
   Without an embedded fallback the map stays empty as before; an unparseable baked map warns and falls back to empty

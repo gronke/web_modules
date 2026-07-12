@@ -227,8 +227,8 @@ pub(crate) fn compile_str_capturing(
     Ok(TranspileOutput { code, imports })
 }
 
-/// Compile every `.ts`/`.tsx`/`.mts` under `src_dir` (skipping `_` partials and
-/// `.d.ts` declarations) into a mirrored `.js` under `out_dir`, using the default
+/// Compile every `.ts`/`.tsx`/`.mts` under `src_dir` (skipping `.d.ts`
+/// declarations) into a mirrored `.js` under `out_dir`, using the default
 /// ([`Decorators::Lit`]) preset. Returns the count.
 pub fn compile_directory(src_dir: &Path, out_dir: &Path) -> Result<usize> {
     compile_directory_with(src_dir, out_dir, &TranspileOptions::default())
@@ -267,8 +267,8 @@ pub fn compile_directory_with(
     Ok(count)
 }
 
-/// The TypeScript stage as a pipeline step: claims `.ts`/`.tsx`/`.mts` (minus `_`
-/// partials and `.d.ts` declarations) for a mirrored `.js`, and emits through
+/// The TypeScript stage as a pipeline step: claims `.ts`/`.tsx`/`.mts` (minus
+/// `.d.ts` declarations) for a mirrored `.js`, and emits through
 /// [`compile_str_capturing`] so the transform's imports feed the module graph.
 pub(crate) struct TypeScriptStep {
     options: TranspileOptions,
@@ -287,8 +287,12 @@ impl TypeScriptStep {
         let tiebreak = ["ts", "tsx", "mts"]
             .iter()
             .position(|e| ext.eq_ignore_ascii_case(e))? as u8;
-        // `.d.ts` declarations emit no JS; `_` partials are skipped by convention.
-        if name.starts_with('_') || name.to_ascii_lowercase().ends_with(".d.ts") {
+        // `.d.ts` declarations emit no JS. An `_`-prefixed name stays an ordinary
+        // module: the partial convention belongs to SCSS, where `_x.scss` is an
+        // import-only fragment — ES modules have no such concept, and a source tree
+        // using `_Base.ts` for abstract classes needs its `.js` emitted like any
+        // other (skipping it strands every `import './_Base.js'` in the output).
+        if name.to_ascii_lowercase().ends_with(".d.ts") {
             return None;
         }
         Some(tiebreak)
@@ -387,6 +391,37 @@ mod tests {
             !out.join("aliased").exists(),
             "a directory link is not descended"
         );
+    }
+
+    #[test]
+    fn underscore_named_ts_is_an_ordinary_module() {
+        // `_Base.ts` is a real module (the SCSS partial convention does not apply to
+        // ES modules): its `.js` must emit, or every `import './_Base.js'` in the
+        // output is stranded. `.d.ts` stays no-emit.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        create_dir_all(&src).unwrap();
+        write(
+            src.join("_Base.ts"),
+            "export class Base { id: number = 1; }",
+        )
+        .unwrap();
+        write(
+            src.join("app.ts"),
+            "import { Base } from './_Base.js';\nexport const b: Base = new Base();",
+        )
+        .unwrap();
+        write(src.join("_types.d.ts"), "export type Id = number;").unwrap();
+
+        let n = compile_directory(&src, &out).unwrap();
+        assert_eq!(
+            n, 2,
+            "_Base.ts and app.ts; the declaration contributes nothing"
+        );
+        assert!(out.join("_Base.js").exists(), "underscore module emitted");
+        assert!(out.join("app.js").exists());
+        assert!(!out.join("_types.js").exists(), ".d.ts emits no JS");
     }
 
     #[test]

@@ -154,7 +154,7 @@ jobs:
       # binary live-serves from a compile-time path — the `web/` sources at the matching location.
       - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm

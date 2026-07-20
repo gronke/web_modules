@@ -161,14 +161,12 @@ impl Output {
 /// sidecar reservation guards, so the two can never disagree.
 const GZIP_EXTS: [&str; 5] = ["js", "css", "html", "json", "svg"];
 
-/// Emit a `cargo:rerun-if-changed` line — but only when running as a build script, which cargo
-/// signals by setting `OUT_DIR`. Outside a build script (e.g. the `web-modules build` subcommand
-/// reusing this pipeline) the directive is meaningless and would just spew one line per source
-/// file to the CLI's stdout, so it's suppressed.
+/// Emit a `cargo:rerun-if-changed` line for a walked source path — the shared
+/// [`cargo_rerun_if_changed`](crate::static_files::cargo_rerun_if_changed), which is a no-op
+/// outside a build script and refuses paths that could smuggle a line break into the
+/// directive stream.
 fn rerun_if_changed(path: &Path) {
-    if std::env::var_os("OUT_DIR").is_some() {
-        println!("cargo:rerun-if-changed={}", path.display());
-    }
+    crate::static_files::cargo_rerun_if_changed(path);
 }
 
 /// Vendor + transform + compile + render into `out`, ready to embed and serve.

@@ -137,3 +137,86 @@ fn dependencies_share_a_single_react_instance() {
         "React must be bundled exactly once (single instance); found {react_copies}"
     );
 }
+
+// ---- Containment (offline: hand-made node_modules, no registry) ----
+// The source tree may be untrusted: nothing outside `cwd` may be folded into the bundle.
+
+fn write(path: &std::path::Path, content: &str) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+#[test]
+fn bundle_refuses_a_relative_import_escaping_cwd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let web = tmp.path().join("web");
+    write(
+        &web.join("app.js"),
+        "import '../secret.js';\nexport const x = 1;\n",
+    );
+    write(
+        &tmp.path().join("secret.js"),
+        "export const leaked = 'TOPSECRET';\n",
+    );
+    let out = web.join("dist");
+    let err = bundle(&BundleOptions {
+        entry: &web.join("app.js"),
+        cwd: &web,
+        out_dir: &out,
+        production: false,
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains("outside the bundle cwd"), "{err}");
+    assert!(!out.join("app.js").exists(), "no bundle emitted");
+}
+
+#[cfg(unix)]
+#[test]
+fn bundle_refuses_a_symlinked_package_escaping_cwd() {
+    let tmp = tempfile::tempdir().unwrap();
+    let web = tmp.path().join("web");
+    let outside = tmp.path().join("outside-pkg");
+    write(
+        &outside.join("package.json"),
+        r#"{"name":"evil","main":"index.js"}"#,
+    );
+    write(
+        &outside.join("index.js"),
+        "module.exports = { leaked: 'TOPSECRET' };\n",
+    );
+    write(&web.join("app.js"), "import 'evil';\nexport const x = 1;\n");
+    std::fs::create_dir_all(web.join("node_modules")).unwrap();
+    std::os::unix::fs::symlink(&outside, web.join("node_modules/evil")).unwrap();
+    let err = bundle(&BundleOptions {
+        entry: &web.join("app.js"),
+        cwd: &web,
+        out_dir: &web.join("dist"),
+        production: false,
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains("outside the bundle cwd"), "{err}");
+}
+
+#[test]
+fn bundle_still_folds_in_cwd_modules() {
+    let tmp = tempfile::tempdir().unwrap();
+    let web = tmp.path().join("web");
+    write(
+        &web.join("app.js"),
+        "import { marker } from './lib/marker.js';\nexport const x = marker;\n",
+    );
+    write(
+        &web.join("lib/marker.js"),
+        "export const marker = 'MARKER_LOCAL';\n",
+    );
+    let out = web.join("dist");
+    bundle(&BundleOptions {
+        entry: &web.join("app.js"),
+        cwd: &web,
+        out_dir: &out,
+        production: false,
+    })
+    .unwrap();
+    let js = std::fs::read_to_string(out.join("app.js")).unwrap();
+    assert!(js.contains("MARKER_LOCAL"), "{js}");
+}

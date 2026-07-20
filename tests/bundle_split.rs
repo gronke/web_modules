@@ -322,3 +322,34 @@ fn importmap_specifiers_resolve_into_the_bundle() {
         "bundled import-map specifier must not survive as a bare import"
     );
 }
+
+#[test]
+fn split_refuses_a_relative_import_escaping_root() {
+    // An entry importing `../../secret.js` climbs out of `root`; the build must fail
+    // rather than fold the outside file into the published tree.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("dist");
+    let path = root.join("app/entry.js");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "import '../../secret.js';\nexport const x = 1;\n").unwrap();
+    std::fs::write(
+        tmp.path().join("secret.js"),
+        "export const leaked = 'TOPSECRET';\n",
+    )
+    .unwrap();
+    let entries = [PathBuf::from("app/entry.js")];
+    let result = bundle_split(&SplitBundleOptions {
+        entries: &entries,
+        root: &root,
+        out_dir: &tmp.path().join("out"),
+        importmap: None,
+        external: &[],
+        chunk_filenames: "chunks/[name]-[hash].js",
+        minify: false,
+    });
+    let err = match result {
+        Ok(_) => panic!("an escaping import must fail the build"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("outside the bundle root"), "{err}");
+}

@@ -4154,6 +4154,7 @@ dependencies = [
 name = "web_modules"
 version = "0.5.1"
 dependencies = [
+ "anyhow",
  "axum",
  "clap",
  "flate2",

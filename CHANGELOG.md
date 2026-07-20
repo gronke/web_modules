@@ -14,6 +14,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - security(icons): source PNGs decode with strict dimension limits (4096×4096) on top of the `image` crate's 512 MiB allocation cap — a crafted icon source declaring enormous dimensions is refused at the header instead of exhausting memory
 - security(build): paths and messages emitted into `cargo:` directives are kept free of control characters — a walked filename containing a line break could previously inject arbitrary directives (`cargo:rustc-link-lib=…`) into a build script's output. Such paths are skipped with a plain stderr note; warnings take the stderr path
 - security(dev): a compile failure answers 500 with a generic body — the detail, which can embed absolute local paths (the SCSS sandbox's refusal notes name them), goes to the developer's console only, so a client that can reach the dev server (e.g. a DNS-rebinding page) learns nothing about the local layout
+- security(build): the oxc transform runtime is vendored at an exact pinned version (`0.138.0`, tracking the oxc toolchain) instead of a floating `^0.137` range that resolved the newest published package at build time — a decorator in a source file no longer picks up whatever the registry newest-serves
 
 ### Fixed
 

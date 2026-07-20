@@ -680,8 +680,10 @@ fn emit_winner(
     Ok(())
 }
 
-/// npm `@oxc-project/runtime` range; tracks the `oxc_*` crate version.
-const OXC_RUNTIME_RANGE: &str = "^0.137";
+/// The runtime version to vendor, pinned exactly and tracking the oxc toolchain in
+/// `Cargo.toml` (bump the two together). An exact pin keeps a decorator in an untrusted
+/// source from resolving a floating, newest-published package at build time.
+const OXC_RUNTIME_VERSION: &str = "0.138.0";
 
 /// Vendor the oxc transform runtime (`@oxc-project/runtime`) so the helper imports the
 /// transform injected — e.g. the legacy-decorator `@oxc-project/runtime/helpers/decorate`
@@ -691,7 +693,7 @@ pub fn vendor_transform_runtime(out: &Path, mount: &str) -> Result<crate::import
     vendor::vendor(
         &out.join("web_modules"),
         mount,
-        &[PackageSpec::npm(OXC_RUNTIME_PACKAGE, OXC_RUNTIME_RANGE)],
+        &[PackageSpec::npm(OXC_RUNTIME_PACKAGE, OXC_RUNTIME_VERSION)],
     )
 }
 

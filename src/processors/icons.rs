@@ -6,8 +6,25 @@
 use std::path::{Path, PathBuf};
 
 use image::imageops::FilterType;
+use image::{ImageReader, Limits};
 
 use crate::{Error, Result};
+
+/// Decode cap for a source image, in pixels per side. An icon source has no business being
+/// larger; the strict dimension limit makes the PNG decoder refuse at the header, before
+/// allocating for the declared size, so a crafted PNG cannot exhaust memory.
+const MAX_SOURCE_DIMENSION: u32 = 4096;
+
+/// Decode a source PNG with [`MAX_SOURCE_DIMENSION`] enforced (and the `image` crate's
+/// default 512 MiB allocation cap kept).
+fn open_source(src: &Path) -> std::result::Result<image::DynamicImage, Box<dyn std::error::Error>> {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_SOURCE_DIMENSION);
+    limits.max_image_height = Some(MAX_SOURCE_DIMENSION);
+    let mut reader = ImageReader::open(src)?.with_guessed_format()?;
+    reader.limits(limits);
+    Ok(reader.decode()?)
+}
 
 /// Write a multi-resolution `favicon.ico` (one entry per size) scaled from `src`.
 /// Sizes are square pixel dimensions, e.g. `&[16, 32, 48]`.
@@ -20,7 +37,7 @@ fn favicon_inner(
     out: &Path,
     sizes: &[u32],
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let img = image::open(src)?;
+    let img = open_source(src)?;
     let mut dir = ico::IconDir::new(ico::ResourceType::Icon);
     for &size in sizes {
         let rgba = img
@@ -46,7 +63,7 @@ fn png_inner(
     out: &Path,
     size: u32,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let resized = image::open(src)?.resize_exact(size, size, FilterType::Lanczos3);
+    let resized = open_source(src)?.resize_exact(size, size, FilterType::Lanczos3);
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -246,6 +263,53 @@ mod tests {
             *px = image::Rgba([(x * 4) as u8, (y * 4) as u8, 128, 255]);
         }
         img.save(path).unwrap();
+    }
+
+    /// CRC-32 (IEEE), for hand-crafting a valid PNG header in the bomb test.
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in data {
+            crc ^= byte as u32;
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xEDB8_8320 & (0u32.wrapping_sub(crc & 1)));
+            }
+        }
+        !crc
+    }
+
+    /// A PNG whose IHDR declares `w`×`h` (8-bit RGBA), with no image data behind it.
+    fn png_header(w: u32, h: u32) -> Vec<u8> {
+        let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = b"IHDR".to_vec();
+        ihdr.extend(w.to_be_bytes());
+        ihdr.extend(h.to_be_bytes());
+        ihdr.extend([8, 6, 0, 0, 0]);
+        let crc = crc32(&ihdr);
+        png.extend(13u32.to_be_bytes());
+        png.extend(&ihdr);
+        png.extend(crc.to_be_bytes());
+        png
+    }
+
+    #[test]
+    fn a_source_declaring_absurd_dimensions_is_refused_before_decoding() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("bomb.png");
+        // 100000×100000 RGBA would allocate ~40 GB if the decoder trusted the header.
+        std::fs::write(&src, png_header(100_000, 100_000)).unwrap();
+        let err = png(&src, &dir.path().join("out.png"), 180).unwrap_err();
+        assert!(
+            err.to_string().contains("limit") || err.to_string().contains("large"),
+            "{err}"
+        );
+        // A header inside the cap still decodes (and errors only on the missing data).
+        let src = dir.path().join("small.png");
+        std::fs::write(&src, png_header(8, 8)).unwrap();
+        let err = png(&src, &dir.path().join("out.png"), 180).unwrap_err();
+        assert!(
+            !err.to_string().contains("limit") && !err.to_string().contains("large"),
+            "{err}"
+        );
     }
 
     #[test]

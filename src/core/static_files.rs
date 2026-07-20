@@ -144,18 +144,56 @@ impl crate::build::steps::Step for StaticStep {
 
 /// Emit a build warning: as a `cargo:warning` directive when running inside a build
 /// script (cargo sets `OUT_DIR`, and a build script's stderr is hidden unless it
-/// fails), else straight to stderr.
+/// fails), else straight to stderr. A message that could smuggle a line break into
+/// the directive ([`cargo_safe`]) always takes the stderr path.
 pub(crate) fn build_warning(msg: &str) {
-    if std::env::var_os("OUT_DIR").is_some() {
+    if std::env::var_os("OUT_DIR").is_some() && cargo_safe(msg) {
         println!("cargo:warning={msg}");
     } else {
         eprintln!("{msg}");
     }
 }
 
+/// Emit a `cargo:rerun-if-changed` directive for `path` — but only when running as a
+/// build script (cargo signals that by setting `OUT_DIR`; outside one the directive is
+/// meaningless and would spew one line per source file to the CLI's stdout). A path
+/// containing a control character ([`cargo_safe`]) is skipped with a plain stderr note
+/// instead: cargo parses directives line-wise, and a CR/LF in a walked filename would
+/// otherwise inject arbitrary `cargo:` directives into the build script's output.
+pub(crate) fn cargo_rerun_if_changed(path: &Path) {
+    if std::env::var_os("OUT_DIR").is_none() {
+        return;
+    }
+    let text = path.display().to_string();
+    if cargo_safe(&text) {
+        println!("cargo:rerun-if-changed={text}");
+    } else {
+        eprintln!(
+            "web-modules: {}: not declared as a cargo:rerun-if-changed input \
+             (control character in the path)",
+            path.to_string_lossy().escape_default()
+        );
+    }
+}
+
+/// Whether `text` can appear inside a single `cargo:` directive line — no control
+/// characters, so no CR/LF can start a new, injected directive.
+fn cargo_safe(text: &str) -> bool {
+    !text.bytes().any(|b| b < 0x20 || b == 0x7f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_safe_refuses_control_characters() {
+        assert!(cargo_safe("web/app.js"));
+        assert!(cargo_safe("unicode-☃-name"));
+        assert!(!cargo_safe("x\ncargo:rustc-link-lib=evil"));
+        assert!(!cargo_safe("x\ry"));
+        assert!(!cargo_safe("x\u{7f}y"));
+    }
 
     #[test]
     fn copies_static_skips_sources_and_partials() {

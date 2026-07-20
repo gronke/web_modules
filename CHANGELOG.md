@@ -11,6 +11,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 - security(cli): path fields in a `package.json` `web_modules` block (`roots`, `out`, `template`, `scss.loadPaths`) are confined to the project directory — previously an untrusted repository could serve arbitrary directories via `web-modules dev`, read any file into the output via `template`, and plant a new tree at an arbitrary location via `out`. Every entry must now be purely relative (no root, prefix, or `..` component), and an existing path must canonically resolve inside the project, so a symlink in the tree cannot redirect it outside. CLI flags and environment variables are operator-controlled and unaffected
 - security(bundle): module resolution is contained to the bundle root (`bundle_split`) / `cwd` (`bundle`) — a `../..` import chain or a symlinked package in `node_modules` that escapes the tree now fails the build instead of folding arbitrary local files into the published bundle. A workspace `node_modules/<pkg>` link pointing outside the project must be brought inside (or the tree bundled from a common root) — the build names the module it refused
+- security(icons): source PNGs decode with strict dimension limits (4096×4096) on top of the `image` crate's 512 MiB allocation cap — a crafted icon source declaring enormous dimensions is refused at the header instead of exhausting memory
 
 ### Fixed
 

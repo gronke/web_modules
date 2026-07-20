@@ -7,6 +7,10 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+### Security
+
+- security(cli): path fields in a `package.json` `web_modules` block (`roots`, `out`, `template`, `scss.loadPaths`) are confined to the project directory — previously an untrusted repository could serve arbitrary directories via `web-modules dev`, read any file into the output via `template`, and plant a new tree at an arbitrary location via `out`. Every entry must now be purely relative (no root, prefix, or `..` component), and an existing path must canonically resolve inside the project, so a symlink in the tree cannot redirect it outside. CLI flags and environment variables are operator-controlled and unaffected
+
 ### Fixed
 
 - fix(typescript): an `_`-prefixed `.ts`/`.tsx`/`.mts` source compiles like any other module — the underscore-partial convention belongs to SCSS, where `_x.scss` is an import-only fragment; ES modules have no such concept, and skipping `_Base.ts` stranded every `import './_Base.js'` in the emitted tree (surfacing only at bundle time, as an unresolved import). `.d.ts` declarations remain no-emit

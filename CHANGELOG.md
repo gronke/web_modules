@@ -13,6 +13,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - security(bundle): module resolution is contained to the bundle root (`bundle_split`) / `cwd` (`bundle`) — a `../..` import chain or a symlinked package in `node_modules` that escapes the tree now fails the build instead of folding arbitrary local files into the published bundle. A workspace `node_modules/<pkg>` link pointing outside the project must be brought inside (or the tree bundled from a common root) — the build names the module it refused
 - security(icons): source PNGs decode with strict dimension limits (4096×4096) on top of the `image` crate's 512 MiB allocation cap — a crafted icon source declaring enormous dimensions is refused at the header instead of exhausting memory
 - security(build): paths and messages emitted into `cargo:` directives are kept free of control characters — a walked filename containing a line break could previously inject arbitrary directives (`cargo:rustc-link-lib=…`) into a build script's output. Such paths are skipped with a plain stderr note; warnings take the stderr path
+- security(dev): a compile failure answers 500 with a generic body — the detail, which can embed absolute local paths (the SCSS sandbox's refusal notes name them), goes to the developer's console only, so a client that can reach the dev server (e.g. a DNS-rebinding page) learns nothing about the local layout
 
 ### Fixed
 

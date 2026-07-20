@@ -341,8 +341,16 @@ async fn serve_asset(State(state): State<DevState>, uri: Uri) -> Response {
         },
         Ok(None) => (StatusCode::NOT_FOUND, format!("404 Not Found: {requested}")).into_response(),
         Err(message) => {
+            // The detail (which can embed local paths, e.g. the SCSS sandbox's refusal
+            // notes) goes to the developer's console; the HTTP body stays generic, so
+            // whatever can reach the server — a rebinding page in the browser — learns
+            // nothing about the local layout.
             eprintln!("web-modules: compile error for /{requested}:\n{message}");
-            (StatusCode::INTERNAL_SERVER_ERROR, message).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "500 Internal Server Error: failed to build; see the web-modules console",
+            )
+                .into_response()
         }
     }
 }

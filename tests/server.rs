@@ -277,3 +277,31 @@ async fn gzip_sidecar_served_only_when_accepted() {
     assert_eq!(plain.body, b"ORIGINAL-JS");
     assert_eq!(plain.content_encoding, "");
 }
+
+/// A compile failure answers 500 with a *generic* body: the detail (which can embed
+/// absolute local paths — the SCSS sandbox's refusal notes name them) goes to the
+/// developer's console, never to whatever client can reach the server.
+#[tokio::test]
+async fn dev_500_body_does_not_disclose_local_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("web");
+    write(&root.join("app.scss"), "@import '../secret';\n");
+    // A partial outside the source root, so the sandbox's refusal note names a real,
+    // absolute outside path in the compile error.
+    write(&tmp.path().join("_secret.scss"), "$leak: red;\n");
+    let app = Frontend::dir(&root).dev();
+
+    let res = fetch(app, "/app.css", None).await;
+    assert_eq!(res.status, StatusCode::INTERNAL_SERVER_ERROR);
+    let outside = tmp.path().canonicalize().unwrap();
+    assert!(
+        !res.text().contains("_secret.scss"),
+        "the refusal detail must stay on the console; got: {}",
+        res.text()
+    );
+    assert!(
+        !res.text().contains(&outside.display().to_string()),
+        "no absolute local path in the body; got: {}",
+        res.text()
+    );
+}

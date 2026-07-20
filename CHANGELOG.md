@@ -16,6 +16,10 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - security(dev): a compile failure answers 500 with a generic body — the detail, which can embed absolute local paths (the SCSS sandbox's refusal notes name them), goes to the developer's console only, so a client that can reach the dev server (e.g. a DNS-rebinding page) learns nothing about the local layout
 - security(build): the oxc transform runtime is vendored at an exact pinned version (`0.138.0`, tracking the oxc toolchain) instead of a floating `^0.137` range that resolved the newest published package at build time — a decorator in a source file no longer picks up whatever the registry newest-serves
 
+### Changed
+
+- docs(security): SECURITY.md describes the current posture — the SCSS import sandbox (the stale "processors are not sandboxed" caveat is gone), CLI config containment, bundle containment, the exact-pinned decorator runtime, and the trust anchors that remain (lockfile integrity is self-referential, vendored packages are not integrity-pinned, `npm://` resolution ascends ancestors, `Mount::from_dir` is a config-trust boundary, no `Host` validation on the dev server)
+
 ### Fixed
 
 - fix(typescript): an `_`-prefixed `.ts`/`.tsx`/`.mts` source compiles like any other module — the underscore-partial convention belongs to SCSS, where `_x.scss` is an import-only fragment; ES modules have no such concept, and skipping `_Base.ts` stranded every `import './_Base.js'` in the emitted tree (surfacing only at bundle time, as an unresolved import). `.d.ts` declarations remain no-emit

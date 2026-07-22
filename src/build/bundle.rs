@@ -100,10 +100,13 @@ async fn bundle_async(opts: &BundleOptions<'_>) -> Result<()> {
                 if resolved {
                     if let Ok(real) = Path::new(&specifier).canonicalize() {
                         if !real.starts_with(cwd.as_path()) {
-                            return Err(anyhow::anyhow!(
+                            // The closure's signature is `anyhow::Result` (rolldown's
+                            // API); the crate's own Error converts into it.
+                            return Err(Error::Bundle(format!(
                                 "module {specifier} resolves outside the bundle cwd {}",
                                 cwd.display()
-                            ));
+                            ))
+                            .into());
                         }
                     }
                 }
@@ -313,10 +316,13 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
                     // does not canonicalize (a virtual module) is left to rolldown.
                     if let Ok(real) = path.canonicalize() {
                         if !real.starts_with(root.as_path()) {
-                            return Err(anyhow::anyhow!(
+                            // The closure's signature is `anyhow::Result` (rolldown's
+                            // API); the crate's own Error converts into it.
+                            return Err(Error::Bundle(format!(
                                 "module {specifier} resolves outside the bundle root {}",
                                 root.display()
-                            ));
+                            ))
+                            .into());
                         }
                     }
                     return Ok(false);

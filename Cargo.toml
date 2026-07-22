@@ -71,7 +71,7 @@ npm = []
 # `node_modules/` (CommonJS and all) into one browser ESM file. Heavy and **opt-in** — the default
 # toolchain stays a buildless, no-bundler ESM workflow; pull this in only when you need CJS→ESM.
 # Independent of `npm`: pair with `npm` (→ `web_modules::npm`) for the install→bundle pipeline.
-bundle = ["dep:rolldown", "dep:rolldown_common", "dep:tokio", "dep:anyhow"]
+bundle = ["dep:rolldown", "dep:rolldown_common", "dep:tokio"]
 # Fluent `web_modules::Build` / `Dev` builders — the promoted, developer-facing entry that wraps the
 # `BuildOptions` / `build()` and dev-server structs underneath. On by default; opt out for the bare
 # struct API. Dependency-free; the builders are present only alongside the features that supply the
@@ -141,8 +141,6 @@ clap = { version = "4", features = ["derive"], optional = true }
 # (pulls a second oxc + the rolldown tree), so it's optional and off by default.
 rolldown = { version = "1", optional = true }
 rolldown_common = { version = "1", optional = true }
-# Error construction for the is_external closure (its signature is anyhow::Result).
-anyhow = { version = "1", optional = true }
 
 # Structured logging for reject-list drops (the `tracing` feature). Library-only usage — no
 # subscriber pulled — so consumers wire their own. `default-features = false` keeps it lean.

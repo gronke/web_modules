@@ -49,6 +49,13 @@ macro_rules! source_builder_methods {
                 self
             }
 
+            /// Enable or disable `*.tmpl.md` rendering (default on; effective with
+            /// the `md-tmpl` feature).
+            pub fn md_tmpl(mut self, on: bool) -> Self {
+                self.processors.md_tmpl = on;
+                self
+            }
+
             /// Allow duplicate output paths, keeping the highest-precedence source
             /// for each contested path (default off: `build` fails on a conflict and
             /// `dev` warns about it).

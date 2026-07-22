@@ -17,9 +17,34 @@ use crate::Result;
 /// leaking source into the output. The dev server's request filter uses the same list.
 pub(crate) const SOURCE_EXTENSIONS: [&str; 5] = ["ts", "tsx", "mts", "scss", "tera"];
 
+/// Compound suffixes the source processors consume: `.tmpl.md` (md-tmpl) ends in a
+/// `.md` that is *not* itself a source, so the final extension alone cannot classify
+/// it. Checked by [`is_source_name`] alongside [`SOURCE_EXTENSIONS`].
+pub(crate) const SOURCE_SUFFIXES: [&str; 1] = [".tmpl.md"];
+
+/// Whether a file name is a processor's input: a [`SOURCE_EXTENSIONS`] final
+/// extension or a [`SOURCE_SUFFIXES`] compound suffix, both matched
+/// **case-insensitively** (on a case-insensitive filesystem `Page.TMPL.MD` opens
+/// `page.tmpl.md`, so a case-sensitive guard would ship or serve the raw source).
+/// The one rule for the static-copy stage and both servers, so build, dev and the
+/// embedded router hide the same set.
+pub(crate) fn is_source_name(name: &str) -> bool {
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|x| x.to_str())
+        .unwrap_or("");
+    SOURCE_EXTENSIONS
+        .iter()
+        .any(|e| ext.eq_ignore_ascii_case(e))
+        || SOURCE_SUFFIXES.iter().any(|s| {
+            name.len() >= s.len()
+                && name.as_bytes()[name.len() - s.len()..].eq_ignore_ascii_case(s.as_bytes())
+        })
+}
+
 /// Copy files from `src` to `out` (preserving structure), skipping things a build step
-/// produces or ignores: `.ts`/`.tsx`/`.mts`/`.scss`/`.tera` sources, `_`-prefixed partials,
-/// and any path the [`reject`](crate::reject) list excludes (config / secrets / source).
+/// produces or ignores: `.ts`/`.tsx`/`.mts`/`.scss`/`.tera`/`.tmpl.md` sources, `_`-prefixed
+/// partials, and any path the [`reject`](crate::reject) list excludes (config / secrets / source).
 /// Symlinks are skipped entirely — file or directory; the pipeline's preflight, not
 /// this standalone helper, honors [`SymlinkMode`](crate::SymlinkMode). Returns the
 /// number of files copied.
@@ -60,12 +85,7 @@ pub(crate) struct StaticStep {
 /// The shape of a static-copy candidate: not a `_` partial, not a processor source.
 fn static_candidate(rel: &Path) -> Option<()> {
     let name = rel.file_name()?.to_str()?;
-    let ext = rel.extension().and_then(|x| x.to_str()).unwrap_or("");
-    if name.starts_with('_')
-        || SOURCE_EXTENSIONS
-            .iter()
-            .any(|e| ext.eq_ignore_ascii_case(e))
-    {
+    if name.starts_with('_') || is_source_name(name) {
         return None;
     }
     Some(())
@@ -202,6 +222,25 @@ mod tests {
     }
 
     #[test]
+    fn copies_static_skips_tmpl_md_but_not_plain_md() {
+        // The compound `.tmpl.md` suffix is a source; its final `.md` extension alone
+        // is not — plain markdown keeps shipping.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("notes.md"), b"# notes").unwrap();
+        std::fs::write(src.join("guide.tmpl.md"), b"---\n---\n").unwrap();
+        std::fs::write(src.join("Page.TMPL.MD"), b"---\n---\n").unwrap();
+
+        let n = copy_static(&src, &out, &crate::reject::Reject::none()).unwrap();
+        assert_eq!(n, 1, "only the plain markdown is copied");
+        assert!(out.join("notes.md").exists());
+        assert!(!out.join("guide.tmpl.md").exists());
+        assert!(!out.join("Page.TMPL.MD").exists());
+    }
+
+    #[test]
     fn copies_static_skips_case_variant_source_extensions() {
         // A source authored with an upper-cased extension is still a source — it must
         // not be copied into the output (else it ships raw), matching the serve path's
@@ -254,12 +293,18 @@ mod tests {
             "mod.mts",
             "style.scss",
             "page.html.tera",
+            "guide.tmpl.md",
+            "Guide.TMPL.MD",
         ] {
             assert!(
                 step.claim(Path::new(source)).is_none(),
                 "{source} is a processor's input, never copied raw"
             );
         }
+        assert!(
+            step.claim(Path::new("notes.md")).is_some(),
+            "plain markdown is an ordinary static file"
+        );
         assert!(step.claim(Path::new("_partial.html")).is_none());
         // A reject-listed path still claims by shape: the preflight drops it centrally
         // (and reports the drop), so the decision is one rule for every step.

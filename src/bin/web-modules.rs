@@ -4,10 +4,10 @@
 //! to npm-utils' `add`/`install`/`upgrade`/…). Requires the `cli` feature; the opt-in `env` feature
 //! adds `WEB_MODULES_*` environment-variable config to `build`.
 //!
-//! Each compiler processor (typescript, scss, tera, minify, gzip) contributes its own `--<name>` /
-//! `--no-<name>` toggle — and any `--<name>-…` flags — to `build` and `dev` (assembled via
-//! [`CompilerConfig`]); a global `--no-default-features` turns the default-on set (typescript,
-//! scss, tera) off so they can be re-enabled individually.
+//! Each compiler processor (typescript, scss, tera, md-tmpl, minify, gzip) contributes its own
+//! `--<name>` / `--no-<name>` toggle — and any `--<name>-…` flags — to `build` and `dev` (assembled
+//! via [`CompilerConfig`]); a global `--no-default-features` turns the default-on set (typescript,
+//! scss, tera, md-tmpl) off so they can be re-enabled individually.
 
 use std::ffi::OsString;
 use std::net::SocketAddr;
@@ -34,7 +34,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Dev server: compile TS/SCSS on the fly, render `*.tera`, watch the tree, live-reload.
+    /// Dev server: compile TS/SCSS on the fly, render `*.tera` / `*.tmpl.md`, watch the tree,
+    /// live-reload.
     Dev {
         /// Source root(s), merged (first match wins). Defaults to the cwd.
         roots: Vec<PathBuf>,
@@ -46,8 +47,8 @@ enum Command {
     },
     /// Build a deployable output tree — the static counterpart of `dev`.
     ///
-    /// Compiles the source root(s) — TS→JS, SCSS→CSS, `*.tera`→rendered target, static files
-    /// copied — into `--out`, exactly as `dev` serves them, and renders `index.html` with the
+    /// Compiles the source root(s) — TS→JS, SCSS→CSS, `*.tera` / `*.tmpl.md`→rendered target,
+    /// static files copied — into `--out`, exactly as `dev` serves them, and renders `index.html` with the
     /// import map injected. Vendoring is **optional**: pass `--package name@range` and/or
     /// `--manifest package.json` to vendor npm into `web_modules/`; with neither, a non-vendored
     /// tree just compiles statically. With the opt-in `env` feature each flag also reads a
@@ -140,11 +141,12 @@ enum Command {
 /// (plus any `--<name>-…` flags); `--no-default-features` turns the default-on set off.
 ///
 /// The binary requires the `cli` feature, which forces `typescript`, `scss`, `minify` and `tera`
-/// on, so those are unconditional here; only `gzip` (the `compress` feature) is optional.
+/// on, so those are unconditional here; only `gzip` (the `compress` feature) and `md-tmpl` are
+/// optional.
 #[derive(Args, Debug)]
 struct CompilerConfig {
-    /// Disable every default-on compiler feature (typescript, scss, tera); re-enable individually
-    /// with `--typescript` / `--scss` / `--tera`.
+    /// Disable every default-on compiler feature (typescript, scss, tera, md-tmpl); re-enable
+    /// individually with `--typescript` / `--scss` / `--tera` / `--md-tmpl`.
     #[arg(long)]
     no_default_features: bool,
     #[command(flatten)]
@@ -153,6 +155,9 @@ struct CompilerConfig {
     scss: web_modules::scss::ScssArgs,
     #[command(flatten)]
     tera: web_modules::templates::TeraArgs,
+    #[cfg(feature = "md-tmpl")]
+    #[command(flatten)]
+    md_tmpl: web_modules::md_tmpl::MdTmplArgs,
     #[command(flatten)]
     minify: web_modules::minify::MinifyArgs,
     #[cfg(feature = "compress")]
@@ -167,8 +172,9 @@ struct CompilerConfig {
     #[arg(long = "reject-list", value_name = "PATTERN")]
     reject_list: Vec<String>,
     /// Allow duplicate output paths, keeping the highest-precedence source for each contested
-    /// path (earlier root first, then a Tera template over a literal file over a transformed
-    /// sibling). Without it `build` fails on a conflict; `dev` warns, and this silences it.
+    /// path (earlier root first, then a Tera template over an md-tmpl template over a literal
+    /// file over a transformed sibling). Without it `build` fails on a conflict; `dev` warns,
+    /// and this silences it.
     #[arg(long = "skip-duplicates")]
     skip_duplicates: bool,
     /// What a symlink in a source tree means: `follow` (default; within its own root only),
@@ -189,6 +195,7 @@ struct ResolvedCompiler {
     typescript: bool,
     scss: bool,
     tera: bool,
+    md_tmpl: bool,
     minify: bool,
     gzip: bool,
     ts_decorators: web_modules::typescript::Decorators,
@@ -200,13 +207,17 @@ struct ResolvedCompiler {
 impl CompilerConfig {
     /// Resolve each processor toggle + config, layering a `package.json` `web_modules` block under
     /// the CLI flags: `--no-<name>` > `--<name>` > block > (`default_on && !--no-default-features`).
-    /// typescript/scss/tera default on; minify/gzip default off.
+    /// typescript/scss/tera/md-tmpl default on; minify/gzip default off.
     fn resolve_with(&self, cfg: &PkgConfig) -> ResolvedCompiler {
         let nd = self.no_default_features;
         ResolvedCompiler {
             typescript: self.typescript.enabled_with(cfg.typescript, true, nd),
             scss: self.scss.enabled_with(cfg.scss, true, nd),
             tera: self.tera.enabled_with(cfg.tera, true, nd),
+            #[cfg(feature = "md-tmpl")]
+            md_tmpl: self.md_tmpl.enabled_with(cfg.md_tmpl, true, nd),
+            #[cfg(not(feature = "md-tmpl"))]
+            md_tmpl: false,
             minify: self.minify.enabled_with(cfg.minify, false, nd),
             #[cfg(feature = "compress")]
             gzip: self.gzip.enabled_with(cfg.gzip, false, nd),
@@ -243,6 +254,7 @@ impl ResolvedCompiler {
         p.typescript = self.typescript;
         p.scss = self.scss;
         p.tera = self.tera;
+        p.md_tmpl = self.md_tmpl;
         p.ts_decorators = self.ts_decorators;
         p.extra_scss_load_paths = self.extra_scss_load_paths;
         p.symlinks = self.symlinks;
@@ -297,6 +309,7 @@ struct PkgConfig {
     typescript: Option<bool>,
     scss: Option<bool>,
     tera: Option<bool>,
+    md_tmpl: Option<bool>,
     scss_load_paths: Vec<PathBuf>,
 }
 
@@ -358,6 +371,7 @@ fn parse_block(block: &Value) -> Res<PkgConfig> {
                 }
             }
             "tera" => cfg.tera = Some(processor_enabled(val, "web_modules.tera")?),
+            "md-tmpl" => cfg.md_tmpl = Some(processor_enabled(val, "web_modules.md-tmpl")?),
             // Owned elsewhere (vendoring / mount) — read on the package.json content, not here.
             "webDependencies" | "root" => {}
             _ => {}
@@ -654,8 +668,21 @@ mod tests {
     fn toggles_default_on_set_and_opt_in() {
         let d = resolve_build(&[]);
         assert!(d.typescript && d.scss && d.tera, "ts/scss/tera default on");
+        #[cfg(feature = "md-tmpl")]
+        assert!(d.md_tmpl, "md-tmpl defaults on when compiled in");
+        #[cfg(not(feature = "md-tmpl"))]
+        assert!(!d.md_tmpl, "md-tmpl stays off without its feature");
         assert!(!d.minify && !d.gzip, "minify/gzip default off");
         assert!(resolve_build(&["--minify"]).minify, "--minify opts in");
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn toggles_no_md_tmpl_disables_regardless_of_order() {
+        assert!(!resolve_build(&["--no-md-tmpl"]).md_tmpl);
+        // `--no-<name>` wins over `--<name>`, in either order.
+        assert!(!resolve_build(&["--no-md-tmpl", "--md-tmpl"]).md_tmpl);
+        assert!(!resolve_build(&["--md-tmpl", "--no-md-tmpl"]).md_tmpl);
     }
 
     #[test]
@@ -734,12 +761,15 @@ mod tests {
     fn no_default_features_disables_then_reenables() {
         let nd = resolve_build(&["--no-default-features"]);
         assert!(
-            !nd.typescript && !nd.scss && !nd.tera,
+            !nd.typescript && !nd.scss && !nd.tera && !nd.md_tmpl,
             "--no-default-features turns the default-on set off"
         );
         let one = resolve_build(&["--no-default-features", "--scss"]);
         assert!(one.scss, "--scss re-enables after --no-default-features");
-        assert!(!one.typescript && !one.tera, "the others stay off");
+        assert!(
+            !one.typescript && !one.tera && !one.md_tmpl,
+            "the others stay off"
+        );
     }
 
     #[test]
@@ -797,7 +827,8 @@ mod tests {
                 "minify": true, "gzip": false,
                 "typescript": true,
                 "scss": { "loadPaths": ["styles"] },
-                "tera": false
+                "tera": false,
+                "md-tmpl": false
             } }"#,
         );
         let (cfg, path) = load_pkg_config_at(dir.path()).unwrap();
@@ -814,6 +845,7 @@ mod tests {
         assert_eq!(cfg.scss, Some(true));
         assert_eq!(cfg.scss_load_paths, [PathBuf::from("styles")]);
         assert_eq!(cfg.tera, Some(false)); // bool form disables
+        assert_eq!(cfg.md_tmpl, Some(false));
     }
 
     #[test]

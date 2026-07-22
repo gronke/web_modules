@@ -1,0 +1,26 @@
+# Typed markdown templates: the pipeline renders `web/*.tmpl.md` to `.md` pages, and
+# build.rs feeds `templates/commits.tmpl.md` the repository's last commits through
+# md-tmpl's strictly typed params — extracted with gix (pure-Rust git), no git binary.
+[package]
+name = "md-tmpl-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[dependencies]
+# `auto()` serving: the baked pages in release, the live dev server (compile + watch +
+# reload `web/`) in debug — so `cargo run` demonstrates live `.tmpl.md` rendering too.
+web_modules = { path = "../..", default-features = false, features = ["axum", "dev", "md-tmpl"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# include_dir's macro must be used from a direct dependency (it emits
+# `include_dir::`-qualified paths); same 0.7 line as web-modules, so the `Dir` types unify.
+include_dir = "0.7"
+
+[build-dependencies]
+# Build-time bake: render the `web/` tree (only markdown templates in this example) and
+# the programmatic commits page. No npm dependencies, so the bake never touches the network.
+web_modules = { path = "../..", default-features = false, features = ["md-tmpl"] }
+# Read the surrounding repository's history in pure Rust — committer + title become the
+# template's typed `commits` param.
+gix = "0.85"

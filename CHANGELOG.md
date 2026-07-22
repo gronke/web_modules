@@ -7,6 +7,17 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+### Added
+
+- feat: typed markdown templates via [md-tmpl](https://docs.rs/md-tmpl) — the opt-in `md-tmpl` feature (part of `full`) renders `*.tmpl.md` sources to their `.md` targets (`guide.tmpl.md` → `guide.md`) across `build`, `dev` and embedded serving, with the generated import map offered as the `importmap` env var a template opts into.
+  `_`-prefixed templates are include-only partials; a page must render from its declared defaults, so a required parameter fails the build naming the parameter; on a shared target a Tera template outranks an md-tmpl template.
+  Dev renders `.tmpl.md` fresh per request (never mtime-cached), so an edited include reaches the very next reload.
+  `web_modules::md_tmpl` re-exports `Template`, `CompileOptions`, `Context` and `Value` for programmatic, strictly typed renders — `examples/md-tmpl` feeds the repository's last commits (via gix) into a `list(committer = str, title = str)` param
+
+### Changed
+
+- `.tmpl.md` is now always treated as a source name — never copied into the output or served raw, even when the `md-tmpl` processor is disabled or its feature is not compiled in (the established policy for `.tera` and every other source extension)
+
 ### Fixed
 
 - fix(typescript): an `_`-prefixed `.ts`/`.tsx`/`.mts` source compiles like any other module — the underscore-partial convention belongs to SCSS, where `_x.scss` is an import-only fragment; ES modules have no such concept, and skipping `_Base.ts` stranded every `import './_Base.js'` in the emitted tree (surfacing only at bundle time, as an unresolved import). `.d.ts` declarations remain no-emit

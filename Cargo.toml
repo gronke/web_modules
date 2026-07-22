@@ -34,6 +34,9 @@ typescript = ["dep:oxc_allocator", "dep:oxc_ast", "dep:oxc_ast_visit", "dep:oxc_
 scss = ["dep:grass"]
 # HTML templating (e.g. importmap injection) via Tera.
 tera = ["dep:tera"]
+# Typed markdown templating (`*.tmpl.md` → `*.md`) via md-tmpl. Opt-in (pre-1.0 dependency);
+# part of `full`, so docs.rs, CI and the released binary include it.
+md-tmpl = ["dep:md-tmpl"]
 # Production JS minification via oxc_minifier (reuses the oxc parse/codegen stack).
 minify = ["typescript", "dep:oxc_minifier"]
 # Generate favicons / app icons from a source PNG.
@@ -87,7 +90,7 @@ symlink-move = []
 # Everything in the lean toolchain (incl. `env`, so CI's `--features full` lint/test covers the
 # env-gated CLI arms). The heavy, opt-in `bundle` is intentionally NOT included, so `full` (and
 # `--features full`) builds stay free of the rolldown / second-oxc tree.
-full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm", "builder", "tracing", "symlink-move"]
+full = ["typescript", "scss", "tera", "md-tmpl", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm", "builder", "tracing", "symlink-move"]
 
 [dependencies]
 # Core — vendoring npm packages + composing import maps + a transitive `node_modules/`
@@ -120,6 +123,9 @@ oxc_isolated_declarations = { version = "0.138", optional = true }
 # of the clap stack. `random` is kept (it's in grass's default — Sass `random()`), so SCSS is unchanged.
 grass = { version = "0.13", optional = true, default-features = false, features = ["random"] }
 tera = { version = "1", optional = true }
+# Typed markdown templates (`.tmpl.md`). `default-features = false` + `std` drops the serde /
+# typed-builder / proc-macro extras — the pipeline only compiles files and renders their defaults.
+md-tmpl = { version = "0.5.3", optional = true, default-features = false, features = ["std"] }
 
 # Icons (favicon / app icons) + i18n (XLIFF).
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }

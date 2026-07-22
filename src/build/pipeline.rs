@@ -66,8 +66,8 @@ pub struct BuildOptions<'a> {
     /// variable instead of `html` when `Some` (same fallback rule as `html`). Requires
     /// the `tera` feature.
     pub template: Option<&'a Path>,
-    /// Which source processors run (TypeScript, SCSS, Tera) and their tuning — the
-    /// static-build counterpart of the dev server's processor set.
+    /// Which source processors run (TypeScript, SCSS, Tera, md-tmpl) and their tuning —
+    /// the static-build counterpart of the dev server's processor set.
     pub processors: Processors,
     /// Output optimization: minify the emitted JS and/or write `.gz` sidecars.
     pub output: Output,
@@ -77,9 +77,9 @@ pub struct BuildOptions<'a> {
 /// dev server's processor set, so `build` and `dev` stay in lock-step.
 ///
 /// `#[non_exhaustive]`, so new processors don't break callers: build from
-/// [`Processors::default`] and adjust fields. The defaults mirror the `default` Cargo
-/// features — TypeScript, SCSS and Tera all on. A field has effect only when its Cargo
-/// feature is compiled in (e.g. `scss` needs the `scss` feature).
+/// [`Processors::default`] and adjust fields. Every processor defaults on, and a field
+/// has effect only when its Cargo feature is compiled in (e.g. `scss` needs the `scss`
+/// feature, `md_tmpl` the opt-in `md-tmpl` feature).
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Processors {
@@ -90,6 +90,10 @@ pub struct Processors {
     /// Render `*.tera` to their stripped targets (`index.html.tera` → `index.html`).
     /// Default on.
     pub tera: bool,
+    /// Render `*.tmpl.md` (typed markdown templates via md-tmpl) to their `.md`
+    /// targets (`guide.tmpl.md` → `guide.md`). Default on; needs the opt-in
+    /// `md-tmpl` feature.
+    pub md_tmpl: bool,
     /// Decorator lowering for the TypeScript transform. Defaults to [`Decorators::Lit`];
     /// inert unless the `typescript` processor runs.
     ///
@@ -107,9 +111,10 @@ pub struct Processors {
     pub symlinks: crate::SymlinkMode,
     /// Allow duplicate output paths (default off). `build` then keeps the
     /// highest-precedence source for each contested path — earlier root first, then a
-    /// Tera template over a literal file over a transformed sibling — instead of
-    /// failing; the dev server stops warning about the conflicts it would otherwise
-    /// report. A source-tree policy like `reject`, shared by `build` and `dev`.
+    /// Tera template over an md-tmpl template over a literal file over a transformed
+    /// sibling — instead of failing; the dev server stops warning about the conflicts
+    /// it would otherwise report. A source-tree policy like `reject`, shared by
+    /// `build` and `dev`.
     pub skip_duplicates: bool,
 }
 
@@ -119,6 +124,7 @@ impl Default for Processors {
             typescript: true,
             scss: true,
             tera: true,
+            md_tmpl: true,
             ts_decorators: crate::Decorators::Lit,
             extra_scss_load_paths: Vec::new(),
             reject: crate::reject::Reject::all(),
@@ -520,14 +526,14 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
         vendor::vendor(&stage.join("web_modules"), opts.mount, opts.specs)?
     };
 
-    // Emit every non-Tera winner exactly once, feeding the module graph as each file
-    // is written. Tera waits: its templates receive the import map, which is final
-    // only after helper vendoring below.
+    // Emit every non-template winner exactly once, feeding the module graph as each
+    // file is written. The template steps (Tera, md-tmpl) wait: their pages receive
+    // the import map, which is final only after helper vendoring below.
     let mut graph = crate::module_graph::ModuleGraph::new();
-    let mut tera_winners = Vec::new();
+    let mut template_winners = Vec::new();
     for winner in winners {
-        if steps[winner.step].rank() == steps::Rank::Tera {
-            tera_winners.push(winner);
+        if steps[winner.step].rank().is_template() {
+            template_winners.push(winner);
             continue;
         }
         emit_winner(&steps, winner, opts, stage, &importmap, &mut graph)?;
@@ -579,9 +585,9 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     }
 
     // Vendor the transform-runtime helpers the graph shows were injected (the decorator
-    // helper, etc.) — even a non-vendored build may need these. Tera renders later, so
-    // a runtime import appearing only in rendered JS is not auto-vendored — it surfaces
-    // in the unresolved check below instead.
+    // helper, etc.) — even a non-vendored build may need these. Templates render later,
+    // so a runtime import appearing only in rendered JS is not auto-vendored — it
+    // surfaces in the unresolved check below instead.
     let runtime_vendored = graph.uses_runtime_helpers();
     if runtime_vendored {
         importmap.extend(vendor_transform_runtime(stage, opts.mount)?);
@@ -600,10 +606,10 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     // es-module-shims / an external `<script type="importmap" src>`) can consume it.
     importmap.write_to(&stage.join("importmap.json"))?;
 
-    // Render the Tera winners, with the now-final import map exposed as the
-    // `importmap` template variable — the static counterpart of the dev server's
-    // on-the-fly `.tera` rendering.
-    for winner in tera_winners {
+    // Render the template winners, with the now-final import map exposed to each —
+    // Tera as the `importmap` variable, md-tmpl as the `importmap` env var — the
+    // static counterpart of the dev server's on-the-fly rendering.
+    for winner in template_winners {
         emit_winner(&steps, winner, opts, stage, &importmap, &mut graph)?;
     }
 
@@ -1162,6 +1168,146 @@ mod tests {
         assert!(
             !out.join("_partial.html").exists(),
             "`_`-prefixed partials are not emitted"
+        );
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn build_renders_md_tmpl_tree() {
+        // The md-tmpl mirror of `build_renders_tera_tree`: `guide.tmpl.md` renders to
+        // `guide.md` with the import map available as the `importmap` env var, and a
+        // `_`-prefixed template is include-only.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("guide.tmpl.md"),
+            "---\nenv:\n  - importmap = str\n---\n# Guide\n\n{{ importmap }}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("_partial.tmpl.md"),
+            "---\nparams: []\n---\nPARTIAL\n",
+        )
+        .unwrap();
+
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+
+        let guide = std::fs::read_to_string(out.join("guide.md")).unwrap();
+        assert!(
+            guide.contains("<script type=\"importmap\">"),
+            "the `.tmpl.md` rendered with the importmap env; got:\n{guide}"
+        );
+        assert!(
+            !out.join("guide.tmpl.md").exists(),
+            "the source is never shipped raw"
+        );
+        assert!(
+            !out.join("_partial.md").exists(),
+            "`_`-prefixed templates are not emitted"
+        );
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn build_md_tmpl_follows_includes() {
+        // Includes are md-tmpl's own, explicit-argument mechanism (unlike Tera's
+        // convention-only `_` skip): the partial's rendered content lands in the page.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("_footer.tmpl.md"),
+            "---\nparams:\n  - site = str\n---\nfooter of {{ site }}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            src.join("page.tmpl.md"),
+            "---\nparams: []\n---\n# Page\n\n> {% include [f](./_footer.tmpl.md) with site = \"demo\" %}\n",
+        )
+        .unwrap();
+
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+
+        let page = std::fs::read_to_string(out.join("page.md")).unwrap();
+        assert!(page.contains("footer of demo"), "got:\n{page}");
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn build_md_tmpl_required_param_fails_loudly() {
+        // A page must render from its declared defaults; a required param is a build
+        // error naming the parameter and the file — not a silently skipped page.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("report.tmpl.md"),
+            "---\nparams:\n  - title = str\n---\n{{ title }}\n",
+        )
+        .unwrap();
+
+        let err = build(&opts(std::slice::from_ref(&src), &out)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("title") && msg.contains("report.tmpl.md"),
+            "got: {msg}"
+        );
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn build_respects_disabled_md_tmpl() {
+        // Processor off ⇒ no render, and the source still never ships raw (the same
+        // policy every source extension gets).
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("guide.tmpl.md"), "---\nparams: []\n---\n# Guide\n").unwrap();
+
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors = Processors {
+            md_tmpl: false,
+            ..Processors::default()
+        };
+        build(&o).unwrap();
+
+        assert!(!out.join("guide.md").exists(), "no render with md-tmpl off");
+        assert!(
+            !out.join("guide.tmpl.md").exists(),
+            "the source is still not copied raw"
+        );
+    }
+
+    #[cfg(all(feature = "tera", feature = "md-tmpl"))]
+    #[test]
+    fn build_tera_outranks_md_tmpl_on_shared_target() {
+        // `page.md.tera` and `page.tmpl.md` both claim `page.md`: strict builds fail,
+        // and under `--skip-duplicates` Tera (rank 0) beats md-tmpl (rank 1) — the
+        // order dev probes candidates in.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("page.md.tera"), "TERA").unwrap();
+        std::fs::write(src.join("page.tmpl.md"), "---\nparams: []\n---\nMD-TMPL\n").unwrap();
+
+        let roots = vec![src];
+        let err = build(&opts(&roots, &out)).unwrap_err();
+        assert!(
+            err.to_string().contains("--skip-duplicates"),
+            "strict by default; got: {err}"
+        );
+
+        build(&opts_skip(&roots, &out)).unwrap();
+        let page = std::fs::read_to_string(out.join("page.md")).unwrap();
+        assert!(
+            page.contains("TERA"),
+            "Tera outranks md-tmpl on a shared target; got: {page}"
         );
     }
 

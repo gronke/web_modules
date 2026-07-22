@@ -6,12 +6,15 @@
 //!
 //! Companion helpers, each re-exported at the crate root: `bundle` folds a CommonJS
 //! app and its `node_modules/` into one browser ES module, `compress` writes gzip
-//! `.gz` sidecars, and `templates` renders Tera templates.
+//! `.gz` sidecars, `templates` renders Tera templates, and `md_tmpl` renders typed
+//! markdown templates.
 
 #[cfg(feature = "bundle")]
 pub mod bundle;
 #[cfg(feature = "compress")]
 pub mod compress;
+#[cfg(feature = "md-tmpl")]
+pub mod md_tmpl;
 #[cfg(feature = "tera")]
 pub mod templates;
 

@@ -94,16 +94,14 @@ pub(crate) fn content_type(path: &str) -> String {
         .to_string()
 }
 
-/// Extensions of *source* files the toolchain compiles rather than serves: `.ts`/
-/// `.tsx`/`.mts` → `.js`, `.scss` → `.css`, `.tera` → its rendered target. Such
-/// originals are kept out of HTTP responses; the client only ever gets the compiled
-/// output. One list with the static-copy stage, so build and dev hide the same set.
-use crate::static_files::SOURCE_EXTENSIONS;
-
-/// Whether `path`'s extension marks it as a [source file](SOURCE_EXTENSIONS), matched
-/// **case-insensitively**. Case matters for safety: on a case-insensitive filesystem
-/// (macOS, Windows) a request for `app.SCSS` resolves to the on-disk `app.scss`, so a
-/// case-sensitive guard would hand back the raw source.
+/// Whether `path` names a *source* file the toolchain compiles rather than serves:
+/// `.ts`/`.tsx`/`.mts` → `.js`, `.scss` → `.css`, `.tera` / `.tmpl.md` → their rendered
+/// targets. Such originals are kept out of HTTP responses; the client only ever gets
+/// the compiled output. One rule with the static-copy stage
+/// ([`is_source_name`](crate::static_files::is_source_name), case-insensitive — on a
+/// case-insensitive filesystem a request for `app.SCSS` resolves to the on-disk
+/// `app.scss`, so a case-sensitive guard would hand back the raw source), so build and
+/// dev hide the same set.
 pub(crate) fn is_source_file(path: &str) -> bool {
     has_source_extension(Path::new(path))
 }
@@ -113,13 +111,9 @@ pub(crate) fn is_source_file(path: &str) -> bool {
 /// string didn't reveal (case folding, or a Windows trailing `.`/space) can't smuggle a
 /// source past the guard.
 pub(crate) fn has_source_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|ext| {
-            SOURCE_EXTENSIONS
-                .iter()
-                .any(|s| ext.eq_ignore_ascii_case(s))
-        })
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(crate::static_files::is_source_name)
 }
 
 #[cfg(test)]
@@ -173,10 +167,13 @@ mod tests {
         assert!(is_source_file("app.ts"));
         assert!(is_source_file("a/b.scss"));
         assert!(is_source_file("index.html.tera"));
+        assert!(is_source_file("guide.tmpl.md"));
+        assert!(is_source_file("docs/setup.tmpl.md"));
         assert!(!is_source_file("app.js"));
         assert!(!is_source_file("app.css"));
         assert!(!is_source_file("index.html"));
         assert!(!is_source_file("logo.svg"));
+        assert!(!is_source_file("notes.md"), "plain markdown serves");
     }
 
     #[test]
@@ -189,6 +186,8 @@ mod tests {
         assert!(is_source_file("x.TSX"));
         assert!(is_source_file("y.MTS"));
         assert!(is_source_file("page.html.TERA"));
+        assert!(is_source_file("guide.TMPL.MD"));
+        assert!(is_source_file("Guide.Tmpl.Md"));
     }
 
     #[test]
@@ -198,6 +197,8 @@ mod tests {
         assert!(has_source_extension(Path::new("/abs/web/app.scss")));
         assert!(has_source_extension(Path::new("/abs/web/app.SCSS")));
         assert!(has_source_extension(Path::new("main.TS")));
+        assert!(has_source_extension(Path::new("/abs/web/guide.tmpl.md")));
+        assert!(!has_source_extension(Path::new("/abs/web/notes.md")));
         assert!(!has_source_extension(Path::new("/abs/web/app.css")));
         assert!(!has_source_extension(Path::new("/abs/web/app.js")));
         // A `.gz` extension is not itself a source; the gz path is de-gzipped by the

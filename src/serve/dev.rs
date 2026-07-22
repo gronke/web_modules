@@ -5,15 +5,16 @@
 //! Sources are [`Mount`]s, each a URL prefix + a source dir; the default is one at
 //! `/`. Resolution is **dir-observation-order-dominant**: most-specific prefix first,
 //! then (among the dirs matching that prefix, **in the order given**) the first that
-//! can produce the requested *target* wins — render `foo.tera`, else serve a literal
-//! file, else compile `foo.{ts,tsx,mts}` → `foo.js` / `foo.scss` → `foo.css` — the
+//! can produce the requested *target* wins — render `foo.tera`, else render
+//! `foo.tmpl.md` (a `.md` target), else serve a literal file, else compile
+//! `foo.{ts,tsx,mts}` → `foo.js` / `foo.scss` → `foo.css` — the
 //! same precedence the build applies under `--skip-duplicates`. So overlaying several
 //! dirs at one prefix resolves "first dir wins", as a side-effect; contested targets
 //! are reported once at startup (silence with `skip_duplicates`). An optional embedded
 //! fallback (a baked `include_dir!` tree) supplies whatever the source dirs don't:
 //! vendored `web_modules/`, a baked `index.html` — and its baked `importmap.json` is
-//! the import map live `.tera` renders receive. The watcher watches every source dir
-//! identically and reloads on any change.
+//! the import map live `.tera` / `.tmpl.md` renders receive. The watcher watches every
+//! source dir identically and reloads on any change.
 //!
 //! Enable the `dev` feature.
 
@@ -51,8 +52,8 @@ type Cache = Mutex<HashMap<PathBuf, (SystemTime, Vec<u8>)>>;
 /// fields, or use the [`Dev`] builder.
 pub type DevConfig = Processors;
 
-/// Fluent builder for the dev server: compile TS/SCSS on the fly, render `*.tera`, watch
-/// the source roots and live-reload the browser.
+/// Fluent builder for the dev server: compile TS/SCSS on the fly, render `*.tera` /
+/// `*.tmpl.md`, watch the source roots and live-reload the browser.
 ///
 /// ```no_run
 /// use web_modules::Dev;
@@ -62,7 +63,7 @@ pub type DevConfig = Processors;
 /// # }
 /// ```
 ///
-/// Shared source inputs (`root`/`roots`, `typescript`/`scss`/`tera`, `decorators`,
+/// Shared source inputs (`root`/`roots`, `typescript`/`scss`/`tera`/`md_tmpl`, `decorators`,
 /// `scss_load_path(s)`) come from [`source_builder_methods!`](crate::builder_shared); the
 /// terminals are [`serve`](Self::serve) and [`router`](Self::router). For prefix-mounted
 /// composition (several dirs under different URL prefixes), use [`Frontend`](crate::Frontend).
@@ -102,9 +103,9 @@ struct DevState {
     cache: Arc<Cache>,
     /// Baked assets to fall back to when a request isn't a source file.
     fallback: Option<&'static Dir<'static>>,
-    /// The import map live `.tera` renders receive: the embedded fallback's baked
-    /// `importmap.json` (the contract artifact `build` emits), or empty without one.
-    #[cfg(feature = "tera")]
+    /// The import map live `.tera` / `.tmpl.md` renders receive: the embedded fallback's
+    /// baked `importmap.json` (the contract artifact `build` emits), or empty without one.
+    #[cfg(any(feature = "tera", feature = "md-tmpl"))]
     importmap: Arc<crate::importmap::Importmap>,
     /// Which processors to apply (and how), shared with the bin's `--<name>` toggles.
     config: Arc<DevConfig>,
@@ -171,7 +172,7 @@ pub(crate) fn build_router(
     let state = DevState {
         mounts: Arc::new(mounts),
         cache: Arc::new(Mutex::new(HashMap::new())),
-        #[cfg(feature = "tera")]
+        #[cfg(any(feature = "tera", feature = "md-tmpl"))]
         importmap: Arc::new(fallback_importmap(fallback)),
         fallback,
         config: Arc::new(config),
@@ -182,12 +183,12 @@ pub(crate) fn build_router(
         .layer(livereload)
 }
 
-/// The import map live `.tera` renders receive: the embedded fallback's baked
-/// `importmap.json` (the contract artifact `build` emits next to the vendored
+/// The import map live `.tera` / `.tmpl.md` renders receive: the embedded fallback's
+/// baked `importmap.json` (the contract artifact `build` emits next to the vendored
 /// `web_modules/` this fallback also serves), parsed once at router build. Without a
 /// fallback — or with an unparseable map, which is warned about — templates render
 /// with an empty map, like a build that vendors nothing.
-#[cfg(feature = "tera")]
+#[cfg(any(feature = "tera", feature = "md-tmpl"))]
 fn fallback_importmap(fallback: Option<&'static Dir<'static>>) -> crate::importmap::Importmap {
     let Some(file) = fallback.and_then(|dir| dir.get_file("importmap.json")) else {
         return crate::importmap::Importmap::new();
@@ -423,6 +424,32 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<Served>, String> 
                 }
             }
         }
+        // `/foo.md` ← render `foo.tmpl.md` from this dir, the live counterpart of the
+        // build's md-tmpl step — after the `.tera` probe (Tera outranks md-tmpl, as in
+        // the build's ranking) and before the literal branch. Deliberately **not**
+        // mtime-cached: the render depends on included partials the outer file's mtime
+        // cannot see, and md-tmpl re-reads includes from disk on each compile, so a
+        // fresh render always serves fresh includes. The `.tmpl.md` source itself
+        // stays hidden from raw serving (a compound source suffix).
+        #[cfg(feature = "md-tmpl")]
+        if state.config.md_tmpl {
+            if let Some(stem) = rel.strip_suffix(".md") {
+                if let Some(src) = source_candidate(mount, &format!("{stem}.tmpl.md"), mode) {
+                    // Never render a `_`-prefixed partial as a page, and never treat a
+                    // bare `.tmpl.md` (no stem) as one — matching the build's claim.
+                    let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if !name.starts_with('_') && name.len() > ".tmpl.md".len() {
+                        let body = crate::md_tmpl::render_page(&src, &state.importmap)
+                            .map_err(|e| e.to_string())?
+                            .into_bytes();
+                        return Ok(Some(Served::Bytes {
+                            body,
+                            content_type: content_type(&rel),
+                        }));
+                    }
+                }
+            }
+        }
         // Literal file in this dir — checked before the compilers, so a literal
         // `app.js` outranks a sibling `app.ts`, exactly as the build ranks the static
         // copy over a transform. Never serve a *source* raw (a `.scss`/`.ts` is
@@ -622,7 +649,7 @@ mod tests {
             mounts: Arc::new(mounts),
             cache: Arc::new(Mutex::new(HashMap::new())),
             fallback: None,
-            #[cfg(feature = "tera")]
+            #[cfg(any(feature = "tera", feature = "md-tmpl"))]
             importmap: Arc::new(crate::importmap::Importmap::new()),
             config: Arc::new(config),
         }
@@ -1088,5 +1115,184 @@ mod tests {
             "TERA",
             "dev renders the .tera over the literal same-target"
         );
+    }
+
+    /// A minimal `.tmpl.md` page declaring the `importmap` env (md-tmpl requires the
+    /// frontmatter block; `env:` opts the page into the map).
+    #[cfg(feature = "md-tmpl")]
+    const GUIDE_TMPL_MD: &str = "---\nenv:\n  - importmap = str\n---\n# Guide\n\n{{ importmap }}\n";
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn dev_renders_md_tmpl_to_target() {
+        // The live counterpart of the build pipeline's md-tmpl step: a request for the
+        // `.md` target renders the `.tmpl.md` (without a fallback the map is empty).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("guide.tmpl.md"), GUIDE_TMPL_MD).unwrap();
+        let state = state(vec![Mount::root(root)]);
+        let (bytes, ct) = resolve(&state, "guide.md").unwrap().unwrap().bytes();
+        let md = String::from_utf8(bytes).unwrap();
+        assert!(
+            md.contains("<script type=\"importmap\">"),
+            "rendered with the importmap env; got:\n{md}"
+        );
+        assert!(
+            ct.starts_with("text/markdown"),
+            "served as markdown; got {ct}"
+        );
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn dev_renders_md_tmpl_with_the_state_import_map() {
+        // The map carried by the state (in production: the embedded fallback's baked
+        // `importmap.json`) reaches every live `.tmpl.md` render.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("guide.tmpl.md"), GUIDE_TMPL_MD).unwrap();
+        let mut map = crate::importmap::Importmap::new();
+        map.insert("lit", "/web_modules/lit/index.js");
+        let mut state = state(vec![Mount::root(root)]);
+        state.importmap = Arc::new(map);
+        let (bytes, _) = resolve(&state, "guide.md").unwrap().unwrap().bytes();
+        let md = String::from_utf8(bytes).unwrap();
+        assert!(
+            md.contains("/web_modules/lit/index.js"),
+            "the state map is rendered; got:\n{md}"
+        );
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn dev_hides_md_tmpl_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("guide.tmpl.md"), GUIDE_TMPL_MD).unwrap();
+        let state = state(vec![Mount::root(root)]);
+        // The rendered target is reachable; the raw `.tmpl.md` source is not — under
+        // any casing (a case-insensitive FS would open the source through a variant).
+        assert!(resolve(&state, "guide.md").unwrap().is_some());
+        assert!(resolve(&state, "guide.tmpl.md").unwrap().is_none());
+        assert!(resolve(&state, "guide.TMPL.MD").unwrap().is_none());
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn dev_md_tmpl_wins_over_literal_same_target() {
+        // Lock-step with the build pipeline: a `.tmpl.md` overlays a same-named
+        // literal `.md` (dev probes the template first, build ranks it higher).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("guide.md"), "LITERAL").unwrap();
+        std::fs::write(
+            root.join("guide.tmpl.md"),
+            "---\nparams: []\n---\nMD-TMPL\n",
+        )
+        .unwrap();
+        let state = state(vec![Mount::root(root)]);
+        let (bytes, _) = resolve(&state, "guide.md").unwrap().unwrap().bytes();
+        assert!(
+            String::from_utf8(bytes).unwrap().contains("MD-TMPL"),
+            "dev renders the .tmpl.md over the literal same-target"
+        );
+    }
+
+    #[cfg(all(feature = "tera", feature = "md-tmpl"))]
+    #[test]
+    fn dev_tera_wins_over_md_tmpl_same_target() {
+        // Both engines can produce `guide.md`; dev probes `.tera` first, matching the
+        // build's rank order (Tera 0 < MdTmpl 1).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("guide.md.tera"), "TERA").unwrap();
+        std::fs::write(
+            root.join("guide.tmpl.md"),
+            "---\nparams: []\n---\nMD-TMPL\n",
+        )
+        .unwrap();
+        let state = state(vec![Mount::root(root)]);
+        let (bytes, _) = resolve(&state, "guide.md").unwrap().unwrap().bytes();
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "TERA",
+            "the .tera outranks the .tmpl.md on a shared target"
+        );
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn dev_serves_fresh_render_after_include_change() {
+        // The reason md-tmpl renders skip the mtime cache: the page's output depends
+        // on included partials the outer file's mtime cannot see. Editing only the
+        // partial must reach the next request.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("_header.tmpl.md"),
+            "---\nparams: []\n---\nVERSION-1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("page.tmpl.md"),
+            "---\nparams: []\n---\n> {% include [h](./_header.tmpl.md) %}\n",
+        )
+        .unwrap();
+        let state = state(vec![Mount::root(root.clone())]);
+        let (bytes, _) = resolve(&state, "page.md").unwrap().unwrap().bytes();
+        assert!(String::from_utf8(bytes).unwrap().contains("VERSION-1"));
+
+        std::fs::write(
+            root.join("_header.tmpl.md"),
+            "---\nparams: []\n---\nVERSION-2\n",
+        )
+        .unwrap();
+        let (bytes, _) = resolve(&state, "page.md").unwrap().unwrap().bytes();
+        assert!(
+            String::from_utf8(bytes).unwrap().contains("VERSION-2"),
+            "an edited include reaches the very next render"
+        );
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn dev_skips_md_tmpl_partial_target() {
+        // `_`-prefixed templates are include-only: their would-be target 404s, and the
+        // source stays hidden — matching the build tree.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("_header.tmpl.md"),
+            "---\nparams: []\n---\nPARTIAL\n",
+        )
+        .unwrap();
+        let state = state(vec![Mount::root(root)]);
+        assert!(resolve(&state, "_header.md").unwrap().is_none());
+        assert!(resolve(&state, "_header.tmpl.md").unwrap().is_none());
+    }
+
+    #[cfg(feature = "md-tmpl")]
+    #[test]
+    fn dev_respects_disabled_md_tmpl_processor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("guide.tmpl.md"), GUIDE_TMPL_MD).unwrap();
+        // md-tmpl disabled ⇒ no on-the-fly render, and the `.tmpl.md` source stays
+        // hidden, so `/guide.md` 404s.
+        let config = DevConfig {
+            md_tmpl: false,
+            ..DevConfig::default()
+        };
+        let state = state_with(vec![Mount::root(root)], config);
+        assert!(resolve(&state, "guide.md").unwrap().is_none());
+        assert!(resolve(&state, "guide.tmpl.md").unwrap().is_none());
     }
 }

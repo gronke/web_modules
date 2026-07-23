@@ -83,11 +83,43 @@ pub fn bundle(opts: &BundleOptions<'_>) -> Result<()> {
 }
 
 async fn bundle_async(opts: &BundleOptions<'_>) -> Result<()> {
+    let cwd = opts
+        .cwd
+        .canonicalize()
+        .map_err(|e| Error::Bundle(format!("cwd {}: {e}", opts.cwd.display())))?;
+    // Containment: every module rolldown resolves must live under `cwd` (the app's sources and
+    // its node_modules/). The source tree may be untrusted: a `../..` import chain or a
+    // symlinked package would otherwise fold arbitrary local files into the published bundle.
+    // A specifier that does not canonicalize (a virtual/builtin module) is left to rolldown.
+    let cwd_for_resolve = Arc::new(cwd);
+    let is_external = rolldown::IsExternal::Fn(Some(Arc::new(
+        move |specifier: &str, _importer: Option<&str>, resolved: bool| {
+            let cwd = Arc::clone(&cwd_for_resolve);
+            let specifier = specifier.to_string();
+            Box::pin(async move {
+                if resolved {
+                    if let Ok(real) = Path::new(&specifier).canonicalize() {
+                        if !real.starts_with(cwd.as_path()) {
+                            // The closure's signature is `anyhow::Result` (rolldown's
+                            // API); the crate's own Error converts into it.
+                            return Err(Error::Bundle(format!(
+                                "module {specifier} resolves outside the bundle cwd {}",
+                                cwd.display()
+                            ))
+                            .into());
+                        }
+                    }
+                }
+                Ok(false)
+            })
+        },
+    )));
     let mut bundler = rolldown::Bundler::new(rolldown::BundlerOptions {
         input: Some(vec![opts.entry.to_string_lossy().to_string().into()]),
         cwd: Some(opts.cwd.to_path_buf()),
         format: Some(rolldown::OutputFormat::Esm),
         dir: Some(opts.out_dir.to_string_lossy().to_string()),
+        external: Some(is_external),
         minify: Some(opts.production.into()),
         // Inline `process.env.NODE_ENV` so CJS deps (React) take their production path; without it
         // the browser would hit a bare `process` reference.
@@ -269,13 +301,31 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
                 // reached; anything else that resolved is part of the graph.
                 if resolved {
                     let path = Path::new(&specifier);
-                    return Ok(external_paths.iter().any(|(external, is_prefix)| {
+                    if external_paths.iter().any(|(external, is_prefix)| {
                         if *is_prefix {
                             path.starts_with(external)
                         } else {
                             path == external
                         }
-                    }));
+                    }) {
+                        return Ok(true);
+                    }
+                    // Containment: a module outside root is never bundled. The source tree
+                    // may be untrusted — a `../..` chain or a symlinked node_modules entry
+                    // must not fold local files into the published output. A specifier that
+                    // does not canonicalize (a virtual module) is left to rolldown.
+                    if let Ok(real) = path.canonicalize() {
+                        if !real.starts_with(root.as_path()) {
+                            // The closure's signature is `anyhow::Result` (rolldown's
+                            // API); the crate's own Error converts into it.
+                            return Err(Error::Bundle(format!(
+                                "module {specifier} resolves outside the bundle root {}",
+                                root.display()
+                            ))
+                            .into());
+                        }
+                    }
+                    return Ok(false);
                 }
                 // Relative imports resolve within the bundle (the resolved
                 // pass above re-checks their final location).

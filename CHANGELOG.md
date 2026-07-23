@@ -7,6 +7,19 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+### Security
+
+- security(cli): path fields in a `package.json` `web_modules` block (`roots`, `out`, `template`, `scss.loadPaths`) are confined to the project directory — previously an untrusted repository could serve arbitrary directories via `web-modules dev`, read any file into the output via `template`, and plant a new tree at an arbitrary location via `out`. Every entry must now be purely relative (no root, prefix, or `..` component), and an existing path must canonically resolve inside the project, so a symlink in the tree cannot redirect it outside. CLI flags and environment variables are operator-controlled and unaffected
+- security(bundle): module resolution is contained to the bundle root (`bundle_split`) / `cwd` (`bundle`) — a `../..` import chain or a symlinked package in `node_modules` that escapes the tree now fails the build instead of folding arbitrary local files into the published bundle. A workspace `node_modules/<pkg>` link pointing outside the project must be brought inside (or the tree bundled from a common root) — the build names the module it refused
+- security(icons): source PNGs decode with strict dimension limits (4096×4096) on top of the `image` crate's 512 MiB allocation cap — a crafted icon source declaring enormous dimensions is refused at the header instead of exhausting memory
+- security(build): paths and messages emitted into `cargo:` directives are kept free of control characters — a walked filename containing a line break could previously inject arbitrary directives (`cargo:rustc-link-lib=…`) into a build script's output. Such paths are skipped with a plain stderr note; warnings take the stderr path
+- security(dev): a compile failure answers 500 with a generic body — the detail, which can embed absolute local paths (the SCSS sandbox's refusal notes name them), goes to the developer's console only, so a client that can reach the dev server (e.g. a DNS-rebinding page) learns nothing about the local layout
+- security(build): the oxc transform runtime is vendored at an exact pinned version (`0.138.0`, tracking the oxc toolchain) instead of a floating `^0.137` range that resolved the newest published package at build time — a decorator in a source file no longer picks up whatever the registry newest-serves
+
+### Changed
+
+- docs(security): SECURITY.md describes the current posture — the SCSS import sandbox (the stale "processors are not sandboxed" caveat is gone), CLI config containment, bundle containment, the exact-pinned decorator runtime, and the trust anchors that remain (lockfile integrity is self-referential, vendored packages are not integrity-pinned, `npm://` resolution ascends ancestors, `Mount::from_dir` is a config-trust boundary, no `Host` validation on the dev server)
+
 ### Fixed
 
 - fix(typescript): an `_`-prefixed `.ts`/`.tsx`/`.mts` source compiles like any other module — the underscore-partial convention belongs to SCSS, where `_x.scss` is an import-only fragment; ES modules have no such concept, and skipping `_Base.ts` stranded every `import './_Base.js'` in the emitted tree (surfacing only at bundle time, as an unresolved import). `.d.ts` declarations remain no-emit

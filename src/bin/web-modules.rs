@@ -322,9 +322,68 @@ fn load_pkg_config_at(dir: &Path) -> Res<(PkgConfig, Option<PathBuf>)> {
     let json: Value =
         serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", path.display()))?;
     match json.get("web_modules") {
-        Some(block) => Ok((parse_block(block)?, Some(path))),
+        Some(block) => {
+            let cfg = parse_block(block)?;
+            contain_block_paths(dir, &cfg)?;
+            Ok((cfg, Some(path)))
+        }
         None => Ok((PkgConfig::default(), Some(path))),
     }
+}
+
+/// Confine the path-bearing fields of a `web_modules` block to the project directory.
+///
+/// The block is *content*: the CLI may run on an untrusted tree, and a manifest that names
+/// arbitrary paths would steer `dev`/`build` into serving, reading, or writing outside the
+/// project. Every path field (`roots`, `out`, `template`, `scss.loadPaths`) must therefore be
+/// purely relative (no root, prefix, or `..` component), and an entry that already exists on
+/// disk must canonically resolve inside `dir`, so a symlink in the tree cannot redirect it
+/// outside. Serving and building keep their own containment relative to each root; this guard
+/// keeps the untrusted manifest from choosing those roots. CLI flags and environment variables
+/// are operator-controlled and stay unchecked.
+fn contain_block_paths(dir: &Path, cfg: &PkgConfig) -> Res<()> {
+    let base = dir.canonicalize()?;
+    let check = |key: &str, path: &Path| -> Res<()> {
+        if path.as_os_str().is_empty()
+            || !path.components().all(|c| {
+                matches!(
+                    c,
+                    std::path::Component::Normal(_) | std::path::Component::CurDir
+                )
+            })
+        {
+            return Err(format!(
+                "package.json: {key} entry {path:?} must be a relative path inside the project"
+            )
+            .into());
+        }
+        let joined = base.join(path);
+        if joined.symlink_metadata().is_ok() {
+            let real = joined
+                .canonicalize()
+                .map_err(|e| format!("package.json: {key} entry {path:?}: {e}"))?;
+            if !real.starts_with(&base) {
+                return Err(format!(
+                    "package.json: {key} entry {path:?} resolves outside the project directory"
+                )
+                .into());
+            }
+        }
+        Ok(())
+    };
+    for path in &cfg.roots {
+        check("web_modules.roots", path)?;
+    }
+    for path in &cfg.scss_load_paths {
+        check("web_modules.scss.loadPaths", path)?;
+    }
+    if let Some(template) = &cfg.template {
+        check("web_modules.template", template)?;
+    }
+    if let Some(out) = &cfg.out {
+        check("web_modules.out", out)?;
+    }
+    Ok(())
 }
 
 /// Hand-parse the `web_modules` object (matching `vendor.rs`'s `serde_json::Value` style — the
@@ -859,6 +918,60 @@ mod tests {
         let (cfg, path) = load_pkg_config_at(dir.path()).unwrap();
         assert!(path.is_some());
         assert!(cfg.roots.is_empty() && cfg.out.is_none() && cfg.scss.is_none());
+    }
+
+    // ---- block path containment (the manifest is untrusted content) ----
+
+    #[test]
+    fn block_paths_must_be_relative() {
+        // Absolute and parent-climbing paths are refused on every path-bearing key, existing
+        // or not.
+        for bad in [
+            r#"{"web_modules":{"roots":["/etc"]}}"#,
+            r#"{"web_modules":{"roots":["../sibling"]}}"#,
+            r#"{"web_modules":{"out":"/tmp/x"}}"#,
+            r#"{"web_modules":{"out":"../../x"}}"#,
+            r#"{"web_modules":{"template":"/etc/passwd"}}"#,
+            r#"{"web_modules":{"template":"../shell.tera"}}"#,
+            r#"{"web_modules":{"scss":{"loadPaths":["/home"]}}}"#,
+            r#"{"web_modules":{"scss":{"loadPaths":[".."]}}}"#,
+            r#"{"web_modules":{"roots":[""]}}"#,
+        ] {
+            let dir = write_pkg(bad);
+            let err = load_pkg_config_at(dir.path()).unwrap_err();
+            assert!(err.to_string().contains("web_modules."), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn block_paths_may_point_anywhere_inside_the_project() {
+        let dir = write_pkg(
+            r#"{"web_modules":{"roots":["web","./shared"],"out":"dist",
+                "template":"shell.tera","scss":{"loadPaths":["styles"]}}}"#,
+        );
+        // Relative paths that do not exist yet (the output dir, a to-be-created load path)
+        // are fine; so are existing ones.
+        std::fs::create_dir_all(dir.path().join("web")).unwrap();
+        let (cfg, _) = load_pkg_config_at(dir.path()).unwrap();
+        assert_eq!(cfg.roots.len(), 2);
+        assert_eq!(cfg.out, Some(PathBuf::from("dist")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn block_paths_may_not_escape_through_a_symlink() {
+        use std::os::unix::fs::symlink;
+        let dir = write_pkg(r#"{"web_modules":{"roots":["web"],"out":"dist"}}"#);
+        // `web` and `dist` are links whose targets live outside the project: the lexical
+        // check passes them, so containment must be decided on the resolved path.
+        let outside = tempfile::tempdir().unwrap();
+        symlink(outside.path(), dir.path().join("web")).unwrap();
+        symlink(outside.path(), dir.path().join("dist")).unwrap();
+        let err = load_pkg_config_at(dir.path()).unwrap_err();
+        assert!(
+            err.to_string().contains("resolves outside the project"),
+            "{err}"
+        );
     }
 
     // ---- resolution layering ----

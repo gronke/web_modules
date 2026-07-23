@@ -415,10 +415,9 @@ fn parse_github_dep(value: &str) -> Option<(String, String)> {
     };
     let path = if let Some(rest) = locator.strip_prefix("github:") {
         rest
-    } else if let Some(idx) = locator.find("github.com") {
-        locator[idx + "github.com".len()..].trim_start_matches([':', '/'])
     } else {
-        return None;
+        let idx = locator.find("github.com")?;
+        locator[idx + "github.com".len()..].trim_start_matches([':', '/'])
     };
     let path = path.trim_end_matches(".git").trim_matches('/');
     let (owner, rest) = path.split_once('/')?;
@@ -500,11 +499,10 @@ fn vendor_inner(
         // re-vendors — when this directory is deleted or its contents change.
         // Without it, wiping a vendored asset (e.g. `node_modules/bootstrap`)
         // leaves a "successful" build whose dev server then fails at runtime on
-        // the now-missing file. Gated on a build-script context (`OUT_DIR` is
-        // set) so plain library / CLI callers don't emit stray cargo directives.
-        if std::env::var_os("OUT_DIR").is_some() {
-            println!("cargo:rerun-if-changed={}", dest_dir.display());
-        }
+        // the now-missing file. The shared helper is a no-op outside a build-script
+        // context and refuses paths that could smuggle a line break into the
+        // directive stream.
+        crate::static_files::cargo_rerun_if_changed(&dest_dir);
 
         let flat = spec.dir.replace('/', "_");
         let marker = vendor_dir.join(format!(".{flat}.version"));

@@ -161,14 +161,12 @@ impl Output {
 /// sidecar reservation guards, so the two can never disagree.
 const GZIP_EXTS: [&str; 5] = ["js", "css", "html", "json", "svg"];
 
-/// Emit a `cargo:rerun-if-changed` line — but only when running as a build script, which cargo
-/// signals by setting `OUT_DIR`. Outside a build script (e.g. the `web-modules build` subcommand
-/// reusing this pipeline) the directive is meaningless and would just spew one line per source
-/// file to the CLI's stdout, so it's suppressed.
+/// Emit a `cargo:rerun-if-changed` line for a walked source path — the shared
+/// [`cargo_rerun_if_changed`](crate::static_files::cargo_rerun_if_changed), which is a no-op
+/// outside a build script and refuses paths that could smuggle a line break into the
+/// directive stream.
 fn rerun_if_changed(path: &Path) {
-    if std::env::var_os("OUT_DIR").is_some() {
-        println!("cargo:rerun-if-changed={}", path.display());
-    }
+    crate::static_files::cargo_rerun_if_changed(path);
 }
 
 /// Vendor + transform + compile + render into `out`, ready to embed and serve.
@@ -682,8 +680,10 @@ fn emit_winner(
     Ok(())
 }
 
-/// npm `@oxc-project/runtime` range; tracks the `oxc_*` crate version.
-const OXC_RUNTIME_RANGE: &str = "^0.137";
+/// The runtime version to vendor, pinned exactly and tracking the oxc toolchain in
+/// `Cargo.toml` (bump the two together). An exact pin keeps a decorator in an untrusted
+/// source from resolving a floating, newest-published package at build time.
+const OXC_RUNTIME_VERSION: &str = "0.138.0";
 
 /// Vendor the oxc transform runtime (`@oxc-project/runtime`) so the helper imports the
 /// transform injected — e.g. the legacy-decorator `@oxc-project/runtime/helpers/decorate`
@@ -693,7 +693,7 @@ pub fn vendor_transform_runtime(out: &Path, mount: &str) -> Result<crate::import
     vendor::vendor(
         &out.join("web_modules"),
         mount,
-        &[PackageSpec::npm(OXC_RUNTIME_PACKAGE, OXC_RUNTIME_RANGE)],
+        &[PackageSpec::npm(OXC_RUNTIME_PACKAGE, OXC_RUNTIME_VERSION)],
     )
 }
 

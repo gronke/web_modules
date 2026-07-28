@@ -339,3 +339,17 @@ jobs:
           docker run --rm --network=none --security-opt=no-new-privileges \
             --user "$(id -u):$(id -g)" --volume "$PWD:/repo:ro" --workdir /repo \
             rhysd/actionlint:latest -color
+
+  # PR gate: CHANGELOG.md and Cargo.toml stay coherent — [Unreleased] entries demand a version
+  # bump over the last release tag, and a **Breaking marker demands the right bump size.
+  changelog-check:
+    name: changelog coherence
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the SemVer baseline derives from the tags
+      - uses: gronke/rust-ci/.github/actions/changelog@v1
+        with:
+          mode: check
+          package: web_modules

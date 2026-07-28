@@ -1,0 +1,30 @@
+# Cut a release branch (gronke/rust-ci release flow). Dispatch with no inputs: the version
+# comes from Cargo.toml. cut-release rewrites CHANGELOG.md's [Unreleased] section into the
+# released heading on a release/v<version> branch, opens the merge-back PR, and dispatches
+# the release pipeline for the first candidate run.
+#
+# Requires: Settings → Actions → General → "Allow GitHub Actions to create and approve
+# pull requests".
+name: cut release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write # push the release branch
+  pull-requests: write # open the merge-back PR
+  actions: write # dispatch release.yml for the first candidate run
+
+jobs:
+  cut:
+    name: cut release branch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the merge-back needs history; the changelog coherence reads the tags
+
+      - uses: gronke/rust-ci/.github/actions/cut-release@v1
+        with:
+          package: web_modules
+          pipeline-workflow: release.yml

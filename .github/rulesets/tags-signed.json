@@ -1,0 +1,15 @@
+{
+  "name": "tags-signed",
+  "target": "tag",
+  "enforcement": "active",
+  "conditions": {
+    "ref_name": {
+      "include": ["~ALL"],
+      "exclude": ["refs/tags/v*-rc*", "refs/tags/v[0-9]", "refs/tags/v[0-9][0-9]"]
+    }
+  },
+  "rules": [
+    { "type": "required_signatures" }
+  ],
+  "bypass_actors": []
+}

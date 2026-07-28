@@ -1666,9 +1666,9 @@ dependencies = [
 
 [[package]]
 name = "npm-utils"
-version = "0.6.1"
+version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "484cf50294f6b5f6ad2cfe801c6668b614a2cbfaad01cb86f5b4e8fd6df7f2bb"
+checksum = "41ad1af8efe2b568c2c33dca11d13eaaf2b283149756a7ae908ab1742dc99132"
 dependencies = [
  "base64",
  "clap",
@@ -4152,7 +4152,7 @@ dependencies = [
 
 [[package]]
 name = "web_modules"
-version = "0.5.1"
+version = "0.6.0"
 dependencies = [
  "axum",
  "clap",

@@ -8,7 +8,8 @@
 #              binaries + SHA256SUMS, flip the draft live, advance the moving major (v0).
 #
 # The signing key never enters CI: the pipeline only pushes the unsigned rc marker and the
-# unsigned moving major, both excluded from the tag-signing ruleset (.github/rulesets/).
+# unsigned moving major, both excluded from the tag-signing ruleset (import the templates
+# from gronke/rust-ci's .github/rulesets/).
 name: release
 
 on:
@@ -72,59 +73,22 @@ jobs:
     needs: gate
     if: ${{ github.ref_type == 'branch' && startsWith(github.ref_name, 'release/v') }}
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ needs.gate.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
-      # CHANGELOG's "## [X.Y.Z]" section → release-notes.md; the same text becomes the draft
-      # body, the marker tag message, and (via the runbook's -F command) the signed tag message.
-      - name: Render release notes from CHANGELOG.md
-        uses: gronke/rust-ci/.github/actions/changelog@v1
-        with:
-          mode: notes
-          version: ${{ env.VERSION }}
-          title: v${{ env.VERSION }}
-
-      - name: Create or refresh the draft pre-release
+      # CHANGELOG section → notes → draft pre-release → rc marker, one step; the
+      # runbook lands in the step summary. Binaries build on the final tag, not
+      # per candidate — six native runners per review iteration buy nothing.
+      - uses: gronke/rust-ci/.github/actions/draft-release@v1
         id: draft
-        run: |
-          set -euo pipefail
-          notes=(--notes-file release-notes.md)
-          [ -s release-notes.md ] || notes=(--notes "Release v${VERSION}.")
-          if gh release view "v${VERSION}" >/dev/null 2>&1; then
-            gh release edit "v${VERSION}" --draft "${notes[@]}"
-          else
-            gh release create "v${VERSION}" --draft --prerelease --title "v${VERSION}" "${notes[@]}"
-          fi
-          echo "url=$(gh release view "v${VERSION}" --json url --jq .url)" >>"$GITHUB_OUTPUT"
-
-      # The unsigned candidate marker: it freezes the tree the release manager reviews. The
-      # tag-signing ruleset excludes v*-rc*, so the workflow token may push it.
-      - name: Push the candidate marker tag
-        id: marker
-        run: |
-          set -euo pipefail
-          n=1
-          while gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VERSION}-rc${n}" >/dev/null 2>&1; do
-            n=$((n + 1))
-          done
-          marker="v${VERSION}-rc${n}"
-          git config user.name  'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git tag -a -F release-notes.md "$marker" "$GITHUB_SHA"
-          git push origin "refs/tags/$marker" || {
-            echo "::error::pushing $marker was rejected — exclude refs/tags/v*-rc* from tag rules (see .github/rulesets/)"
-            exit 1
-          }
-          echo "tag=$marker" >>"$GITHUB_OUTPUT"
-
-      - name: Release guidance (the accept/reject runbook, in the step summary)
-        uses: gronke/rust-ci/.github/actions/release-guidance@v1
         with:
-          version: ${{ env.VERSION }}
-          marker-tag: ${{ steps.marker.outputs.tag }}
+          version: ${{ needs.gate.outputs.version }}
+          package: web_modules
+
+      - uses: gronke/rust-ci/.github/actions/release-guidance@v1
+        with:
+          version: ${{ needs.gate.outputs.version }}
+          marker-tag: ${{ steps.draft.outputs.marker }}
           commit: ${{ github.sha }}
           draft-url: ${{ steps.draft.outputs.url }}
 
@@ -215,81 +179,13 @@ jobs:
     needs: [gate, checksums]
     if: ${{ github.ref_type == 'tag' && contains(github.ref_name, '.') }}
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ needs.gate.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
-      # Seal: the signed tag must carry the same TREE as the newest candidate marker — the
-      # exact content the release manager reviewed. Tree, not commit: merging the merge-back
-      # PR may rewrite the commit while preserving the tree, and the rebased default-branch
-      # tip is a valid tag target.
-      - name: Seal the tag against the newest candidate marker
-        run: |
-          set -euo pipefail
-          n=1
-          while gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VERSION}-rc$((n + 1))" >/dev/null 2>&1; do
-            n=$((n + 1))
-          done
-          marker="v${VERSION}-rc${n}"
-          gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${marker}" >/dev/null 2>&1 || {
-            echo "::error::no candidate marker ${marker} — cut a release branch first (cut.yml)"
-            exit 1
-          }
-          obj=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${marker}" --jq .object.sha)
-          marker_commit=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${obj}" --jq .object.sha 2>/dev/null \
-            || printf '%s' "$obj")
-          tag_tree=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq .commit.tree.sha)
-          marker_tree=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${marker_commit}" --jq .commit.tree.sha)
-          if [ "$tag_tree" != "$marker_tree" ]; then
-            echo "::error::v${VERSION} tags tree ${tag_tree}, but ${marker} sealed ${marker_tree} — tag the reviewed commit (or a rebase of it)"
-            exit 1
-          fi
-          echo "sealed: v${VERSION} matches ${marker} (tree ${tag_tree})"
-
-      - name: Flip the draft live
-        run: |
-          set -euo pipefail
-          prerelease=false
-          case "$VERSION" in *-*) prerelease=true ;; esac
-          gh release edit "v${VERSION}" --draft=false --prerelease="$prerelease"
-
-  # (Re)create the major tag (e.g. v0) at the highest stable release in its line, so
-  # `uses: gronke/web_modules@v0` tracks the newest 0.x. `v0` is intentionally OUTSIDE the
-  # tag-signing ruleset (create/delete allowed, unsigned), so the default GITHUB_TOKEN can
-  # manage it; there is no GitHub *Release* named `v0`. Skipped for prereleases.
-  major-tag:
-    name: recreate major tag
-    needs: publish
-    runs-on: ubuntu-latest
-    if: ${{ !contains(github.ref_name, '-') }}
-    steps:
-      - uses: actions/checkout@v7
+      # The binaries and SHA256SUMS are attached before this runs (needs:). Tree
+      # seal against the reviewed marker, the draft flip, and the moving v0
+      # advancing to the highest stable 0.x — one step.
+      - uses: gronke/rust-ci/.github/actions/publish-release@v1
         with:
-          fetch-depth: 0 # need full history to verify the release commit is on the default branch
-      - name: Recreate the major tag at the highest stable release
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-        run: |
-          set -euo pipefail
-          major="${GITHUB_REF_NAME%%.*}"            # v0.3.1 -> v0
-          [ "$major" = "$GITHUB_REF_NAME" ] && { echo "not vMAJOR.MINOR.PATCH; nothing to do"; exit 0; }
-
-          # Highest STABLE major.minor.patch tag in this line (drops prereleases and the bare major).
-          git fetch --tags --force origin
-          highest=$(git tag --list "${major}.*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1) || true
-          test -n "$highest" || { echo "::error::no stable ${major}.x tag found"; exit 1; }
-          target=$(git rev-list -n1 "$highest")
-
-          # Defense-in-depth: only ever point the major tag at a commit on the default branch.
-          git fetch --no-tags origin "$DEFAULT_BRANCH"
-          git merge-base --is-ancestor "$target" FETCH_HEAD \
-            || { echo "::error::$highest ($target) is not on $DEFAULT_BRANCH; refusing"; exit 1; }
-
-          git config user.name  'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git push origin ":refs/tags/$major" || true   # delete the old tag (ignore if absent)
-          git tag -fa "$major" -m "$major -> $highest" "$target"
-          git push origin "refs/tags/$major"
-          echo "recreated $major -> $highest ($target)"
+          version: ${{ needs.gate.outputs.version }}
+          moving-major: "true"

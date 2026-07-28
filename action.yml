@@ -2,7 +2,9 @@
 # web_modules/, transform TypeScript, compile SCSS, copy static files, and render index.html with the
 # import map injected. No Node, no bundler.
 #
-# Build-only by design. To publish, compose it in your own job with the official actions — e.g. for
+# Builds by default; `build: "false"` turns the action into a pure installer — the verified binary
+# lands on PATH for later steps that drive `web-modules` themselves (a repo build script, `vendor`,
+# `npm audit`). To publish, compose it in your own job with the official actions — e.g. for
 # GitHub Pages (set the job's permissions + environment):
 #
 #   jobs:
@@ -90,6 +92,13 @@ inputs:
       replace the presets, e.g. ".env .git/ *.php". Empty leaves the presets in effect.
     required: false
     default: ""
+  build:
+    description: >-
+      Run `web-modules build` after installing the binary (true/false). With "false" the action is a
+      pure installer: the verified binary is on PATH for later steps and every build input above is
+      ignored.
+    required: false
+    default: "true"
   version:
     description: >-
       Which released `web-modules` to download (a version like 0.3 / 0.3.1, a tag like v0.3.1, or
@@ -109,7 +118,7 @@ inputs:
 
 outputs:
   dist:
-    description: Path to the built dist directory (echoes `out`).
+    description: Path to the built dist directory (echoes `out`; meaningful only when a build ran).
     value: ${{ inputs.out }}
 
 runs:
@@ -244,6 +253,7 @@ runs:
     - name: web-modules build
       shell: bash
       env:
+        INPUT_BUILD: ${{ inputs.build }}
         INPUT_SRC: ${{ inputs.src }}
         INPUT_OUT: ${{ inputs.out }}
         INPUT_MOUNT: ${{ inputs.mount }}
@@ -256,6 +266,13 @@ runs:
         INPUT_REJECT_PRESET: ${{ inputs.reject-preset }}
         INPUT_REJECT_LIST: ${{ inputs.reject-list }}
       run: |
+        # Installer mode: put the verified binary on PATH for later steps and stop — the build
+        # inputs are ignored. Same boolean spellings as `minify`/`gzip`.
+        case "$INPUT_BUILD" in
+          0 | false | no | off)
+            echo "web-modules build skipped (build: $INPUT_BUILD) — binary is on PATH for later steps"
+            exit 0 ;;
+        esac
         # Fail clearly on a missing source dir — almost always a forgotten actions/checkout or a
         # wrong `src` — rather than surfacing a lower-level error from the binary.
         if [ ! -d "$INPUT_SRC" ]; then

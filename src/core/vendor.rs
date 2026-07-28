@@ -415,10 +415,9 @@ fn parse_github_dep(value: &str) -> Option<(String, String)> {
     };
     let path = if let Some(rest) = locator.strip_prefix("github:") {
         rest
-    } else if let Some(idx) = locator.find("github.com") {
-        locator[idx + "github.com".len()..].trim_start_matches([':', '/'])
     } else {
-        return None;
+        let idx = locator.find("github.com")?;
+        locator[idx + "github.com".len()..].trim_start_matches([':', '/'])
     };
     let path = path.trim_end_matches(".git").trim_matches('/');
     let (owner, rest) = path.split_once('/')?;

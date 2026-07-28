@@ -307,6 +307,23 @@ jobs:
           fi
           echo "guard correctly rejected the old binary (step outcome: $OUTCOME)"
 
+  action-install-only:
+    name: action installer mode
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run the action with build disabled
+        uses: ./
+        with:
+          build: "false"
+      - name: Assert the binary is on PATH and nothing was built
+        run: |
+          web-modules --version
+          if [ -e dist ]; then
+            echo "::error::installer mode produced a dist/ directory"
+            exit 1
+          fi
+
   # Lint the workflow files with the official actionlint image (which bundles shellcheck for the
   # `run:` blocks). actionlint targets *workflows*; the composite `action.yml` is a different schema
   # it can't parse, so that file's embedded bash is reviewed by hand instead. Tracks `:latest`

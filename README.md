@@ -121,7 +121,7 @@ Both layer over the lower-level `build(&BuildOptions { … })` / `dev::serve_wit
 
 ## GitHub Actions
 
-A composite action builds a deployable `dist/` (vendor + transform + render, with the import map injected) — **no Node on the runner**. It downloads a prebuilt `web-modules` binary for the runner's OS/arch (Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64/arm64), or compiles from this action's source with `from-source: true`. Pin `@v0` to track the latest 0.x, or an exact `@v0.3.1` — which fetches the matching binary (reproducible); the `version` input overrides this. The action is **build-only**; compose it with the official actions to publish.
+A composite action builds a deployable `dist/` (vendor + transform + render, with the import map injected) — **no Node on the runner**. It downloads a prebuilt `web-modules` binary for the runner's OS/arch (Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64/arm64), or compiles from this action's source with `from-source: true`. Pin `@v0` to track the latest 0.x, or an exact `@v0.3.1` — which fetches the matching binary (reproducible); the `version` input overrides this. With `build: "false"` the action installs the verified binary onto `PATH` and stops — for jobs whose own scripts drive `web-modules` (`build`, `vendor`, `npm audit`). Publishing stays composed with the official actions.
 
 **Build a dist artifact:**
 
@@ -160,6 +160,20 @@ jobs:
         with: { path: dist }
       - id: deploy
         uses: actions/deploy-pages@v5
+```
+
+**Install the binary only** — when the repo's own scripts run `web-modules` themselves:
+
+```yaml
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: gronke/web_modules@v0
+        with: { build: "false" }        # verified binary on PATH, no build
+      - run: scripts/frontend-build.sh  # your script calls `web-modules build …`
+      - run: web-modules npm audit web
 ```
 
 Enable Pages once under *Settings → Pages → Source: GitHub Actions*. A **project** page is served under `/<repo>/`, so pass `mount: /<repo>/web_modules` and keep entry scripts **relative** (`./app.js`); a user/org `*.github.io` page serves at the root (default `mount: /web_modules`). This repo dogfoods the action — [`examples/gh-pages/`](examples/gh-pages) is built and deployed to Pages by [`.github/workflows/pages.yml`](.github/workflows/pages.yml). Run `web-modules build --help` for every flag.

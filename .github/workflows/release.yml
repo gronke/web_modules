@@ -1,51 +1,295 @@
-name: release readiness
+# The release pipeline (gronke/rust-ci release flow). Two paths through one workflow:
+#
+#   candidate  push to release/v<version> (created by cut.yml) → gate → draft: render the
+#              CHANGELOG section into a draft pre-release + push an unsigned v<version>-rcN
+#              marker tag + print the release manager's accept/reject runbook.
+#   final      the human-signed v<version> tag (the accept command from the runbook) → gate →
+#              binaries → checksums → publish: seal against the newest marker, attach the six
+#              binaries + SHA256SUMS, flip the draft live, advance the moving major (v0).
+#
+# The signing key never enters CI: the pipeline only pushes the unsigned rc marker and the
+# unsigned moving major, both excluded from the tag-signing ruleset (.github/rulesets/).
+name: release
 
-# Runs when a signed release tag (v*) is pushed — just before a `cargo publish`. Confirms the
-# crate packages + publishes cleanly (dry-run, no upload) and verifies the declared MSRV. Kept out of
-# the per-PR CI: the verify build is heavy (it is what used to exhaust the runner's disk there)
-# and only matters at release time. Isolated runner → no shared cache, no zstd needed.
 on:
   push:
-    tags:
-      - "v*"
+    branches: ["release/v**"]
+    tags: ["v*"]
+  # cut-release dispatches the first candidate run explicitly — its workflow-token push
+  # fires no events.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
 
-# Least-privilege: the dry-run only reads the repo (package + publish --dry-run to crates.io); no write.
 permissions:
-  contents: read
+  contents: write # branch/tag pushes, gh release create/edit/upload
 
 jobs:
-  publish-dry-run:
-    name: publish dry-run · MSRV
+  # Every path starts here: derive the expected version from the ref, require a verified
+  # signature on the final tag, and assert the manifest agrees (plus a publish dry-run and
+  # the crates.io not-already-published probe via check-release-readiness).
+  gate:
+    name: gate
     runs-on: ubuntu-latest
-    # Skip a bare-major tag push (e.g. a manual `v0`); only real X.Y.Z tags warrant the dry-run.
-    if: ${{ contains(github.ref_name, '.') }}
+    # A bare-major tag (v0) is CI-managed via GITHUB_TOKEN and fires no events; guard anyway.
+    if: ${{ github.ref_type != 'tag' || contains(github.ref_name, '.') }}
+    outputs:
+      version: ${{ steps.expect.outputs.version }}
     steps:
       - uses: actions/checkout@v7
 
-      # The dry-run below cannot catch an un-bumped version - crates.io rejects a duplicate
-      # only on the real upload. Fail fast when the tag and the manifest disagree.
-      # `--no-deps` reads the manifests without resolving, so a stale Cargo.lock cannot mask it.
-      - name: Tag matches the crate version
+      - name: Expected version from the ref
+        id: expect
         run: |
-          crate="$(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] | select(.name == "web_modules") | .version')"
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$crate" != "$tag" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} but Cargo.toml says ${crate} - bump the version before tagging"
-            exit 1
-          fi
+          case "$GITHUB_REF" in
+            refs/heads/release/v*) echo "version=${GITHUB_REF_NAME#release/v}" >>"$GITHUB_OUTPUT" ;;
+            refs/tags/v*)          echo "version=${GITHUB_REF_NAME#v}"          >>"$GITHUB_OUTPUT" ;;
+            *)                     echo "version="                              >>"$GITHUB_OUTPUT" ;;
+          esac
 
+      - name: Require a signed tag
+        if: ${{ github.ref_type == 'tag' }}
+        uses: gronke/rust-ci/.github/actions/require-signed-tag@v1
+
+      - name: Release readiness (version coherence · publish dry-run · crates.io probe)
+        uses: gronke/rust-ci/.github/actions/check-release-readiness@v1
+        with:
+          package: web_modules
+          expected-version: ${{ steps.expect.outputs.version }}
+
+      # Heavy and only decisive right before a publish — candidates skip it.
       - name: MSRV check (compiles on the declared rust-version)
+        if: ${{ github.ref_type == 'tag' }}
         uses: gronke/rust-ci/.github/actions/msrv@main
         with:
           package: web_modules
           features: --features full
 
-      - name: Package contents
-        run: cargo package -p web_modules --list
+  # ---- candidate path -------------------------------------------------------------------
+  draft:
+    name: draft pre-release
+    needs: gate
+    if: ${{ github.ref_type == 'branch' && startsWith(github.ref_name, 'release/v') }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
 
-      - name: Publish dry-run
-        run: cargo publish -p web_modules --dry-run
+      # CHANGELOG's "## [X.Y.Z]" section → release-notes.md; the same text becomes the draft
+      # body, the marker tag message, and (via the runbook's -F command) the signed tag message.
+      - name: Render release notes from CHANGELOG.md
+        uses: gronke/rust-ci/.github/actions/changelog@v1
+        with:
+          mode: notes
+          version: ${{ env.VERSION }}
+          title: v${{ env.VERSION }}
+
+      - name: Create or refresh the draft pre-release
+        id: draft
+        run: |
+          set -euo pipefail
+          notes=(--notes-file release-notes.md)
+          [ -s release-notes.md ] || notes=(--notes "Release v${VERSION}.")
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            gh release edit "v${VERSION}" --draft "${notes[@]}"
+          else
+            gh release create "v${VERSION}" --draft --prerelease --title "v${VERSION}" "${notes[@]}"
+          fi
+          echo "url=$(gh release view "v${VERSION}" --json url --jq .url)" >>"$GITHUB_OUTPUT"
+
+      # The unsigned candidate marker: it freezes the tree the release manager reviews. The
+      # tag-signing ruleset excludes v*-rc*, so the workflow token may push it.
+      - name: Push the candidate marker tag
+        id: marker
+        run: |
+          set -euo pipefail
+          n=1
+          while gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VERSION}-rc${n}" >/dev/null 2>&1; do
+            n=$((n + 1))
+          done
+          marker="v${VERSION}-rc${n}"
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git tag -a -F release-notes.md "$marker" "$GITHUB_SHA"
+          git push origin "refs/tags/$marker" || {
+            echo "::error::pushing $marker was rejected — exclude refs/tags/v*-rc* from tag rules (see .github/rulesets/)"
+            exit 1
+          }
+          echo "tag=$marker" >>"$GITHUB_OUTPUT"
+
+      - name: Release guidance (the accept/reject runbook, in the step summary)
+        uses: gronke/rust-ci/.github/actions/release-guidance@v1
+        with:
+          version: ${{ env.VERSION }}
+          marker-tag: ${{ steps.marker.outputs.tag }}
+          commit: ${{ github.sha }}
+          draft-url: ${{ steps.draft.outputs.url }}
+
+  # ---- final path -------------------------------------------------------------------------
+  # Build the CLI binary for each supported target on the signed tag, so the `web-modules
+  # build` GitHub Action (root action.yml) can download a prebuilt binary instead of compiling
+  # from source. Native runners only — no cross-compilation.
+  binaries:
+    name: ${{ matrix.slug }}
+    needs: gate
+    if: ${{ github.ref_type == 'tag' }}
+    runs-on: ${{ matrix.runner }}
+    # windows-arm64 can't be exercised until a real release; tolerate its failure so a hiccup
+    # there never blocks the rest — the action falls back to the x86_64 build under emulation.
+    continue-on-error: ${{ matrix.slug == 'windows-arm64' }}
+    strategy:
+      fail-fast: false
+      # One native runner per target. `slug` is the release-asset suffix; `ext` the executable
+      # extension (Windows only); the trailing comment is the Rust triple built natively there.
+      matrix:
+        include:
+          - { slug: linux-x86_64, runner: ubuntu-latest } # x86_64-unknown-linux-gnu
+          - { slug: linux-arm64, runner: ubuntu-24.04-arm } # aarch64-unknown-linux-gnu
+          - { slug: macos-arm64, runner: macos-26 } # aarch64-apple-darwin (latest)
+          - { slug: macos-x86_64, runner: macos-26-intel } # x86_64-apple-darwin (Intel, latest)
+          - { slug: windows-x86_64, runner: windows-latest, ext: .exe } # x86_64-pc-windows-msvc
+          - { slug: windows-arm64, runner: windows-11-arm, ext: .exe } # aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v7
+
+      # windows-11-arm ships no Rust (actions/partner-runner-images#77); every other runner has
+      # one preinstalled. The shared rust-ci action bootstraps rustup when none is present.
+      - name: Ensure Rust toolchain (windows-11-arm ships none)
+        if: ${{ matrix.slug == 'windows-arm64' }}
+        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+
+      # The full lean toolchain (only the heavy `bundle`/rolldown is excluded) in release mode,
+      # reproducibly — `--locked` uses the committed Cargo.lock. Native build: host == target.
+      - name: Build
+        run: cargo build --release --locked --bin web-modules --features full
+
+      - name: Package
+        shell: bash
+        env:
+          EXT: ${{ matrix.ext }} # ".exe" on Windows, empty elsewhere
+        run: |
+          set -euo pipefail
+          asset="web-modules-${{ matrix.slug }}${EXT}"
+          cp "target/release/web-modules${EXT}" "$asset"
+          strip "$asset" || true # no-op when strip is absent or can't handle a Windows PE
+          ls -lh "$asset"
+
+      # The draft from the candidate path owns the tag name; uploads land on it. The create
+      # fallback (a hand-pushed tag with no candidate run) stays a DRAFT, so nothing goes live
+      # without the publish job's seal.
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          gh release create "$tag" --draft --title "$tag" --notes-from-tag --verify-tag \
+            || echo "release $tag already exists; uploading assets"
+          gh release upload "$tag" "web-modules-${{ matrix.slug }}${{ matrix.ext }}" --clobber
+
+  # One combined SHA256SUMS for the release; the action downloads it and verifies the single
+  # asset it fetched. Generated on one host, so there is no cross-runner write race.
+  checksums:
+    name: SHA256SUMS
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate + upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }} # no checkout here; point gh at the repo explicitly
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          gh release download "$tag" --pattern 'web-modules-*' --dir dl
+          ( cd dl && sha256sum web-modules-* ) > SHA256SUMS
+          cat SHA256SUMS
+          gh release upload "$tag" SHA256SUMS --clobber
+
+  publish:
+    name: publish
+    needs: [gate, checksums]
+    if: ${{ github.ref_type == 'tag' && contains(github.ref_name, '.') }}
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ needs.gate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Seal: the signed tag must carry the same TREE as the newest candidate marker — the
+      # exact content the release manager reviewed. Tree, not commit: merging the merge-back
+      # PR may rewrite the commit while preserving the tree, and the rebased default-branch
+      # tip is a valid tag target.
+      - name: Seal the tag against the newest candidate marker
+        run: |
+          set -euo pipefail
+          n=1
+          while gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${VERSION}-rc$((n + 1))" >/dev/null 2>&1; do
+            n=$((n + 1))
+          done
+          marker="v${VERSION}-rc${n}"
+          gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${marker}" >/dev/null 2>&1 || {
+            echo "::error::no candidate marker ${marker} — cut a release branch first (cut.yml)"
+            exit 1
+          }
+          obj=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${marker}" --jq .object.sha)
+          marker_commit=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${obj}" --jq .object.sha 2>/dev/null \
+            || printf '%s' "$obj")
+          tag_tree=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}" --jq .commit.tree.sha)
+          marker_tree=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${marker_commit}" --jq .commit.tree.sha)
+          if [ "$tag_tree" != "$marker_tree" ]; then
+            echo "::error::v${VERSION} tags tree ${tag_tree}, but ${marker} sealed ${marker_tree} — tag the reviewed commit (or a rebase of it)"
+            exit 1
+          fi
+          echo "sealed: v${VERSION} matches ${marker} (tree ${tag_tree})"
+
+      - name: Flip the draft live
+        run: |
+          set -euo pipefail
+          prerelease=false
+          case "$VERSION" in *-*) prerelease=true ;; esac
+          gh release edit "v${VERSION}" --draft=false --prerelease="$prerelease"
+
+  # (Re)create the major tag (e.g. v0) at the highest stable release in its line, so
+  # `uses: gronke/web_modules@v0` tracks the newest 0.x. `v0` is intentionally OUTSIDE the
+  # tag-signing ruleset (create/delete allowed, unsigned), so the default GITHUB_TOKEN can
+  # manage it; there is no GitHub *Release* named `v0`. Skipped for prereleases.
+  major-tag:
+    name: recreate major tag
+    needs: publish
+    runs-on: ubuntu-latest
+    if: ${{ !contains(github.ref_name, '-') }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # need full history to verify the release commit is on the default branch
+      - name: Recreate the major tag at the highest stable release
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          major="${GITHUB_REF_NAME%%.*}"            # v0.3.1 -> v0
+          [ "$major" = "$GITHUB_REF_NAME" ] && { echo "not vMAJOR.MINOR.PATCH; nothing to do"; exit 0; }
+
+          # Highest STABLE major.minor.patch tag in this line (drops prereleases and the bare major).
+          git fetch --tags --force origin
+          highest=$(git tag --list "${major}.*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1) || true
+          test -n "$highest" || { echo "::error::no stable ${major}.x tag found"; exit 1; }
+          target=$(git rev-list -n1 "$highest")
+
+          # Defense-in-depth: only ever point the major tag at a commit on the default branch.
+          git fetch --no-tags origin "$DEFAULT_BRANCH"
+          git merge-base --is-ancestor "$target" FETCH_HEAD \
+            || { echo "::error::$highest ($target) is not on $DEFAULT_BRANCH; refusing"; exit 1; }
+
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git push origin ":refs/tags/$major" || true   # delete the old tag (ignore if absent)
+          git tag -fa "$major" -m "$major -> $highest" "$target"
+          git push origin "refs/tags/$major"
+          echo "recreated $major -> $highest ($target)"

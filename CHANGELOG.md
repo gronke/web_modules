@@ -7,6 +7,10 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+### Added
+
+- The action's `build` input (default `"true"`): with `build: "false"` the action installs the SHA256-verified binary onto `PATH` and skips the build, for jobs whose own scripts drive `web-modules` (a repo build script, `vendor`, `npm audit`)
+
 ### Security
 
 - security(cli): path fields in a `package.json` `web_modules` block (`roots`, `out`, `template`, `scss.loadPaths`) are confined to the project directory — previously an untrusted repository could serve arbitrary directories via `web-modules dev`, read any file into the output via `template`, and plant a new tree at an arbitrary location via `out`. Every entry must now be purely relative (no root, prefix, or `..` component), and an existing path must canonically resolve inside the project, so a symlink in the tree cannot redirect it outside. CLI flags and environment variables are operator-controlled and unaffected

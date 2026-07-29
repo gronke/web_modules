@@ -41,8 +41,16 @@ jobs:
   gate:
     name: gate
     runs-on: ubuntu-latest
-    # A bare-major tag (v0) is CI-managed via GITHUB_TOKEN and fires no events; guard anyway.
-    if: ${{ github.event_name == 'release' || github.ref_type != 'tag' || contains(github.ref_name, '.') }}
+    # A release cut from a `v<version>-rcN` marker is not a release: markers are pipeline
+    # internals and never reach the registry. On the push paths the coherence check does the
+    # distinguishing instead — a marker's manifest version never matches its tag, while a
+    # first-class candidate release (Cargo.toml 1.0.0-rc1, tag v1.0.0-rc1) does, so those still
+    # cut normally. The bare major (v0) is CI-managed and out of scope.
+    if: >-
+      ${{ github.event_name == 'release'
+          && !contains(github.event.release.tag_name, '-rc')
+          || github.event_name != 'release'
+          && (github.ref_type != 'tag' || contains(github.ref_name, '.')) }}
     outputs:
       version: ${{ steps.expect.outputs.version }}
     steps:
@@ -199,7 +207,15 @@ jobs:
   go-live:
     name: go live (moving major · crates.io)
     needs: gate
-    if: ${{ github.event_name == 'release' && github.repository == 'gronke/web_modules' }}
+    # `released` fires only when a full release is published, so a draft or a pre-release
+    # cannot reach crates.io — stated explicitly so the guarantee does not rest on the event
+    # taxonomy alone. Candidate markers are excluded for the same reason as in the gate.
+    if: >-
+      ${{ github.event_name == 'release'
+          && github.repository == 'gronke/web_modules'
+          && !github.event.release.draft
+          && !github.event.release.prerelease
+          && !contains(github.event.release.tag_name, '-rc') }}
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:

@@ -3,10 +3,13 @@
 #   candidate  push to release/v<version> (created by cut.yml) → gate → draft: render the
 #              CHANGELOG section into a draft pre-release + push an unsigned v<version>-rcN
 #              marker tag + print the release manager's accept/reject runbook.
-#   final      the human-signed v<version> tag (the accept command from the runbook) → gate →
-#              binaries → checksums → publish: seal against the newest marker, attach the six
-#              binaries + SHA256SUMS, flip the draft live, advance the moving major (v0) →
-#              crates-io: publish the crate itself, via Trusted Publishing.
+#   final      the human-signed v<version> tag (the accept command from the runbook) → gate
+#              (signature · coherence · seal) → binaries → checksums: the six binaries and
+#              SHA256SUMS attach to the still-draft release, and the pipeline stops there.
+#   go-live    an admin publishes that draft as a full release — the signal that the assets
+#              were inspected. GitHub's `released` event then advances the moving major (v0)
+#              and publishes the crate to crates.io via Trusted Publishing. A pre-release
+#              does not fire it, so only final releases reach the registry.
 #
 # The signing key never enters CI: the pipeline only pushes the unsigned rc marker and the
 # unsigned moving major, both excluded from the tag-signing ruleset (import the templates
@@ -17,6 +20,10 @@ on:
   push:
     branches: ["release/v**"]
     tags: ["v*"]
+  # An admin turning the draft into a full release is the go-live signal. `released` fires
+  # only for non-prereleases, so a pre-release can never reach crates.io.
+  release:
+    types: [released]
   # cut-release dispatches the first candidate run explicitly — its workflow-token push
   # fires no events.
   workflow_dispatch:
@@ -35,7 +42,7 @@ jobs:
     name: gate
     runs-on: ubuntu-latest
     # A bare-major tag (v0) is CI-managed via GITHUB_TOKEN and fires no events; guard anyway.
-    if: ${{ github.ref_type != 'tag' || contains(github.ref_name, '.') }}
+    if: ${{ github.event_name == 'release' || github.ref_type != 'tag' || contains(github.ref_name, '.') }}
     outputs:
       version: ${{ steps.expect.outputs.version }}
     steps:
@@ -43,36 +50,47 @@ jobs:
 
       - name: Expected version from the ref
         id: expect
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          case "$GITHUB_REF" in
-            refs/heads/release/v*) echo "version=${GITHUB_REF_NAME#release/v}" >>"$GITHUB_OUTPUT" ;;
-            refs/tags/v*)          echo "version=${GITHUB_REF_NAME#v}"          >>"$GITHUB_OUTPUT" ;;
-            *)                     echo "version="                              >>"$GITHUB_OUTPUT" ;;
-          esac
+          # A release event names its tag explicitly; otherwise the ref does.
+          if [ -n "${RELEASE_TAG:-}" ]; then
+            echo "version=${RELEASE_TAG#v}" >>"$GITHUB_OUTPUT"
+          else
+            case "$GITHUB_REF" in
+              refs/heads/release/v*) echo "version=${GITHUB_REF_NAME#release/v}" >>"$GITHUB_OUTPUT" ;;
+              refs/tags/v*)          echo "version=${GITHUB_REF_NAME#v}"          >>"$GITHUB_OUTPUT" ;;
+              *)                     echo "version="                              >>"$GITHUB_OUTPUT" ;;
+            esac
+          fi
 
       - name: Require a signed tag
         if: ${{ github.ref_type == 'tag' }}
         uses: gronke/rust-ci/.github/actions/require-signed-tag@v1
 
-      - name: Release readiness (version coherence · publish dry-run · crates.io probe)
+      # verify: false — ci.yml already compiled this very commit; the gate is here for
+      # packaging, tag/version coherence and the not-already-published probe.
+      - name: Release readiness (version coherence · packaging · crates.io probe)
         uses: gronke/rust-ci/.github/actions/check-release-readiness@v1
         with:
           package: web_modules
           expected-version: ${{ steps.expect.outputs.version }}
+          verify: "false"
 
-      # Heavy and only decisive right before a publish — candidates skip it.
-      - name: MSRV check (compiles on the declared rust-version)
-        if: ${{ github.ref_type == 'tag' }}
-        uses: gronke/rust-ci/.github/actions/msrv@main
+      # Four API calls, no build: a tag that does not carry the content the
+      # candidate build sealed fails here, before the binary matrix runs.
+      - name: The tag must seal the newest candidate marker
+        if: ${{ github.ref_type == 'tag' && github.event_name == 'push' }}
+        uses: gronke/rust-ci/.github/actions/publish-draft-release@v1
         with:
-          package: web_modules
-          features: --features full
+          version: ${{ steps.expect.outputs.version }}
+          seal-only: "true"
 
   # ---- candidate path -------------------------------------------------------------------
   draft:
     name: draft pre-release
     needs: gate
-    if: ${{ github.ref_type == 'branch' && startsWith(github.ref_name, 'release/v') }}
+    if: ${{ github.event_name == 'push' && github.ref_type == 'branch' && startsWith(github.ref_name, 'release/v') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -100,7 +118,7 @@ jobs:
   binaries:
     name: ${{ matrix.slug }}
     needs: gate
-    if: ${{ github.ref_type == 'tag' }}
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
     runs-on: ${{ matrix.runner }}
     # windows-arm64 can't be exercised until a real release; tolerate its failure so a hiccup
     # there never blocks the rest — the action falls back to the x86_64 build under emulation.
@@ -175,41 +193,36 @@ jobs:
           cat SHA256SUMS
           gh release upload "$tag" SHA256SUMS --clobber
 
-  publish:
-    name: publish the GitHub release
-    needs: [gate, checksums]
-    if: ${{ github.ref_type == 'tag' && contains(github.ref_name, '.') }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      # The binaries and SHA256SUMS are attached before this runs (needs:). Tree
-      # seal against the reviewed marker, the draft flip, and the moving v0
-      # advancing to the highest stable 0.x — one step. The crate is published
-      # separately, in the crates-io job below.
-      - uses: gronke/rust-ci/.github/actions/publish-draft-release@v1
-        with:
-          version: ${{ needs.gate.outputs.version }}
-          moving-major: "true"
-
-  # The crate goes last: re-drafting a release is trivial, a crates.io upload can
-  # only be yanked. Trusted Publishing mints a short-lived token from this job's
-  # OIDC identity — crates.io trusts this repository, this workflow file and this
-  # environment — so no registry secret is stored anywhere. The environment is
-  # also where a reviewer gate belongs, guarding the one irreversible step.
-  # Only upstream may publish: crates.io trusts no other repository, so a mirror
-  # would fail the exchange rather than silently try.
-  crates-io:
-    name: publish the crate to crates.io
-    needs: [gate, publish]
-    if: ${{ github.repository == 'gronke/web_modules' }}
+  # The admin's "publish release" is the go-live signal: the assets were inspected,
+  # and (with immutable releases on) the tag and assets can no longer change. Only
+  # then does the moving major advance and the crate reach crates.io.
+  go-live:
+    name: go live (moving major · crates.io)
+    needs: gate
+    if: ${{ github.event_name == 'release' && github.repository == 'gronke/web_modules' }}
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
-      contents: read
-      id-token: write # the Trusted Publishing exchange
+      contents: write # the moving major tag
+      id-token: write # the crates.io Trusted Publishing exchange
     steps:
+      # The tag, not the default branch: the crate published must be the tagged tree.
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0 # the moving major verifies the target is on the default branch
+
+      # Re-seals (idempotent), leaves the already-published release alone, and moves
+      # v0 to the highest stable 0.x.
+      - uses: gronke/rust-ci/.github/actions/publish-draft-release@v1
+        with:
+          version: ${{ needs.gate.outputs.version }}
+          tag-sha: ${{ github.sha }}
+          moving-major: "true"
+
+      # Trusted Publishing: a short-lived token from this job's OIDC identity, so no
+      # registry secret is stored. crates.io must trust this repository, the
+      # release.yml workflow and the crates-io environment.
       - uses: rust-lang/crates-io-auth-action@v1
       - uses: gronke/rust-ci/.github/actions/cargo-publish@v1
         with:

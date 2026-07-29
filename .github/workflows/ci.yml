@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The tauri example is opt-in (see its job): dispatch this workflow to build it
+  # on demand.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -198,8 +201,17 @@ jobs:
   # The tauri example stays isolated: heavyweight webkit2gtk system deps + an out-of-workspace
   # crate tree. Verifies it COMPILES (dev-server + the release app embedding the baked
   # frontendDist) and LIVE-SERVES; launching the GUI needs a display and is left to local use.
+  # Opt-in: a full Tauri toolchain build costs ~16 minutes and nothing downstream
+  # ships it — it proves the library still composes inside a Tauri app, which is
+  # worth checking when that composition or the dev-server plumbing changes, not
+  # on every pull request. Label a PR `ci:tauri` to run it, or dispatch this
+  # workflow. It is not part of any release path.
   tauri:
     name: tauri example
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch'
+          || (github.event_name == 'pull_request'
+              && contains(github.event.pull_request.labels.*.name, 'ci:tauri')) }}
     runs-on: ubuntu-latest
     defaults:
       run:

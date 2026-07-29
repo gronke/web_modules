@@ -5,7 +5,8 @@
 #              marker tag + print the release manager's accept/reject runbook.
 #   final      the human-signed v<version> tag (the accept command from the runbook) → gate →
 #              binaries → checksums → publish: seal against the newest marker, attach the six
-#              binaries + SHA256SUMS, flip the draft live, advance the moving major (v0).
+#              binaries + SHA256SUMS, flip the draft live, advance the moving major (v0) →
+#              crates-io: publish the crate itself, via Trusted Publishing.
 #
 # The signing key never enters CI: the pipeline only pushes the unsigned rc marker and the
 # unsigned moving major, both excluded from the tag-signing ruleset (import the templates
@@ -175,7 +176,7 @@ jobs:
           gh release upload "$tag" SHA256SUMS --clobber
 
   publish:
-    name: publish
+    name: publish the GitHub release
     needs: [gate, checksums]
     if: ${{ github.ref_type == 'tag' && contains(github.ref_name, '.') }}
     runs-on: ubuntu-latest
@@ -184,8 +185,33 @@ jobs:
 
       # The binaries and SHA256SUMS are attached before this runs (needs:). Tree
       # seal against the reviewed marker, the draft flip, and the moving v0
-      # advancing to the highest stable 0.x — one step.
-      - uses: gronke/rust-ci/.github/actions/publish-release@v1
+      # advancing to the highest stable 0.x — one step. The crate is published
+      # separately, in the crates-io job below.
+      - uses: gronke/rust-ci/.github/actions/publish-draft-release@v1
         with:
           version: ${{ needs.gate.outputs.version }}
           moving-major: "true"
+
+  # The crate goes last: re-drafting a release is trivial, a crates.io upload can
+  # only be yanked. Trusted Publishing mints a short-lived token from this job's
+  # OIDC identity — crates.io trusts this repository, this workflow file and this
+  # environment — so no registry secret is stored anywhere. The environment is
+  # also where a reviewer gate belongs, guarding the one irreversible step.
+  # Only upstream may publish: crates.io trusts no other repository, so a mirror
+  # would fail the exchange rather than silently try.
+  crates-io:
+    name: publish the crate to crates.io
+    needs: [gate, publish]
+    if: ${{ github.repository == 'gronke/web_modules' }}
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write # the Trusted Publishing exchange
+    steps:
+      - uses: actions/checkout@v7
+      - uses: rust-lang/crates-io-auth-action@v1
+      - uses: gronke/rust-ci/.github/actions/cargo-publish@v1
+        with:
+          package: web_modules
+          publish: "true"

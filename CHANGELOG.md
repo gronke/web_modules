@@ -7,15 +7,12 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
-### Added
-
-- Releases run through gronke/rust-ci's release flow: `cut.yml` cuts a release/v<version> branch from CHANGELOG.md and Cargo.toml, the pipeline drafts a reviewable pre-release with an unsigned rc marker, and the human-signed `v<version>` tag is sealed against the reviewed tree before the draft flips live with the binaries attached
-
-## [0.6.0] - 2026-07-28
+## [0.6.0] - 2026-07-29
 
 ### Added
 
 - The action's `build` input (default `"true"`): with `build: "false"` the action installs the SHA256-verified binary onto `PATH` and skips the build, for jobs whose own scripts drive `web-modules` (a repo build script, `vendor`, `npm audit`)
+- Releases run through gronke/rust-ci's release flow: `cut.yml` cuts a release/v<version> branch from CHANGELOG.md and Cargo.toml, the pipeline drafts a reviewable pre-release with an unsigned rc marker, and the human-signed `v<version>` tag is sealed against the reviewed tree before the draft flips live with the binaries attached
 
 ### Changed
 

@@ -188,6 +188,10 @@ The [`examples/`](examples/) tree is full of runnable demos; `cargo run` and ope
 - [**embedded**](examples/embedded) - the whole frontend baked into the binary; no filesystem, no network.
 - [**tauri**](examples/tauri) - a Tauri v2 desktop app, frontend live-served (and release-baked) by web_modules.
 
+## Maintaining
+
+Repository setup, the release runbook and what a fork must change: [MAINTENANCE.md](MAINTENANCE.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

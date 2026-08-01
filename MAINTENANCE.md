@@ -190,6 +190,28 @@ the owner reviewing it.
 `cargo publish` needs no manual step; `[Unreleased]` gains entries again, and the
 first of them declares the next version — the changelog gate asks for it.
 
+### The registry signature
+
+The crates.io step publishes only when a verified signature covers the release
+commit — the signed `v<version>` tag from step 3 satisfies it, so the flow
+above needs nothing extra. Should a release ever go live without one, the run
+stays green and rehearses the packaging instead of uploading; push a signed
+companion to complete it, retroactively included:
+
+```sh
+git fetch origin 'refs/tags/v<version>:refs/tags/v<version>'
+git tag -s -m "v<version>" v<version>-sig 'v<version>^{}'
+git push origin refs/tags/v<version>-sig
+```
+
+The companion push runs the attest job: it requires the release to be
+published (drafts stay the admin's act), reconciles the seal, the flip and the
+moving major idempotently, and publishes the crate if it never was. Releases
+cut before the sealed pipeline carry no candidate markers, so their
+attestation fails at the re-seal — nothing to complete there; those crates
+were published by hand. The `tags-signed` ruleset covers `v*`, companions
+included, so an unsigned companion cannot exist.
+
 ## Forking
 
 - Configure your own trusted publisher, or drop the `crates-io` job from

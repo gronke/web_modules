@@ -8,8 +8,11 @@
 #              SHA256SUMS attach to the still-draft release, and the pipeline stops there.
 #   go-live    an admin publishes that draft as a full release — the signal that the assets
 #              were inspected. GitHub's `released` event then advances the moving major (v0)
-#              and publishes the crate to crates.io via Trusted Publishing. A pre-release
-#              does not fire it, so only final releases reach the registry.
+#              and publishes the crate to crates.io via Trusted Publishing — gated on a
+#              human signature: the signed release tag, or a v*-sig companion on the same
+#              commit, whose own push (the attest job) completes a publication that was
+#              waiting for it. A pre-release does not fire it, so only final releases
+#              reach the registry.
 #
 # The signing key never enters CI: the pipeline only pushes the unsigned rc marker and the
 # unsigned moving major, both excluded from the tag-signing ruleset (import the templates
@@ -50,7 +53,8 @@ jobs:
       ${{ github.event_name == 'release'
           && !contains(github.event.release.tag_name, '-rc')
           || github.event_name != 'release'
-          && (github.ref_type != 'tag' || contains(github.ref_name, '.')) }}
+          && (github.ref_type != 'tag' || contains(github.ref_name, '.'))
+          && !endsWith(github.ref_name, '-sig') }}
     outputs:
       version: ${{ steps.expect.outputs.version }}
     steps:
@@ -126,7 +130,7 @@ jobs:
   binaries:
     name: ${{ matrix.slug }}
     needs: gate
-    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && !endsWith(github.ref_name, '-sig') }}
     runs-on: ${{ matrix.runner }}
     # windows-arm64 can't be exercised until a real release; tolerate its failure so a hiccup
     # there never blocks the rest — the action falls back to the x86_64 build under emulation.
@@ -236,11 +240,86 @@ jobs:
           tag-sha: ${{ github.sha }}
           moving-major: "true"
 
+      # Registry publication is gated on a human signature: the signed release
+      # tag satisfies it today, and a v*-sig companion on the same commit would
+      # too. Unsigned, the publish step rehearses instead of uploading.
+      - id: sig
+        uses: gronke/rust-ci/.github/actions/require-signed-release@v1
+        with:
+          version: ${{ needs.gate.outputs.version }}
+          attestation-tags: "v*-sig"
+
       # Trusted Publishing: a short-lived token from this job's OIDC identity, so no
       # registry secret is stored. crates.io must trust this repository, the
       # release.yml workflow and the crates-io environment.
-      - uses: rust-lang/crates-io-auth-action@v1
+      - if: steps.sig.outputs.signed == 'true'
+        uses: rust-lang/crates-io-auth-action@v1
       - uses: gronke/rust-ci/.github/actions/cargo-publish@v1
         with:
           package: web_modules
-          publish: "true"
+          publish: ${{ steps.sig.outputs.signed }}
+          allow-already-published: "true"
+
+  # A human pushing the signed v<version>-sig companion is the registry go
+  # signal — or a retro-attestation. Verify it seals the released commit,
+  # reconcile what automation may still owe, and publish the crate if it never
+  # was. The signature completes automation; it never publishes drafts.
+  attest:
+    name: signed attestation (crates.io)
+    if: >-
+      ${{ github.event_name == 'push' && github.ref_type == 'tag'
+          && endsWith(github.ref_name, '-sig') }}
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: write # the moving major, when the reconcile still owes it
+      id-token: write # the crates.io Trusted Publishing exchange
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the moving major verifies the target is on the default branch
+
+      - name: The companion must seal a published release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME%-sig}"
+          release_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null)" || {
+            echo "::error::${GITHUB_REF_NAME} has no sibling release tag ${tag}"
+            exit 1
+          }
+          if [ "$release_commit" != "$GITHUB_SHA" ]; then
+            echo "::error::${GITHUB_REF_NAME} points at ${GITHUB_SHA}, but ${tag} is on ${release_commit} — the attestation must seal the release commit"
+            exit 1
+          fi
+          draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
+          if [ "$draft" != "false" ]; then
+            echo "::error::the ${tag} release is not published (state: ${draft}) — publish it first; the signature completes automation, it does not publish drafts"
+            exit 1
+          fi
+          echo "version=${tag#v}" >>"$GITHUB_OUTPUT"
+
+      # Reconcile idempotently: re-seal, flip no-op, and the moving major
+      # catches up if the go-live never ran. Releases cut before the sealed
+      # pipeline carry no candidate markers and fail here — nothing to
+      # complete for them; their crates were published by hand.
+      - uses: gronke/rust-ci/.github/actions/publish-draft-release@v1
+        with:
+          version: ${{ steps.release.outputs.version }}
+          tag-sha: ${{ github.sha }}
+          moving-major: "true"
+
+      - id: sig
+        uses: gronke/rust-ci/.github/actions/require-signed-release@v1
+        with:
+          version: ${{ steps.release.outputs.version }}
+          attestation-tags: "v*-sig"
+      - if: steps.sig.outputs.signed == 'true'
+        uses: rust-lang/crates-io-auth-action@v1
+      - uses: gronke/rust-ci/.github/actions/cargo-publish@v1
+        with:
+          package: web_modules
+          publish: ${{ steps.sig.outputs.signed }}
+          allow-already-published: "true"

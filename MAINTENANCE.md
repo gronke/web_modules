@@ -23,7 +23,21 @@ registry token is ever stored in the repository.
 
 ## One-time setup
 
-Every block below takes a repository slug, so a fork substitutes its own:
+`scripts/setup-release.sh` does all of it, idempotently — run it again after
+changing anything and it reports instead of duplicating:
+
+```sh
+DRY_RUN=1 scripts/setup-release.sh                    # what it would change
+REVIEWER=gronke CRATES_IO_TOKEN=cio… scripts/setup-release.sh
+REPO=me/my-fork scripts/setup-release.sh              # a fork configures itself
+```
+
+Immutable releases is the one step it cannot take — GitHub exposes no REST
+surface for it — so the script reports that and leaves it to you.
+
+The rest of this section is what the script does, and what to reach for when a
+repository needs something other than the defaults. Every block takes a
+repository slug, so a fork substitutes its own:
 
 ```sh
 REPO=gronke/web_modules
@@ -40,14 +54,13 @@ exclude them — rust-ci's templates already do, and are importable as-is:
 gh api "repos/$REPO/rulesets" --jq '.[].name'   # importing twice creates duplicates; look first
 
 for f in tags-signed tags-maintainer-only; do
-  curl -fsSL "https://raw.githubusercontent.com/gronke/rust-ci/main/.github/rulesets/$f.json" \
+  curl -fsSL "https://raw.githubusercontent.com/gronke/rust-ci/v1/.github/rulesets/$f.json" \
     | gh api "repos/$REPO/rulesets" --input - --jq '"imported: " + .name'
 done
 ```
 
 Read the JSON before importing it — it is, after all, describing who may write
-what. The templates postdate rust-ci v1.2.0, so they live on `main` until the
-next rust-ci release; prefer the pinned `v1` path once it carries them.
+what.
 
 `tags-signed` requires a verified signature on every tag; `tags-maintainer-only`
 restricts who may create, update or delete one. Both exclude
@@ -186,6 +199,10 @@ the owner reviewing it.
 5. **Publish the draft as a full release.** That is the go-live signal: it
    advances the moving `v0` and publishes the crate to crates.io. A pre-release
    does not trigger it, and neither does a draft.
+   Before `v0` moves, the go-live job downloads the release's own binary
+   through the action's installer mode — the path every `@v0` consumer takes —
+   and checks it reports this version. A release that cannot serve its binary
+   leaves `v0` on the last one that could, and the crate unpublished with it.
 
 `cargo publish` needs no manual step; `[Unreleased]` gains entries again, and the
 first of them declares the next version — the changelog gate asks for it.

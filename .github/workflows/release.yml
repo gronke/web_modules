@@ -7,7 +7,9 @@
 #              (signature · coherence · seal) → binaries → checksums: the six binaries and
 #              SHA256SUMS attach to the still-draft release, and the pipeline stops there.
 #   go-live    an admin publishes that draft as a full release — the signal that the assets
-#              were inspected. GitHub's `released` event then advances the moving major (v0)
+#              were inspected. The release must then serve its binary through the action's
+#              installer mode — what every `@v0` consumer resolves — before the moving major
+#              advances onto it. GitHub's `released` event then advances the moving major (v0)
 #              and publishes the crate to crates.io via Trusted Publishing — gated on a
 #              human signature: the signed release tag, or a v*-sig companion on the same
 #              commit, whose own push (the attest job) completes a publication that was
@@ -232,6 +234,28 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
           fetch-depth: 0 # the moving major verifies the target is on the default branch
 
+      # What consumers actually resolve: `uses: gronke/web_modules@v0` downloads a prebuilt
+      # binary from the release the moving major points at. Prove this release serves one —
+      # the assets attached, the checksum matches, the binary runs and reports its version —
+      # before v0 advances onto it. A release that cannot serve its binary leaves v0 where it
+      # is, on the last one that could, and the crate stays unpublished with it.
+      - name: The published release must serve its binary
+        uses: ./
+        with:
+          build: "false"
+          version: ${{ needs.gate.outputs.version }}
+      - name: The binary is this release's
+        env:
+          VERSION: ${{ needs.gate.outputs.version }}
+        run: |
+          set -euo pipefail
+          got="$(web-modules --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^ ]*' | head -1)"
+          if [ "$got" != "$VERSION" ]; then
+            echo "::error::the v${VERSION} release serves web-modules ${got}"
+            exit 1
+          fi
+          echo "✓ v${VERSION} serves web-modules ${got}"
+
       # Re-seals (idempotent), leaves the already-published release alone, and moves
       # v0 to the highest stable 0.x.
       - uses: gronke/rust-ci/.github/actions/publish-draft-release@v1
@@ -300,6 +324,25 @@ jobs:
             exit 1
           fi
           echo "version=${tag#v}" >>"$GITHUB_OUTPUT"
+
+      # The same gate as the go-live path: the reconcile below can advance v0,
+      # so the release must serve its binary first.
+      - name: The published release must serve its binary
+        uses: ./
+        with:
+          build: "false"
+          version: ${{ steps.release.outputs.version }}
+      - name: The binary is this release's
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          got="$(web-modules --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[^ ]*' | head -1)"
+          if [ "$got" != "$VERSION" ]; then
+            echo "::error::the v${VERSION} release serves web-modules ${got}"
+            exit 1
+          fi
+          echo "✓ v${VERSION} serves web-modules ${got}"
 
       # Reconcile idempotently: re-seal, flip no-op, and the moving major
       # catches up if the go-live never ran. Releases cut before the sealed

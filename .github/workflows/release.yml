@@ -129,9 +129,33 @@ jobs:
   # Build the CLI binary for each supported target on the signed tag, so the `web-modules
   # build` GitHub Action (root action.yml) can download a prebuilt binary instead of compiling
   # from source. Native runners only — no cross-compilation.
+  # One job owns the tag name, so the six binary runners never compete to create
+  # it. The candidate path normally drafted the release already; a hand-pushed
+  # tag with no candidate run has nothing yet, and this creates it as a DRAFT so
+  # the publish gate still decides whether anything goes live.
+  release:
+    name: the draft the binaries attach to
+    needs: gate
+    if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && !endsWith(github.ref_name, '-sig') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure a draft exists for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }} # no checkout in this job
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "release $tag already exists; the binaries will upload to it"
+            exit 0
+          fi
+          gh release create "$tag" --draft --title "$tag" --notes-from-tag --verify-tag
+          echo "drafted $tag for the binaries to attach to"
+
   binaries:
     name: ${{ matrix.slug }}
-    needs: gate
+    needs: [gate, release]
     if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && !endsWith(github.ref_name, '-sig') }}
     runs-on: ${{ matrix.runner }}
     # windows-arm64 can't be exercised until a real release; tolerate its failure so a hiccup
@@ -174,19 +198,19 @@ jobs:
           strip "$asset" || true # no-op when strip is absent or can't handle a Windows PE
           ls -lh "$asset"
 
-      # The draft from the candidate path owns the tag name; uploads land on it. The create
-      # fallback (a hand-pushed tag with no candidate run) stays a DRAFT, so nothing goes live
-      # without the publish job's seal.
+      # The release already exists — the candidate path drafted it, or the
+      # `release` job below created it — so this only ever uploads. Creating it
+      # here would race: six runners calling `gh release create --draft` in
+      # parallel, and GitHub lets drafts share a tag name, so the losers become
+      # rival empty drafts that are indistinguishable in the UI.
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="$GITHUB_REF_NAME"
-          gh release create "$tag" --draft --title "$tag" --notes-from-tag --verify-tag \
-            || echo "release $tag already exists; uploading assets"
-          gh release upload "$tag" "web-modules-${{ matrix.slug }}${{ matrix.ext }}" --clobber
+          gh release upload "$GITHUB_REF_NAME" \
+            "web-modules-${{ matrix.slug }}${{ matrix.ext }}" --clobber
 
   # One combined SHA256SUMS for the release; the action downloads it and verifies the single
   # asset it fetched. Generated on one host, so there is no cross-runner write race.
@@ -303,27 +327,15 @@ jobs:
         with:
           fetch-depth: 0 # the moving major verifies the target is on the default branch
 
+      # The companion names its own release: the tag it seals is looked up by
+      # commit, and a draft is an error — a signature completes automation, it
+      # does not publish drafts. `version` and `release-tag` come back out.
       - name: The companion must seal a published release
         id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME%-sig}"
-          release_commit="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${tag}" --jq .sha 2>/dev/null)" || {
-            echo "::error::${GITHUB_REF_NAME} has no sibling release tag ${tag}"
-            exit 1
-          }
-          if [ "$release_commit" != "$GITHUB_SHA" ]; then
-            echo "::error::${GITHUB_REF_NAME} points at ${GITHUB_SHA}, but ${tag} is on ${release_commit} — the attestation must seal the release commit"
-            exit 1
-          fi
-          draft="$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null || echo missing)"
-          if [ "$draft" != "false" ]; then
-            echo "::error::the ${tag} release is not published (state: ${draft}) — publish it first; the signature completes automation, it does not publish drafts"
-            exit 1
-          fi
-          echo "version=${tag#v}" >>"$GITHUB_OUTPUT"
+        uses: gronke/rust-ci/.github/actions/require-signed-release@v1
+        with:
+          attestation-tag: ${{ github.ref_name }}
+          require-published: "true"
 
       # The same gate as the go-live path: the reconcile below can advance v0,
       # so the release must serve its binary first.
@@ -354,15 +366,12 @@ jobs:
           tag-sha: ${{ github.sha }}
           moving-major: "true"
 
-      - id: sig
-        uses: gronke/rust-ci/.github/actions/require-signed-release@v1
-        with:
-          version: ${{ steps.release.outputs.version }}
-          attestation-tags: "v*-sig"
-      - if: steps.sig.outputs.signed == 'true'
+      # The gate above already answered whether a signature covers this commit —
+      # the companion that triggered the run is that signature.
+      - if: steps.release.outputs.signed == 'true'
         uses: rust-lang/crates-io-auth-action@v1
       - uses: gronke/rust-ci/.github/actions/cargo-publish@v1
         with:
           package: web_modules
-          publish: ${{ steps.sig.outputs.signed }}
+          publish: ${{ steps.release.outputs.signed }}
           allow-already-published: "true"

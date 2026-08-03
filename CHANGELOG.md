@@ -7,6 +7,20 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+Nothing in the crate, the CLI or the action changed: this release carries the release pipeline and the maintainer documentation.
+
+### Changed
+
+- crates.io publication is gated on a human signature covering the release commit — the signed `v<version>` tag satisfies it. An unsigned release rehearses the packaging instead of uploading, and a signed `v<version>-sig` companion pushed later completes the publication, retroactively.
+- Before the moving `v0` advances onto a release, the pipeline downloads that release's own binary through the action's installer mode — the path every `@v0` consumer takes — and checks it reports the right version. A release that cannot serve its binary leaves `v0` on the last one that could, and the crate unpublished with it.
+- One job now establishes the draft release before the binary matrix fans out. Six runners each creating it raced, and GitHub lets drafts share a tag name, so the losers became rival empty drafts — which is how v0.6.0 went live serving no binaries until its assets were copied across by hand.
+- Installer mode is no longer exercised on pull requests: it downloaded the *current* release, so a pull request could not break it and an unrelated release fault failed every pull request. The release pipeline proves it instead, before `v0` moves.
+
+### Added
+
+- MAINTENANCE.md: what a maintainer of this repository, or of a fork, has to have, configure once, and do on each release, with the failures worth recognising and their fixes.
+- `scripts/setup-release.sh` performs that setup idempotently — the `crates-io` environment restricted to `v*` tags with an optional reviewer, the tag rulesets, the `ci:tauri` label, and the crates.io trusted publisher through the registry's API. Immutable releases has no REST surface and is reported rather than attempted.
+
 ## [0.6.0] - 2026-07-29
 
 ### Added

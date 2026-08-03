@@ -4152,7 +4152,7 @@ dependencies = [
 
 [[package]]
 name = "web_modules"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "axum",
  "clap",

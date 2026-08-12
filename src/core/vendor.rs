@@ -1,8 +1,9 @@
 //! Vendor packages into a `web_modules/` tree and build the import map.
 //!
 //! Orchestration over [`npm_utils`]: each [`PackageSpec`] names a [source](PackageSpec::npm)
-//! (an npm package + semver range, or a [GitHub archive](PackageSpec::git) at a ref),
-//! how to [extract](Extract) it, and where its files land. Work is cache-guarded
+//! (an npm package + semver range, a [GitHub archive](PackageSpec::git) at a ref, or a
+//! [pre-packed tarball](PackageSpec::tarball) URL), how to [extract](Extract) it, and
+//! where its files land. Work is cache-guarded
 //! (a per-package version/ref marker + a cross-process lock), so a second build with
 //! unchanged specs does no extraction.
 //!
@@ -46,6 +47,11 @@ enum Source {
         repo: String,
         reference: String,
     },
+    /// A pre-packed tarball at an absolute https URL — an `npm pack` `.tgz`, such
+    /// as a GitHub Release asset. Extracted like an npm tarball (nested under
+    /// `package/`). `name` gives the import-map base; `url` doubles as the cache
+    /// key, so a new release URL re-fetches.
+    Tarball { name: String, url: String },
 }
 
 /// How a package's archive is extracted into its destination directory.
@@ -147,6 +153,25 @@ impl PackageSpec {
         }
     }
 
+    /// A pre-packed `.tgz` at an absolute https URL — an `npm pack` archive such as
+    /// a GitHub Release asset. Defaults: browser-asset extraction, auto-derived
+    /// import map (the tarball carries its own `package.json`), vended to
+    /// `<vendor_dir>/<name>/`. Unlike [`git`](Self::git), which fetches a whole-repo
+    /// source archive, this is the built, publishable package.
+    pub fn tarball(name: impl Into<String>, url: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            dir: name.clone(),
+            source: Source::Tarball {
+                name,
+                url: url.into(),
+            },
+            dest: None,
+            extract: Extract::BrowserAssets,
+            imports: Imports::Auto,
+        }
+    }
+
     /// Parse one positional npm spec — `name`, `name@range`, or `@scope/name@range`
     /// (e.g. `lit`, `lit@^3`, `@lit/context@^1`) — into an [`npm`](Self::npm) spec.
     /// The range `@` is the last one, so a leading scope `@` is preserved; a bare
@@ -218,9 +243,10 @@ impl PackageSpec {
 
 /// Build vendoring specs from the `dependencies` of a `package.json`. Keep your
 /// browser dependencies in a real `package.json` next to your sources and vendor
-/// them with Rust. Registry ranges are preserved verbatim (`^3`, `~1.2`, …); a
-/// `github:owner/repo#ref` or git URL becomes a [git](PackageSpec::git) spec; and
-/// local protocols (`file:`/`link:`/`workspace:`/`portal:`) are skipped. Each entry
+/// them with Rust. Registry ranges are preserved verbatim (`^3`, `~1.2`, …); an https
+/// `.tgz` URL becomes a [tarball](PackageSpec::tarball) spec; a `github:owner/repo#ref`
+/// or git URL becomes a [git](PackageSpec::git) spec; and local protocols
+/// (`file:`/`link:`/`workspace:`/`portal:`) are skipped. Each entry
 /// defaults to browser-asset extraction with an auto-derived import map.
 ///
 /// Only `dependencies` is read; `devDependencies` (build/test tooling such as
@@ -325,12 +351,19 @@ pub fn specs_from_package_json_sections(
 }
 
 /// Turn one `package.json` dependency entry (`name` → `value`) into a vendoring
-/// [`PackageSpec`]: a `github:` / git URL → a [git](PackageSpec::git) spec; a local
-/// protocol (`file:`/`link:`/`workspace:`/`portal:`) → `None` (nothing to vend);
-/// anything else → a registry [npm](PackageSpec::npm) spec, range verbatim.
+/// [`PackageSpec`]: an https `.tgz` URL → a [tarball](PackageSpec::tarball) spec; a
+/// `github:` / git URL → a [git](PackageSpec::git) spec; a local protocol
+/// (`file:`/`link:`/`workspace:`/`portal:`) → `None` (nothing to vend); anything
+/// else → a registry [npm](PackageSpec::npm) spec, range verbatim.
 fn dep_to_spec(name: &str, value: &str) -> Option<PackageSpec> {
     if is_local_protocol(value) {
         return None;
+    }
+    // Checked before the `github:` form so a GitHub Release-asset URL
+    // (`…/releases/download/<tag>/<file>.tgz`) vends as the packed tarball, not as
+    // a repo source archive at the default branch.
+    if is_tarball_url(value) {
+        return Some(PackageSpec::tarball(name, value));
     }
     Some(match parse_github_dep(value) {
         Some((repo, reference)) => PackageSpec::git(repo, reference),
@@ -344,6 +377,12 @@ fn is_local_protocol(value: &str) -> bool {
     ["file:", "link:", "workspace:", "portal:"]
         .iter()
         .any(|p| value.starts_with(p))
+}
+
+/// A `package.json` value pointing at a pre-packed tarball over https (an `npm
+/// pack` `.tgz`, e.g. a GitHub Release asset).
+fn is_tarball_url(value: &str) -> bool {
+    value.starts_with("https://") && (value.ends_with(".tgz") || value.ends_with(".tar.gz"))
 }
 
 /// Read a `package.json`'s `dependencies`, splitting them: registry ranges → vendoring
@@ -372,6 +411,8 @@ pub fn read_package_json(path: &Path) -> Result<(Vec<PackageSpec>, Vec<Mount>)> 
                     .specifier(format!("{name}/"))
                     .url(format!("/{name}/")),
             );
+        } else if is_tarball_url(value) {
+            specs.push(PackageSpec::tarball(name.as_str(), value));
         } else if let Some((repo, reference)) = parse_github_dep(value) {
             specs.push(PackageSpec::git(repo, reference));
         } else if !is_unsupported_protocol(value) {
@@ -522,6 +563,10 @@ fn vendor_inner(
                 reference.clone(),
                 true,
             ),
+            // A pre-packed `.tgz`: fetch the URL directly and extract like an npm
+            // tarball (`package/` layout, `is_git = false`). The URL is the cache
+            // key, so a new release (a new URL) re-fetches.
+            Source::Tarball { url, .. } => (url.clone(), url.clone(), false),
         };
 
         if !is_up_to_date(&marker, &cache_key, &dest_dir, &spec.extract) {
@@ -776,6 +821,7 @@ fn source_name(source: &Source) -> &str {
     match source {
         Source::Npm { package, .. } => package,
         Source::Git { repo, .. } => repo,
+        Source::Tarball { name, .. } => name,
     }
 }
 
@@ -981,6 +1027,80 @@ mod tests {
             }
             _ => panic!("expected git source"),
         }
+    }
+
+    #[test]
+    fn tarball_spec_defaults() {
+        let spec = PackageSpec::tarball(
+            "@gronke/ui-components",
+            "https://github.com/gronke/ui-components/releases/download/v0.1.0/gronke-ui-components-0.1.0.tgz",
+        );
+        assert_eq!(spec.dir, "@gronke/ui-components");
+        assert!(matches!(spec.imports, Imports::Auto));
+        assert!(matches!(spec.extract, Extract::BrowserAssets));
+        assert_eq!(source_name(&spec.source), "@gronke/ui-components");
+        match &spec.source {
+            Source::Tarball { name, url } => {
+                assert_eq!(name, "@gronke/ui-components");
+                assert!(url.ends_with("gronke-ui-components-0.1.0.tgz"));
+            }
+            _ => panic!("expected a tarball source"),
+        }
+    }
+
+    #[test]
+    fn tarball_url_routes_before_github() {
+        // A GitHub Release-asset URL must vend as the packed tarball, not as a repo
+        // source archive — the `github.com` branch would otherwise capture it.
+        let asset = "https://github.com/gronke/ui-components/releases/download/v0.1.0/gronke-ui-components-0.1.0.tgz";
+        assert!(matches!(
+            dep_to_spec("@gronke/ui-components", asset).unwrap().source,
+            Source::Tarball { .. }
+        ));
+        // A non-GitHub tarball host still routes to a tarball.
+        assert!(matches!(
+            dep_to_spec("pkg", "https://cdn.example.com/pkg-1.0.0.tgz")
+                .unwrap()
+                .source,
+            Source::Tarball { .. }
+        ));
+        // The plain `github:` shorthand still routes to a git source.
+        assert!(matches!(
+            dep_to_spec("feather", "github:feathericons/feather#v4.29.2")
+                .unwrap()
+                .source,
+            Source::Git { .. }
+        ));
+    }
+
+    #[test]
+    fn auto_entries_tarball_dist_shape() {
+        // The published dist has subpath exports and no `.` entry, so the specifier
+        // is the exact `@scope/pkg/<subpath>` with no bare / no `name/` prefix.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("components")).unwrap();
+        std::fs::write(
+            dir.path().join("components/input-secret.js"),
+            "customElements.define('input-secret', class extends HTMLElement {});",
+        )
+        .unwrap();
+        let pkg = PackageJson::from_json(
+            r#"{"exports":{"./input-secret.js":{"default":"./components/input-secret.js"}}}"#,
+        )
+        .unwrap();
+        let entries = auto_entries(
+            Some(&pkg),
+            "@gronke/ui-components",
+            "@gronke/ui-components",
+            "/web_modules",
+            dir.path(),
+        );
+        assert!(entries.contains(&(
+            "@gronke/ui-components/input-secret.js".into(),
+            "/web_modules/@gronke/ui-components/components/input-secret.js".into(),
+        )));
+        assert!(!entries.iter().any(|(s, _)| s == "@gronke/ui-components"));
+        assert!(!entries.iter().any(|(s, _)| s == "@gronke/ui-components/"));
     }
 
     #[test]

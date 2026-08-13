@@ -78,9 +78,10 @@ jobs:
             esac
           fi
 
-      - name: Require a signed tag
-        if: ${{ github.ref_type == 'tag' }}
-        uses: gronke/rust-ci/.github/actions/require-signed-tag@v1
+      # publish-go-live mode: the release tag may be unsigned. crates.io is gated
+      # later by require-signed-release (a signed vX.Y.Z-sig companion on the release
+      # commit, or a signed release tag) in the go-live and attest jobs — not by a
+      # signature gate on the tag itself.
 
       # verify: false — ci.yml already compiled this very commit; the gate is here for
       # packaging, tag/version coherence and the not-already-published probe.

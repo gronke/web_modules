@@ -1,0 +1,6 @@
+# The maintainer's review is the merge signal on every path: untrusted
+# contributors have write access, so a code-owner review (enforced by the
+# branch ruleset) means a contributor's PR cannot land on the default branch
+# without @gronke's approval. A ruleset bypass for @gronke keeps the
+# maintainer's own PRs mergeable without self-approval.
+* @gronke

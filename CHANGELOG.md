@@ -18,6 +18,7 @@ The crate gains a tarball dependency source (below); the rest of this release ca
 
 ### Added
 
+- A CommonJS-only package entry gets a generated ESM wrapper, with the bare import-map specifier pointing at that — a dependency shipping no ESM entry at all is otherwise unimportable in a browser.
 - `PackageSpec::tarball(name, url)` and a `package.json` `.tgz` dependency form: vendor a pre-packed `npm pack` tarball from an absolute https URL — e.g. a GitHub Release asset — extracted and import-mapped like an npm package, so a component library can be consumed straight from a Release without a registry. A `…/releases/download/….tgz` URL is recognised ahead of the `github:` shorthand.
 - MAINTENANCE.md: what a maintainer of this repository, or of a fork, has to have, configure once, and do on each release, with the failures worth recognising and their fixes.
 - `scripts/setup-release.sh` performs that setup idempotently — the `crates-io` environment restricted to `v*` tags with an optional reviewer, the tag rulesets, the `ci:tauri` label, and the crates.io trusted publisher through the registry's API. Immutable releases has no REST surface and is reported rather than attempted.

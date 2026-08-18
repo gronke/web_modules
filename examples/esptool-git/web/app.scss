@@ -1,0 +1,99 @@
+// Plain SCSS, compiled by grass on request — no Node in this example either.
+$ink: #1d2026;
+$muted: #6b7280;
+$accent: #2563eb;
+
+:root {
+  color-scheme: light dark;
+}
+
+body {
+  margin: 0;
+  padding: 3rem 1.5rem;
+  font-family: system-ui, sans-serif;
+  color: $ink;
+  background: #f7f8fa;
+}
+
+main {
+  max-width: 40rem;
+  margin: 0 auto;
+}
+
+h1 {
+  margin: 0 0 0.4rem;
+  font-size: 1.6rem;
+}
+
+.sub {
+  margin: 0 0 1.6rem;
+  color: $muted;
+
+  code {
+    font-size: 0.9em;
+  }
+}
+
+button {
+  padding: 0.55rem 1.1rem;
+  font: inherit;
+  color: #fff;
+  background: $accent;
+  border: 0;
+  border-radius: 0.4rem;
+  cursor: pointer;
+
+  &:disabled {
+    opacity: 0.6;
+    cursor: progress;
+  }
+}
+
+.status {
+  margin: 0.9rem 0 0;
+  color: $muted;
+}
+
+dl {
+  // `display` here would otherwise beat the user-agent's `[hidden] { display: none }`,
+  // leaving an empty box on screen before a board is connected.
+  &[hidden] {
+    display: none;
+  }
+
+  display: grid;
+  grid-template-columns: 8rem 1fr;
+  gap: 0.35rem 1rem;
+  margin: 1.4rem 0 0;
+  padding: 1rem 1.2rem;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 0.5rem;
+
+  dt {
+    color: $muted;
+  }
+
+  dd {
+    margin: 0;
+    font-family: ui-monospace, monospace;
+  }
+}
+
+pre {
+  // Nothing to show until the loader writes its first line.
+  &:empty {
+    display: none;
+  }
+
+  margin: 1.4rem 0 0;
+  padding: 0.9rem 1.1rem;
+  max-height: 16rem;
+  overflow: auto;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  color: #cbd5e1;
+  background: #14161a;
+  border-radius: 0.5rem;
+  white-space: pre-wrap;
+}

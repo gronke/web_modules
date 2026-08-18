@@ -21,6 +21,8 @@ The crate gains a tarball dependency source (below); the rest of this release ca
 
 ### Added
 
+- Source-built dependencies: a package named under `web_modules.sourceDependencies` is fetched from its git reference as sources and mounted for compilation, which is what a package publishing only TypeScript needs — it has no built output to vendor.
+- `examples/esptool-git`: esptool-js compiled from its TypeScript, with a Web Serial page that reads a connected ESP32's chip info.
 - A CommonJS-only package entry gets a generated ESM wrapper, with the bare import-map specifier pointing at that — a dependency shipping no ESM entry at all is otherwise unimportable in a browser.
 - `PackageSpec::tarball(name, url)` and a `package.json` `.tgz` dependency form: vendor a pre-packed `npm pack` tarball from an absolute https URL — e.g. a GitHub Release asset — extracted and import-mapped like an npm package, so a component library can be consumed straight from a Release without a registry. A `…/releases/download/….tgz` URL is recognised ahead of the `github:` shorthand.
 - MAINTENANCE.md: what a maintainer of this repository, or of a fork, has to have, configure once, and do on each release, with the failures worth recognising and their fixes.

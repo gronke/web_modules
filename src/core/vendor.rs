@@ -211,6 +211,21 @@ impl PackageSpec {
         self
     }
 
+    /// Take the package's **sources** rather than its built output, to be compiled
+    /// by this toolchain like any first-party module.
+    ///
+    /// Keeps `src/` (which [`Extract::BrowserAssets`] drops) via [`keep_sources`],
+    /// and asks for no import-map entry: a source package is reached through a
+    /// [`Mount`], whose prefix specifier [`vendor_sources`] returns.
+    ///
+    /// This is what a package publishing only TypeScript needs — there is no built
+    /// entry to point a bare specifier at.
+    pub fn as_source(mut self) -> Self {
+        self.extract = Extract::Filter(keep_sources);
+        self.imports = Imports::None;
+        self
+    }
+
     /// Provide explicit import-map entries: `(specifier, path)` where `path` is
     /// relative to `<mount>/<dir>/` (use `""` for a prefix specifier like
     /// `("lit/", "")`). Replaces auto-derivation.
@@ -400,6 +415,9 @@ pub fn read_package_json(path: &Path) -> Result<(Vec<PackageSpec>, Vec<Mount>)> 
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     let mut specs = Vec::new();
     let mut mounts = Vec::new();
+    // Source-built dependencies are fetched by `vendor_sources` into their own tree;
+    // vending them here as well would fetch each one twice, into two places.
+    let source_deps = source_dependency_names(&json, path)?;
     let Some(deps) = json.get("dependencies").and_then(|v| v.as_object()) else {
         return Ok((specs, mounts));
     };
@@ -407,6 +425,9 @@ pub fn read_package_json(path: &Path) -> Result<(Vec<PackageSpec>, Vec<Mount>)> 
         let Some(value) = value.as_str() else {
             continue;
         };
+        if source_deps.iter().any(|n| n == name) {
+            continue;
+        }
         if let Some(rel) = local_path_dep(value) {
             mounts.push(
                 Mount::from_dir(base.join(rel))
@@ -422,6 +443,107 @@ pub fn read_package_json(path: &Path) -> Result<(Vec<PackageSpec>, Vec<Mount>)> 
         }
     }
     Ok((specs, mounts))
+}
+
+/// The dependency names listed under `web_modules.sourceDependencies`, in manifest
+/// order. Absent key → empty.
+fn source_dependency_names(json: &serde_json::Value, path: &Path) -> Result<Vec<String>> {
+    let Some(listed) = json
+        .get("web_modules")
+        .and_then(|v| v.get("sourceDependencies"))
+    else {
+        return Ok(Vec::new());
+    };
+    let listed = listed.as_array().ok_or_else(|| {
+        Error::Vendor(format!(
+            "{}: web_modules.sourceDependencies must be an array of dependency names",
+            path.display()
+        ))
+    })?;
+    let mut names = Vec::new();
+    for entry in listed {
+        let name = entry.as_str().ok_or_else(|| {
+            Error::Vendor(format!(
+                "{}: web_modules.sourceDependencies entries must be strings",
+                path.display()
+            ))
+        })?;
+        names.push(name.to_string());
+    }
+    Ok(names)
+}
+
+/// Build **source** specs from a `package.json`: the dependencies named under
+/// `web_modules.sourceDependencies`, taken from their git reference and configured to
+/// keep their sources ([`PackageSpec::as_source`]).
+///
+/// A package that publishes only TypeScript has no built output to vendor, so it is
+/// consumed the way a `file:` path-dep is — compiled from source by this toolchain.
+/// Naming it here is what says so:
+///
+/// ```json
+/// { "dependencies": { "acme-ui": "github:acme/ui#v2", "pako": "^2" },
+///   "web_modules": { "sourceDependencies": ["acme-ui"] } }
+/// ```
+///
+/// Pass the result to [`vendor_sources`], which fetches each package and returns the
+/// [`Mount`]s that make them importable. The named packages are excluded from
+/// [`read_package_json`]'s vendoring specs, so nothing is fetched twice.
+///
+/// A listed name absent from `dependencies`, or whose value is not a git reference, is
+/// an error: only a git source has sources to build, and a silent skip would leave the
+/// app with an unresolvable import.
+pub fn source_specs_from_package_json(path: &Path) -> Result<Vec<PackageSpec>> {
+    let bytes = std::fs::read(path)?;
+    let json: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| Error::Vendor(format!("{}: {e}", path.display())))?;
+    let names = source_dependency_names(&json, path)?;
+    let deps = json.get("dependencies").and_then(|v| v.as_object());
+    let mut specs = Vec::new();
+    for name in names {
+        let value = deps
+            .and_then(|d| d.get(&name))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                Error::Vendor(format!(
+                    "{}: web_modules.sourceDependencies lists `{name}`, not found in dependencies",
+                    path.display()
+                ))
+            })?;
+        let (repo, reference) = parse_github_dep(value).ok_or_else(|| {
+            Error::Vendor(format!(
+                "{}: web_modules.sourceDependencies lists `{name}`, whose value `{value}` is not a \
+                 git reference — only a git source can be built from source",
+                path.display()
+            ))
+        })?;
+        specs.push(PackageSpec::git(repo, reference).dir(&name).as_source());
+    }
+    Ok(specs)
+}
+
+/// Fetch source-built packages into `dir` and return the [`Mount`]s that make them
+/// importable.
+///
+/// Each package lands in `dir/<name>/` and is mounted at `/<name>/` under the
+/// specifier `<name>/`, the same shape [`read_package_json`] gives a `file:` path-dep —
+/// so a git-sourced dependency and a local one are indistinguishable downstream: one
+/// mount set drives the import map and the tsconfig, and the pipeline compiles both.
+///
+/// `dir` must sit **outside** the vendored-modules directory. That tree is reserved for
+/// vendored output, and a source file that would compile into it is refused.
+pub fn vendor_sources(dir: &Path, specs: &[PackageSpec]) -> Result<Vec<Mount>> {
+    // The mount prefix is unused: source specs carry `Imports::None`, so no import-map
+    // entry is derived here — the returned mounts carry the specifiers instead.
+    vendor(dir, "", specs)?;
+    Ok(specs
+        .iter()
+        .map(|spec| {
+            Mount::from_dir(dir.join(&spec.dir))
+                .specifier(format!("{}/", spec.dir))
+                .url(format!("/{}/", spec.dir))
+        })
+        .collect())
 }
 
 /// The path of a local path-dependency value (`file:…`, `link:…`, `./…`, `../…`).
@@ -469,6 +591,31 @@ fn parse_github_dep(value: &str) -> Option<(String, String)> {
         return None;
     }
     Some((format!("{owner}/{repo}"), reference))
+}
+
+/// Selection for a source-built package: keep everything a module graph can reach,
+/// **including `src/`** — for a package that publishes only sources, that is the
+/// package. The counterpart of [`keep_browser_assets`], which drops `src/` because a
+/// published package's sources are redundant next to its built output.
+///
+/// Declaration files are dropped: `.d.ts` has no runtime form, and the compiler emits
+/// nothing for it.
+pub fn keep_sources(rel: &str) -> Option<String> {
+    if rel
+        .split('/')
+        .any(|seg| matches!(seg, "node" | "development" | "node_modules" | ".git"))
+    {
+        return None;
+    }
+    if rel.ends_with(".d.ts") {
+        return None;
+    }
+    const KEPT: [&str; 9] = [
+        ".ts", ".tsx", ".mts", ".js", ".mjs", ".cjs", ".json", ".css", ".scss",
+    ];
+    KEPT.iter()
+        .any(|ext| rel.ends_with(ext))
+        .then(|| rel.to_string())
 }
 
 /// Default selection: keep browser assets (`.js`/`.mjs`/`.css`) **plus `.scss`
@@ -1365,6 +1512,130 @@ mod tests {
             !names.contains(&"pg"),
             "server-only dep left out of the browser vend"
         );
+    }
+
+    /// The distinction the feature turns on: a package that publishes only sources is
+    /// empty under the browser-asset filter, and whole under this one.
+    #[test]
+    fn keep_sources_keeps_the_src_tree_that_browser_assets_drops() {
+        assert_eq!(keep_browser_assets("src/esploader.ts"), None);
+        assert_eq!(
+            keep_sources("src/esploader.ts").as_deref(),
+            Some("src/esploader.ts")
+        );
+        assert_eq!(
+            keep_sources("src/targets/stub_flasher/stub_flasher_32s3.json").as_deref(),
+            Some("src/targets/stub_flasher/stub_flasher_32s3.json")
+        );
+        assert_eq!(
+            keep_sources("package.json").as_deref(),
+            Some("package.json")
+        );
+        assert_eq!(
+            keep_sources("src/app.scss").as_deref(),
+            Some("src/app.scss")
+        );
+
+        // A declaration has no runtime form, and nothing under these trees is shipped.
+        assert_eq!(keep_sources("src/index.d.ts"), None);
+        assert_eq!(keep_sources("node_modules/lit/index.js"), None);
+        assert_eq!(keep_sources("development/debug.js"), None);
+        // Not part of a module graph.
+        assert_eq!(keep_sources("README.md"), None);
+        assert_eq!(keep_sources("LICENSE"), None);
+    }
+
+    #[test]
+    fn source_dependencies_take_the_dependency_key_as_their_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        std::fs::write(
+            &p,
+            r#"{"dependencies":{"acme-ui":"github:acme/ui#v2","pako":"^2"},
+                "web_modules":{"sourceDependencies":["acme-ui"]}}"#,
+        )
+        .unwrap();
+
+        let specs = source_specs_from_package_json(&p).unwrap();
+        assert_eq!(specs.len(), 1);
+        // The dependency key names the directory and the specifier, not the repo.
+        assert_eq!(specs[0].dir, "acme-ui");
+        assert!(matches!(specs[0].imports, Imports::None));
+        assert!(matches!(specs[0].extract, Extract::Filter(_)));
+    }
+
+    /// Fetching the same package into two trees would be worse than either, so the
+    /// vend list and the source list must not overlap.
+    #[test]
+    fn a_source_dependency_is_not_also_vended() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        std::fs::write(
+            &p,
+            r#"{"dependencies":{"acme-ui":"github:acme/ui#v2","pako":"^2"},
+                "web_modules":{"sourceDependencies":["acme-ui"]}}"#,
+        )
+        .unwrap();
+
+        let (specs, _mounts) = read_package_json(&p).unwrap();
+        assert_eq!(
+            specs.iter().map(PackageSpec::name).collect::<Vec<_>>(),
+            vec!["pako"],
+            "the source dependency is left to vendor_sources"
+        );
+    }
+
+    #[test]
+    fn source_dependencies_without_the_key_are_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        std::fs::write(&p, r#"{"dependencies":{"pako":"^2"}}"#).unwrap();
+        assert!(source_specs_from_package_json(&p).unwrap().is_empty());
+    }
+
+    #[test]
+    fn source_dependencies_naming_a_missing_dep_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        std::fs::write(
+            &p,
+            r#"{"dependencies":{"pako":"^2"},"web_modules":{"sourceDependencies":["nope"]}}"#,
+        )
+        .unwrap();
+        let Err(err) = source_specs_from_package_json(&p) else {
+            panic!("expected an error for the missing dep");
+        };
+        assert!(err.to_string().contains("nope"), "error names it: {err}");
+    }
+
+    /// Only a git source has sources to build; a registry range does not, and a silent
+    /// skip would leave the app with an import nothing resolves.
+    #[test]
+    fn a_source_dependency_that_is_not_a_git_reference_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        std::fs::write(
+            &p,
+            r#"{"dependencies":{"pako":"^2"},"web_modules":{"sourceDependencies":["pako"]}}"#,
+        )
+        .unwrap();
+        let Err(err) = source_specs_from_package_json(&p) else {
+            panic!("expected an error for the registry range");
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("pako") && msg.contains("git"), "{msg}");
+    }
+
+    #[test]
+    fn source_dependencies_must_be_an_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        std::fs::write(
+            &p,
+            r#"{"dependencies":{"a":"github:o/r#v1"},"web_modules":{"sourceDependencies":"a"}}"#,
+        )
+        .unwrap();
+        assert!(source_specs_from_package_json(&p).is_err());
     }
 
     #[test]

@@ -715,6 +715,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "esptool-git"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "web_modules",
+]
+
+[[package]]
 name = "fast-glob"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

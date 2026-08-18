@@ -13,6 +13,7 @@ Runnable demos of the [`web-modules`](..) toolchain — each is a small app you 
 | [`embedded`](embedded) | bake the whole site (minified JS + compressed CSS + `.gz` sidecars) into the binary and serve it statically, no filesystem access |
 | [`tauri`](tauri) | drive the live dev server from `cargo tauri dev` — a Tauri v2 desktop window whose frontend web-modules compiles + live-reloads (and builds for release) |
 | [`react-umd`](react-umd) | classic React, buildless — `Extract::File` vendors React 18's prebuilt **UMD** build, loaded as a `<script>` global; the app is `React.createElement` (no JSX), transformed on the fly |
+| [`esptool-git`](esptool-git) | build an **external dependency from source** — esptool-js, which publishes only TypeScript, fetched by git reference and compiled by the pipeline; the page reads an ESP32's chip info over Web Serial |
 | [`react-esm`](react-esm) | React 19 from npm (**CommonJS**) folded into one browser ES module via the opt-in `bundle` feature (rolldown); a zustand store proves a single shared React instance |
 
 ## Running
@@ -20,7 +21,7 @@ Runnable demos of the [`web-modules`](..) toolchain — each is a small app you 
 Workspace examples — `cargo run -p <crate>`:
 
 ```sh
-cargo run -p lit-element     # also: d3 · bootstrap-scss · compose · embedded · react-umd · react-esm
+cargo run -p lit-element     # also: d3 · bootstrap-scss · compose · embedded · react-umd · react-esm · esptool-git
 ```
 
 Then open the printed URL (default `http://127.0.0.1:8080/`). The live examples

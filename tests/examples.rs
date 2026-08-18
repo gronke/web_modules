@@ -10,7 +10,10 @@ use web_modules::build::{build, BuildOptions};
 use web_modules::importmap::Importmap;
 use web_modules::tsconfig::tsconfig_paths;
 use web_modules::typescript::compile_str;
-use web_modules::vendor::{read_package_json, specs_from_package_json, vendor, PackageSpec};
+use web_modules::vendor::{
+    keep_browser_assets, keep_sources, read_package_json, source_specs_from_package_json,
+    specs_from_package_json, vendor, vendor_sources, PackageSpec,
+};
 use web_modules::Mount;
 
 fn examples() -> PathBuf {
@@ -59,6 +62,63 @@ fn compose_assembly_co_generates_consistent_artifacts() {
     let app_js = compile_str(&app_ts, &compose_web.join("app.ts")).unwrap();
     assert!(app_js.contains("counter/counter.js"));
     assert!(app_js.contains("chart/chart.js"));
+}
+
+/// A dependency that publishes only TypeScript, fetched from git and compiled here. The
+/// assertion that matters is that `src/` survived: the default extraction drops it, which
+/// is why a source-only package needs `keep_sources`.
+#[test]
+#[ignore = "network: fetches a git archive and vendors npm packages"]
+fn esptool_git_builds_a_source_dependency_from_its_git_reference() {
+    let ex = examples();
+    let web = ex.join("esptool-git/web");
+    let package_json = web.join("package.json");
+
+    // Same shape as examples/esptool-git/src/main.rs, but fetching into a temp dir.
+    let tmp = tempfile::tempdir().unwrap();
+    let (specs, mut mounts) = read_package_json(&package_json).unwrap();
+    let vendored = vendor(&tmp.path().join("web_modules"), "/web_modules", &specs).unwrap();
+
+    // The source dependency is not in the vend list; it is fetched separately.
+    assert!(
+        !specs.iter().any(|s| s.name() == "esptool-js"),
+        "a source dependency must not also be vendored"
+    );
+
+    let source_specs = source_specs_from_package_json(&package_json).unwrap();
+    let deps = tmp.path().join("deps");
+    mounts.extend(vendor_sources(&deps, &source_specs).unwrap());
+    mounts.push(Mount::root(&web));
+
+    // The package arrived as TypeScript, `src/` and all — what the default filter drops.
+    let src = deps.join("esptool-js/src");
+    assert!(src.join("esploader.ts").is_file(), "sources are present");
+    assert!(
+        src.join("targets/stub_flasher/stub_flasher_32s3.json")
+            .is_file(),
+        "the flasher stubs a dynamic import reaches are present"
+    );
+    assert_eq!(keep_browser_assets("src/esploader.ts"), None);
+    assert!(keep_sources("src/esploader.ts").is_some());
+
+    // Co-generated from the one mount set, as in the compose example.
+    let mut importmap = vendored;
+    importmap.extend(Importmap::from_mounts(&mounts));
+    let tsconfig = tsconfig_paths(&mounts, &ex);
+
+    // The browser resolves the source package by name...
+    assert!(importmap.resolves("esptool-js/src/index.js"));
+    // ...and so does an editor, from the same mounts — the drift guard.
+    assert!(tsconfig.as_object().unwrap().contains_key("esptool-js/*"));
+
+    // The prebuilt registry deps esptool-js imports are vendored and mapped.
+    assert!(importmap.resolves("pako"));
+    assert!(importmap.resolves("atob-lite"));
+
+    // The app compiles, keeping the by-name import for the browser to resolve.
+    let app_ts = std::fs::read_to_string(web.join("app.ts")).unwrap();
+    let app_js = compile_str(&app_ts, &web.join("app.ts")).unwrap();
+    assert!(app_js.contains("esptool-js/src/index.js"));
 }
 
 #[test]

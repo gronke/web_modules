@@ -105,7 +105,11 @@ jobs:
   draft:
     name: draft pre-release
     needs: gate
-    if: ${{ github.event_name == 'push' && github.ref_type == 'branch' && startsWith(github.ref_name, 'release/v') }}
+    # Only release branches build candidates, keyed on the branch rather than the
+    # event: cut-release dispatches this run as workflow_dispatch (a workflow-token
+    # branch push fires no events), and a dispatch from any other branch derives no
+    # version and is ignored.
+    if: ${{ github.ref_type == 'branch' && startsWith(github.ref_name, 'release/v') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

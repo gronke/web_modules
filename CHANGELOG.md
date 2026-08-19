@@ -11,6 +11,24 @@ The crate gains a tarball dependency source (below); the rest of this release ca
 
 ### Fixed
 
+- A source dependency's compiled entry is checked against its own manifest: when the layout its `tsconfig.json` describes is not the one it was published with, vendoring says so instead of leaving `auto_entries` to drop the package from the import map without a word.
+- A program source outside an explicit `rootDir` is refused, as `tsc` refuses it (TS6059). It was skipped, so an importer was emitted whose import had been compiled to nowhere and then deleted.
+- `rewriteRelativeImportExtensions` is honoured, so a package whose sources name `./util.ts` emits `./util.js` beside the file it names. An emitted specifier that still carries a TypeScript extension is refused, since the source it names does not survive vendoring.
+- A relative import resolves to the source of its own module format: `./foo.mjs` is written by `foo.mts`, and a `foo.ts` sibling is no longer compiled in its place.
+- `files` and `include` name a program's root files, so a source one of them imports is compiled too and `exclude` no longer removes it. Only the selected files were compiled, and the cleanup then deleted the rest — a root importing a sibling emitted an import that resolved to nothing.
+- A missing `rootDir` is inferred from the program's own input files, as `tsc` does, rather than from the text before a glob's first wildcard. A package whose sources all sit under `src/deep` emits from there, where its manifest points.
+- `.cts` is CommonJS source and is refused rather than renamed to `.cjs`, as is a config declaring CommonJS output through `module` or an ES 3 / ES 5 target. The transform strips types; it does not rewrite module code.
+- `.d.mts` and `.d.cts` are declarations, not sources. They passed as ordinary `.mts`/`.cts` files and could be emitted as `.d.mjs`/`.d.cjs`.
+- An absolute `rootDir` or `outDir` is refused rather than read as package-relative: it was safe from escape but silently compiled to a layout the dependency did not ask for.
+- A source dependency's `rootDir` and `outDir` are refused unless they stay inside the package, and the source root is deleted only when it is a strict descendant that does not hold the output. The config comes from a downloaded archive, so `rootDir: ".."` named the directory holding the package — which was then walked, written beside, and removed.
+- `files`, `include` and `exclude` select which files are compiled, with the directories `tsc` excludes regardless and the output directory subtracted. Everything under the source root was compiled, so an excluded dev or test source was emitted, and one that did not compile failed the vendoring.
+- A `tsconfig.json` naming a JSX mode, import source or factory is refused: `.tsx` compiles, but through the transform's own JSX handling rather than the one the config asks for.
+- A source dependency is compiled with its own emit semantics rather than this project's: `experimentalDecorators` and `useDefineForClassFields` are read from its `tsconfig.json`, and without the latter the target decides, as `tsc` does. The zero-config compile is the Lit preset, which gave a dependency legacy decorators and assignment-style class fields it never declared.
+- `.mts` compiles to `.mjs` and `.cts` to `.cjs`, and `.cts` reaches the compiler at all. Every compiled file was written as `.js`, so a package whose `exports` names `lib/index.mjs` had no such file and lost its import-map entry.
+- A `tsconfig.json` `include` may name a file rather than a glob. `include: ["src/index.ts"]` was read as a directory named `src/index.ts`; entries now contribute the directory they name, and the root is the one they share.
+- A compiled destination's cache key carries a compile fingerprint, so a pinned commit recompiles when the compiler changes instead of keeping output from an older release.
+- A source dependency is no longer also vended as a plain git dependency, which fetched one repository into two directories named differently — after the repository and after the dependency key.
+- A source dependency keeps its licence and notice files too, alongside the sources it compiles.
 - A vendored package keeps its `LICENSE`, `NOTICE`, `COPYING` and `AUTHORS` files, which the asset filter dropped. Serving a vendor tree is redistribution, and MIT and Apache-2.0 both require the notice to travel with the code.
 
 ### Changed
@@ -25,8 +43,12 @@ The crate gains a tarball dependency source (below); the rest of this release ca
 
 ### Added
 
-- Source-built dependencies: a package named under `web_modules.sourceDependencies` is fetched from its git reference as sources and mounted for compilation, which is what a package publishing only TypeScript needs — it has no built output to vendor.
-- `examples/esptool-git`: esptool-js compiled from its TypeScript, with a Web Serial page that reads a connected ESP32's chip info.
+- `tsconfig::TsConfig` reads a package's `tsconfig.json` — the JSONC the format really is, via `jsonc-parser` — into a typed config: the layout to reproduce and the emit-relevant options. Replaces a hand-rolled comment stripper that ended a string at an escaped quote.
+- `walk::files_within` walks a tree that came from outside the project without following symbolic links out of it, and `walk::contains` compares what a path reaches rather than what it reads. Used where an extracted archive is read.
+- `ClassFields` sets class-field semantics independently of `Decorators`, so standard decorators can pair with assignment semantics — the combination `tsc` uses below ES 2022.
+- A git dependency on a branch or tag is keyed on the archive's contents rather than the reference name, so moving the branch re-vendors instead of silently keeping the old tree; a commit id is keyed on itself and still costs no network once vendored.
+- Source-built dependencies: a package named under `web_modules.sourceDependencies` is fetched from its git reference and **compiled** into the layout its own `tsconfig.json` declares, so what lands in `web_modules/` is browser-ready JavaScript with entries derived from its own manifest — what a package publishing only TypeScript needs, and reachable from the CLI, not just a Rust driver.
+- `examples/esptool-git`: esptool-js consumed from its git reference and compiled by vendoring, with a Web Serial page that reads a connected ESP32's chip info over a bare `esptool-js` import.
 - A CommonJS-only package entry gets a generated ESM wrapper, with the bare import-map specifier pointing at that — a dependency shipping no ESM entry at all is otherwise unimportable in a browser.
 - `PackageSpec::tarball(name, url)` and a `package.json` `.tgz` dependency form: vendor a pre-packed `npm pack` tarball from an absolute https URL — e.g. a GitHub Release asset — extracted and import-mapped like an npm package, so a component library can be consumed straight from a Release without a registry. A `…/releases/download/….tgz` URL is recognised ahead of the `github:` shorthand.
 - MAINTENANCE.md: what a maintainer of this repository, or of a fork, has to have, configure once, and do on each release, with the failures worth recognising and their fixes.

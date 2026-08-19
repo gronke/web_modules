@@ -1,13 +1,15 @@
 {
   "name": "esptool-git-frontend",
   "private": true,
-  "description": "esptool-js is consumed from its git reference and compiled from its TypeScript: it publishes no built output, so there is nothing to vendor. Naming it under web_modules.sourceDependencies routes it to vendor_sources, which fetches it and mounts it — the same treatment a file: path-dep gets. pako and atob-lite are ordinary registry deps, vendored prebuilt; esptool-js imports both.",
+  "description": "esptool-js is consumed from its git reference and compiled from its TypeScript: it publishes no built output, so there is nothing to vendor prebuilt. Naming it under web_modules.sourceDependencies fetches it, compiles it into web_modules/esptool-js/ under the layout its own tsconfig declares, and resolves it like any other vendored package \u2014 one bare specifier, no mount. pako and atob-lite are ordinary registry deps, vendored prebuilt; esptool-js imports both.",
   "dependencies": {
     "esptool-js": "github:gronke/fork-esptool-js#gronke",
     "pako": "^2.1.0",
     "atob-lite": "^2.0.0"
   },
   "web_modules": {
-    "sourceDependencies": ["esptool-js"]
+    "sourceDependencies": [
+      "esptool-js"
+    ]
   }
 }

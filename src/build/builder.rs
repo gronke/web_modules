@@ -135,6 +135,7 @@ impl Build {
         let mut specs = self.specs;
         for manifest in &self.manifests {
             specs.extend(crate::vendor::specs_from_package_json(manifest)?);
+            specs.extend(crate::vendor::source_specs_from_package_json(manifest)?);
         }
         let mut seen = std::collections::HashSet::new();
         specs.retain(|s| seen.insert(s.name().to_string()));

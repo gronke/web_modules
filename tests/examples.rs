@@ -12,7 +12,7 @@ use web_modules::tsconfig::tsconfig_paths;
 use web_modules::typescript::compile_str;
 use web_modules::vendor::{
     keep_browser_assets, keep_sources, read_package_json, source_specs_from_package_json,
-    specs_from_package_json, vendor, vendor_sources, PackageSpec,
+    specs_from_package_json, vendor, PackageSpec,
 };
 use web_modules::Mount;
 
@@ -64,61 +64,81 @@ fn compose_assembly_co_generates_consistent_artifacts() {
     assert!(app_js.contains("chart/chart.js"));
 }
 
-/// A dependency that publishes only TypeScript, fetched from git and compiled here. The
-/// assertion that matters is that `src/` survived: the default extraction drops it, which
-/// is why a source-only package needs `keep_sources`.
+/// A dependency that publishes only TypeScript, compiled by vendoring into the layout its
+/// own `tsconfig.json` declares. The assertion that matters is that what lands in
+/// `web_modules/` is browser-ready: compiled `.js` where the manifest points, no `.ts` at all.
 #[test]
 #[ignore = "network: fetches a git archive and vendors npm packages"]
-fn esptool_git_builds_a_source_dependency_from_its_git_reference() {
+fn esptool_git_compiles_a_source_dependency_into_the_vendor_tree() {
     let ex = examples();
     let web = ex.join("esptool-git/web");
     let package_json = web.join("package.json");
 
-    // Same shape as examples/esptool-git/src/main.rs, but fetching into a temp dir.
+    // Same shape as examples/esptool-git/src/main.rs, but vendoring into a temp dir.
     let tmp = tempfile::tempdir().unwrap();
-    let (specs, mut mounts) = read_package_json(&package_json).unwrap();
-    let vendored = vendor(&tmp.path().join("web_modules"), "/web_modules", &specs).unwrap();
+    let vendor_root = tmp.path().join("web_modules");
+    let (mut specs, mut mounts) = read_package_json(&package_json).unwrap();
 
-    // The source dependency is not in the vend list; it is fetched separately.
-    assert!(
-        !specs.iter().any(|s| s.name() == "esptool-js"),
-        "a source dependency must not also be vendored"
-    );
+    // The source dependency is not in the plain vend list; it comes from its own reader.
+    assert!(!specs.iter().any(|s| s.name() == "fork-esptool-js"));
+    specs.extend(source_specs_from_package_json(&package_json).unwrap());
 
-    let source_specs = source_specs_from_package_json(&package_json).unwrap();
-    let deps = tmp.path().join("deps");
-    mounts.extend(vendor_sources(&deps, &source_specs).unwrap());
+    let importmap = vendor(&vendor_root, "/web_modules", &specs).unwrap();
     mounts.push(Mount::root(&web));
 
-    // The package arrived as TypeScript, `src/` and all — what the default filter drops.
-    let src = deps.join("esptool-js/src");
-    assert!(src.join("esploader.ts").is_file(), "sources are present");
+    // Compiled into `lib/`, which is what this package's tsconfig `outDir` names and where
+    // its `main`/`module` already point — so no entry had to be guessed.
+    let pkg = vendor_root.join("esptool-js");
+    assert!(pkg.join("lib/index.js").is_file(), "compiled entry");
+    assert!(pkg.join("lib/esploader.js").is_file());
     assert!(
-        src.join("targets/stub_flasher/stub_flasher_32s3.json")
+        pkg.join("lib/targets/stub_flasher/stub_flasher_32s3.json")
             .is_file(),
-        "the flasher stubs a dynamic import reaches are present"
+        "assets a dynamic import reaches are copied beside the compiled output"
     );
-    assert_eq!(keep_browser_assets("src/esploader.ts"), None);
-    assert!(keep_sources("src/esploader.ts").is_some());
+    assert!(
+        !pkg.join("src").exists(),
+        "the TypeScript was an intermediate"
+    );
+    assert_eq!(
+        walk_ts(&pkg).len(),
+        0,
+        "nothing uncompiled may ship: {:?}",
+        walk_ts(&pkg)
+    );
 
-    // Co-generated from the one mount set, as in the compose example.
-    let mut importmap = vendored;
-    importmap.extend(Importmap::from_mounts(&mounts));
-    let tsconfig = tsconfig_paths(&mounts, &ex);
-
-    // The browser resolves the source package by name...
-    assert!(importmap.resolves("esptool-js/src/index.js"));
-    // ...and so does an editor, from the same mounts — the drift guard.
-    assert!(tsconfig.as_object().unwrap().contains_key("esptool-js/*"));
-
-    // The prebuilt registry deps esptool-js imports are vendored and mapped.
+    // The bare specifier is the dependency key, not the repository it came from.
+    assert!(importmap.resolves("esptool-js"));
+    assert!(!importmap.resolves("fork-esptool-js"));
+    // And the prebuilt registry deps it imports are there too.
     assert!(importmap.resolves("pako"));
     assert!(importmap.resolves("atob-lite"));
 
-    // The app compiles, keeping the by-name import for the browser to resolve.
+    // `keep_sources` is what let `src/` through to be compiled at all.
+    assert_eq!(keep_browser_assets("src/esploader.ts"), None);
+    assert!(keep_sources("src/esploader.ts").is_some());
+
+    // The app compiles, keeping the bare import for the browser to resolve.
     let app_ts = std::fs::read_to_string(web.join("app.ts")).unwrap();
     let app_js = compile_str(&app_ts, &web.join("app.ts")).unwrap();
-    assert!(app_js.contains("esptool-js/src/index.js"));
+    assert!(app_js.contains("esptool-js"));
+}
+
+/// Every TypeScript source under `dir`, for the "nothing uncompiled ships" assertion.
+///
+/// Walked with the crate's own helper: a vendored tree came out of an archive, and a
+/// symbolic link in one is a way out of the directory being checked.
+fn walk_ts(dir: &Path) -> Vec<PathBuf> {
+    web_modules::walk::files_within(dir)
+        .unwrap()
+        .into_iter()
+        .filter(|rel| {
+            matches!(
+                rel.extension().and_then(|e| e.to_str()),
+                Some("ts" | "tsx" | "mts" | "cts")
+            )
+        })
+        .collect()
 }
 
 #[test]

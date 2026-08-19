@@ -20,12 +20,12 @@ cargo run -p esptool-git
     "web_modules": { "sourceDependencies": ["esptool-js"] } }
   ```
 
-  `source_specs_from_package_json` turns that into a source spec and `vendor_sources` fetches it into `web/deps/`, returning a `Mount`.
-  From there it is indistinguishable from the [`compose`](../compose) example's `file:` path-deps: one mount set, sources compiled on request, raw `.ts` never served.
+  `source_specs_from_package_json` turns that into a source spec, and `vendor` fetches **and compiles** it into the layout its own `tsconfig.json` declares — here `outDir: ./lib` over `include: ["src/**/*"]`.
+  What lands in `web_modules/esptool-js/lib/` is browser-ready JavaScript, so the bare `esptool-js` specifier resolves exactly as a prebuilt package's would and no `.ts` is ever served.
 
 - **Why it has to work this way.** The repository ships `src/*.ts` and nothing else.
   The default browser-asset extraction drops `src/` — reasonably, since a published package's sources are redundant beside its built output — which leaves a source-only package with nothing to vendor.
-  `keep_sources` keeps the sources instead, and the pipeline compiles them.
+  `keep_sources` keeps them instead, and vendoring compiles them with the crate's own TypeScript compiler; no Node, and no build script of the package's own is run.
 
 - **Prebuilt and source-built side by side.** `pako` and `atob-lite` are ordinary registry deps, vendored as published output into `web/web_modules/`, and esptool-js imports both.
   One import map covers both kinds.
@@ -34,7 +34,7 @@ cargo run -p esptool-git
 
 ## The page
 
-`web/app.ts` imports `ESPLoader` and `Transport` from `esptool-js/src/index.js`, a prefix specifier into the mount and the same shape `compose` uses to import a sibling by name.
+`web/app.ts` imports `ESPLoader` and `Transport` from the bare `esptool-js`, which is the point: the import is unremarkable, and nothing in it hints that the package arrived as TypeScript from a git reference.
 It reports the chip's description, MAC, crystal frequency, features and flash size.
 
 It **only reads.** `detectChip()` identifies the chip over Web Serial, the flasher stub is never uploaded and nothing is written, so pointing this at a board cannot modify it.
@@ -44,4 +44,4 @@ Web Serial means Chrome or Edge, and the page says so and disables the button el
 
 ## Generated files
 
-`web/deps/`, `web/web_modules/`, `web/index.html`, `web/importmap.json` and `tsconfig.json` are all produced at startup from the tracked sources, and gitignored.
+`web/web_modules/`, `web/index.html`, `web/importmap.json` and `tsconfig.json` are all produced at startup from the tracked sources, and gitignored.

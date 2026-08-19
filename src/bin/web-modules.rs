@@ -268,9 +268,12 @@ fn build_vendor_specs(
     require_nonempty: bool,
 ) -> Res<Vec<PackageSpec>> {
     let mut specs: Vec<PackageSpec> = packages.iter().map(|p| PackageSpec::parse(p)).collect();
-    // Each `--manifest` package.json's `dependencies`, via the same helper build scripts use.
+    // Each `--manifest` package.json's `dependencies`, via the same helper build scripts use,
+    // plus anything it names under `web_modules.sourceDependencies` — packages that publish
+    // only TypeScript, vendored by compiling them rather than by copying a build.
     for path in manifests {
         specs.extend(web_modules::vendor::specs_from_package_json(path)?);
+        specs.extend(web_modules::vendor::source_specs_from_package_json(path)?);
     }
     if require_nonempty && specs.is_empty() {
         return Err("vendor: give package specs (e.g. lit@^3) or --manifest <package.json>".into());

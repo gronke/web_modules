@@ -9,6 +9,10 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 The crate gains a tarball dependency source (below); the rest of this release carries the release pipeline and the maintainer documentation.
 
+### Fixed
+
+- A vendored package keeps its `LICENSE`, `NOTICE`, `COPYING` and `AUTHORS` files, which the asset filter dropped. Serving a vendor tree is redistribution, and MIT and Apache-2.0 both require the notice to travel with the code.
+
 ### Changed
 
 - CI restores a warm `target/` again: the cache action's target entry is restore-only by design and the paired save was never called, so every run — pull request and main alike — compiled the whole workspace cold across each feature set it checks. Saving on main makes pull requests consumers of it.

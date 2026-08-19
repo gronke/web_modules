@@ -4,18 +4,16 @@
 //! [esptool-js](https://github.com/gronke/fork-esptool-js) is declared in
 //! `web/package.json` by git reference and named under
 //! `web_modules.sourceDependencies`. There is no built output to vendor — the repository
-//! ships `src/*.ts` and nothing else — so it is treated the way a `file:` path-dep is in
-//! the [compose](../compose) example: fetched, mounted, and compiled alongside the app's
-//! own TypeScript. Nothing downstream can tell the two apart.
+//! ships `src/*.ts` and nothing else — so vendoring compiles it, into the layout its own
+//! `tsconfig.json` declares. What lands in `web_modules/` is browser-ready JavaScript,
+//! indistinguishable from any other vendored package: `import … from 'esptool-js'` and
+//! nothing here knows it arrived as source.
 //!
-//! The shape is the same as compose's, with one extra step:
+//! Two steps, both from one `package.json`:
 //!   - `read_package_json` → vendoring specs for the prebuilt registry deps (`pako`,
 //!     `atob-lite`), minus anything named as a source dependency.
-//!   - `source_specs_from_package_json` + [`vendor_sources`] → the git package, fetched
-//!     into `web/deps/` and returned as a [`Mount`]. It lives outside `web_modules/`
-//!     because that tree is reserved for vendored output.
-//!   - One **mount set** drives the runtime **import map** ([`Importmap::from_mounts`])
-//!     and the editor **tsconfig** ([`write_tsconfig_base`]), so they cannot drift.
+//!   - `source_specs_from_package_json` → the git package, compiled by [`vendor`] into
+//!     `web_modules/esptool-js/lib/`, where its manifest already points.
 //!
 //! The page itself asks an ESP32 what it is, over Web Serial: chip description, MAC,
 //! features, crystal frequency and flash size. It only ever reads — no flasher stub is
@@ -29,9 +27,7 @@ use std::path::Path;
 
 use web_modules::importmap::Importmap;
 use web_modules::tsconfig::write_tsconfig_base;
-use web_modules::vendor::{
-    read_package_json, source_specs_from_package_json, vendor, vendor_sources,
-};
+use web_modules::vendor::{read_package_json, source_specs_from_package_json, vendor};
 use web_modules::Mount;
 
 const HTML: &str = r#"<!doctype html>
@@ -67,21 +63,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let web = manifest.join("web");
     let package_json = web.join("package.json");
 
-    // 1. Registry deps → vendoring specs. Source dependencies are excluded here; they
-    //    are fetched below, into their own tree.
-    let (specs, mut mounts) = read_package_json(&package_json)?;
+    // 1. Registry deps → vendoring specs, minus anything named a source dependency.
+    let (mut specs, mut mounts) = read_package_json(&package_json)?;
 
-    // 2. Vendor the prebuilt registry deps. esptool-js imports both: `pako` for the
-    //    deflate stream, `atob-lite` to decode the flasher stubs.
+    // 2. The source-built dependency, whose TypeScript vendoring compiles. It sits beside
+    //    the prebuilt ones because the result is the same kind of thing: browser-ready
+    //    JavaScript under `web_modules/`, entries derived from its own manifest.
+    specs.extend(source_specs_from_package_json(&package_json)?);
+
+    // 3. Vendor them all. esptool-js imports `pako` for the deflate stream and
+    //    `atob-lite` to decode the flasher stubs.
     let vendored = vendor(&web.join("web_modules"), "/web_modules", &specs)?;
 
-    // 3. Fetch the source-built dependency and mount it. Outside `web_modules/`: that
-    //    tree is reserved for vendored output, and a source file that would compile into
-    //    it is refused.
-    let source_specs = source_specs_from_package_json(&package_json)?;
-    mounts.extend(vendor_sources(&web.join("deps"), &source_specs)?);
-
-    // 4. One mount set — the fetched sources plus our own files at the root.
+    // 4. Our own files at the root; the vendored tree needs no mount.
     mounts.push(Mount::root(&web));
 
     // 5. Co-generate the runtime import map and the editor tsconfig from that one set.

@@ -116,6 +116,9 @@ pub struct PackageSpec {
     dest: Option<PathBuf>,
     extract: Extract,
     imports: Imports,
+    /// Compile the package's TypeScript after extraction, so what lands in the
+    /// vendor tree is what a browser loads. Set by [`PackageSpec::as_source`].
+    compile: bool,
 }
 
 impl PackageSpec {
@@ -132,6 +135,7 @@ impl PackageSpec {
             dest: None,
             extract: Extract::BrowserAssets,
             imports: Imports::Auto,
+            compile: false,
         }
     }
 
@@ -152,6 +156,7 @@ impl PackageSpec {
             dest: None,
             extract: Extract::BrowserAssets,
             imports: Imports::None,
+            compile: false,
         }
     }
 
@@ -171,6 +176,7 @@ impl PackageSpec {
             dest: None,
             extract: Extract::BrowserAssets,
             imports: Imports::Auto,
+            compile: false,
         }
     }
 
@@ -211,18 +217,33 @@ impl PackageSpec {
         self
     }
 
-    /// Take the package's **sources** rather than its built output, to be compiled
-    /// by this toolchain like any first-party module.
+    /// Take the package's **sources** and compile them, for a package that publishes
+    /// no browser-usable build.
     ///
-    /// Keeps `src/` (which [`Extract::BrowserAssets`] drops) via [`keep_sources`],
-    /// and asks for no import-map entry: a source package is reached through a
-    /// [`Mount`], whose prefix specifier [`vendor_sources`] returns.
+    /// Keeps `src/` (which [`Extract::BrowserAssets`] drops) via [`keep_sources`], then
+    /// compiles the TypeScript into the layout the package's own `tsconfig.json`
+    /// declares — so `main`/`module`/`exports` resolve against files that are there, and
+    /// the vendored tree is browser-ready like any other.
     ///
-    /// This is what a package publishing only TypeScript needs — there is no built
-    /// entry to point a bare specifier at.
+    /// What that config decides is honoured: `rootDir`/`outDir` and the inputs `files`,
+    /// `include` and `exclude` select; the emitted extension per module format; decorator
+    /// lowering and class-field semantics. What it cannot decide here is refused with a
+    /// message naming the package — aliases, an inherited config, decorator metadata, JSX
+    /// modes and factories. `target` is read for the class-field default only: this
+    /// transform strips types and lowers what it is told to, and does no target
+    /// downlevelling, so a package built for a lower target keeps the syntax its sources
+    /// use.
+    ///
+    /// Needs the `typescript` feature: there is no compiling TypeScript without a
+    /// TypeScript compiler.
     pub fn as_source(mut self) -> Self {
         self.extract = Extract::Filter(keep_sources);
-        self.imports = Imports::None;
+        self.compile = true;
+        // A git spec derives no import-map entry by default, because a whole-repo archive
+        // has no reliable browser entry. Once compiled into the layout its `tsconfig.json`
+        // declares, this package's own `main`/`module`/`exports` do resolve, so the
+        // ordinary auto-derivation applies.
+        self.imports = Imports::Auto;
         self
     }
 
@@ -307,6 +328,10 @@ pub fn specs_from_package_json(path: &Path) -> Result<Vec<PackageSpec>> {
         ))
     })?;
     let deps = json.get("dependencies").and_then(|v| v.as_object());
+    // A source-built dependency is vendored from its own spec, which carries the compile
+    // step and takes its directory from the dependency key; vending it here as well fetches
+    // the same repository twice, into two differently named directories.
+    let source_deps = source_dependency_names(&json, path)?;
     let mut specs = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for entry in whitelist {
@@ -317,6 +342,9 @@ pub fn specs_from_package_json(path: &Path) -> Result<Vec<PackageSpec>> {
             )));
         };
         if !seen.insert(name.to_string()) {
+            continue;
+        }
+        if source_deps.iter().any(|n| n == name) {
             continue;
         }
         let value = deps
@@ -346,6 +374,7 @@ pub fn specs_from_package_json_sections(
     let bytes = std::fs::read(path)?;
     let json: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| Error::Vendor(format!("{}: {e}", path.display())))?;
+    let source_deps = source_dependency_names(&json, path)?;
     let mut specs = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for section in sections {
@@ -356,6 +385,9 @@ pub fn specs_from_package_json_sections(
             let Some(value) = value.as_str() else {
                 continue;
             };
+            if source_deps.iter().any(|n| n == name) {
+                continue;
+            }
             let Some(spec) = dep_to_spec(name, value) else {
                 continue;
             };
@@ -415,8 +447,8 @@ pub fn read_package_json(path: &Path) -> Result<(Vec<PackageSpec>, Vec<Mount>)> 
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     let mut specs = Vec::new();
     let mut mounts = Vec::new();
-    // Source-built dependencies are fetched by `vendor_sources` into their own tree;
-    // vending them here as well would fetch each one twice, into two places.
+    // Source-built dependencies are vendored from their own specs, which carry the
+    // compile step; vending them here as well would fetch each one twice.
     let source_deps = source_dependency_names(&json, path)?;
     let Some(deps) = json.get("dependencies").and_then(|v| v.as_object()) else {
         return Ok((specs, mounts));
@@ -486,9 +518,11 @@ fn source_dependency_names(json: &serde_json::Value, path: &Path) -> Result<Vec<
 ///   "web_modules": { "sourceDependencies": ["acme-ui"] } }
 /// ```
 ///
-/// Pass the result to [`vendor_sources`], which fetches each package and returns the
-/// [`Mount`]s that make them importable. The named packages are excluded from
-/// [`read_package_json`]'s vendoring specs, so nothing is fetched twice.
+/// Pass the result to [`vendor`] alongside the ordinary specs: each is fetched, its
+/// TypeScript compiled into the layout its `tsconfig.json` declares, and its entries
+/// derived from its own manifest — so the vendored package is browser-ready like any
+/// other. The named packages are excluded from [`read_package_json`]'s specs, so
+/// nothing is fetched twice.
 ///
 /// A listed name absent from `dependencies`, or whose value is not a git reference, is
 /// an error: only a git source has sources to build, and a silent skip would leave the
@@ -520,30 +554,6 @@ pub fn source_specs_from_package_json(path: &Path) -> Result<Vec<PackageSpec>> {
         specs.push(PackageSpec::git(repo, reference).dir(&name).as_source());
     }
     Ok(specs)
-}
-
-/// Fetch source-built packages into `dir` and return the [`Mount`]s that make them
-/// importable.
-///
-/// Each package lands in `dir/<name>/` and is mounted at `/<name>/` under the
-/// specifier `<name>/`, the same shape [`read_package_json`] gives a `file:` path-dep —
-/// so a git-sourced dependency and a local one are indistinguishable downstream: one
-/// mount set drives the import map and the tsconfig, and the pipeline compiles both.
-///
-/// `dir` must sit **outside** the vendored-modules directory. That tree is reserved for
-/// vendored output, and a source file that would compile into it is refused.
-pub fn vendor_sources(dir: &Path, specs: &[PackageSpec]) -> Result<Vec<Mount>> {
-    // The mount prefix is unused: source specs carry `Imports::None`, so no import-map
-    // entry is derived here — the returned mounts carry the specifiers instead.
-    vendor(dir, "", specs)?;
-    Ok(specs
-        .iter()
-        .map(|spec| {
-            Mount::from_dir(dir.join(&spec.dir))
-                .specifier(format!("{}/", spec.dir))
-                .url(format!("/{}/", spec.dir))
-        })
-        .collect())
 }
 
 /// The path of a local path-dependency value (`file:…`, `link:…`, `./…`, `../…`).
@@ -601,17 +611,36 @@ fn parse_github_dep(value: &str) -> Option<(String, String)> {
 /// Declaration files are dropped: `.d.ts` has no runtime form, and the compiler emits
 /// nothing for it.
 pub fn keep_sources(rel: &str) -> Option<String> {
-    if rel
-        .split('/')
-        .any(|seg| matches!(seg, "node" | "development" | "node_modules" | ".git"))
-    {
+    // A source archive is a whole repository, so it carries directories that are not the
+    // package: its own examples, tests and docs would otherwise be vendored and compiled.
+    if rel.split('/').any(|seg| {
+        // Dot-directories are editor and CI furniture (`.github`, `.vscode`,
+        // `.devcontainer`), never something a browser loads.
+        seg.starts_with('.')
+            || matches!(
+                seg,
+                "node" | "development" | "node_modules" | "examples" | "test" | "tests" | "docs"
+            )
+    }) {
         return None;
     }
-    if rel.ends_with(".d.ts") {
+    if is_legal_notice(rel) {
+        return Some(rel.to_string());
+    }
+    // A lockfile describes how to build the package, not how to load it.
+    if matches!(
+        rel,
+        "package-lock.json" | "npm-shrinkwrap.json" | "yarn.lock"
+    ) {
         return None;
     }
-    const KEPT: [&str; 9] = [
-        ".ts", ".tsx", ".mts", ".js", ".mjs", ".cjs", ".json", ".css", ".scss",
+    // A declaration has no runtime form. TypeScript writes one per module format, and
+    // `.d.mts`/`.d.cts` would otherwise pass as ordinary `.mts`/`.cts` sources.
+    if is_declaration(rel) {
+        return None;
+    }
+    const KEPT: [&str; 10] = [
+        ".ts", ".tsx", ".mts", ".cts", ".js", ".mjs", ".cjs", ".json", ".css", ".scss",
     ];
     KEPT.iter()
         .any(|ext| rel.ends_with(ext))
@@ -668,6 +697,484 @@ pub fn vendor(vendor_dir: &Path, mount: &str, specs: &[PackageSpec]) -> Result<I
     vendor_inner(vendor_dir, mount, specs).map_err(|e| Error::Vendor(e.to_string()))
 }
 
+/// The layout and the emit semantics to reproduce for a source dependency, read from the
+/// `tsconfig.json` it brought with it.
+///
+/// Reproducing them is what lets a source-built package keep the entry its manifest
+/// already declares: the compiled files land where its `package.json` points, under the
+/// name its module format implies, with the decorator and class-field semantics its own
+/// build uses. Emit-affecting options beyond those are refused rather than approximated,
+/// so the gap between this and the package's own `tsc` run is an error and not a surprise.
+///
+/// Refused rather than guessed: `paths`/`baseUrl` aliases (the emitted specifiers would not
+/// resolve in a browser), `extends` (the real options live in a file we do not have) and
+/// `emitDecoratorMetadata` (the metadata needs a decorator runtime this compiler does not
+/// emit). Each names the package, because the failure is a property of the dependency and
+/// not of the project vendoring it.
+struct SourcePlan {
+    layout: crate::tsconfig::SourceLayout,
+    /// The config itself, which also says which files are inputs.
+    config: crate::tsconfig::TsConfig,
+    /// `useDefineForClassFields`, or what the target implies.
+    defines_class_fields: bool,
+    /// `experimentalDecorators`.
+    legacy_decorators: bool,
+    /// `rewriteRelativeImportExtensions`.
+    rewrite_import_extensions: bool,
+}
+
+fn source_plan(pkg_dir: &Path, package: &str) -> Result<SourcePlan> {
+    let Some(config) = crate::tsconfig::TsConfig::load(pkg_dir)
+        .map_err(|e| Error::Vendor(format!("{package}: {e}")))?
+    else {
+        // No tsconfig: compile in place, which is what tsc does with no outDir, and take
+        // its defaults for the rest.
+        return Ok(SourcePlan {
+            layout: crate::tsconfig::SourceLayout::default(),
+            config: crate::tsconfig::TsConfig::default(),
+            defines_class_fields: false,
+            legacy_decorators: false,
+            rewrite_import_extensions: false,
+        });
+    };
+
+    if config.extends.is_some() {
+        return Err(Error::Vendor(format!(
+            "{package}: tsconfig.json `extends` another config, which is not in the \
+             package \u{2014} its real compiler options cannot be known from here"
+        )));
+    }
+    for (set, alias) in [
+        (config.compiler_options.paths.is_some(), "paths"),
+        (config.compiler_options.base_url.is_some(), "baseUrl"),
+    ] {
+        if set {
+            return Err(Error::Vendor(format!(
+                "{package}: tsconfig.json sets `{alias}`, so its imports resolve through \
+                 aliases a browser cannot follow"
+            )));
+        }
+    }
+    if config.compiler_options.emit_decorator_metadata == Some(true) {
+        return Err(Error::Vendor(format!(
+            "{package}: tsconfig.json sets `emitDecoratorMetadata`, which needs a \
+             decorator runtime this compiler does not emit"
+        )));
+    }
+    // A `.tsx` source compiles, but through the transform's own JSX handling: a config that
+    // names a mode or a factory would be emitted against something else.
+    for (set, option) in [
+        (config.compiler_options.jsx.is_some(), "jsx"),
+        (
+            config.compiler_options.jsx_import_source.is_some(),
+            "jsxImportSource",
+        ),
+        (config.compiler_options.jsx_factory.is_some(), "jsxFactory"),
+        (
+            config.compiler_options.jsx_fragment_factory.is_some(),
+            "jsxFragmentFactory",
+        ),
+    ] {
+        if set {
+            return Err(Error::Vendor(format!(
+                "{package}: tsconfig.json sets `{option}`, which this compiler does not \
+                 reproduce"
+            )));
+        }
+    }
+
+    // The transform strips types; it does not rewrite module code. A package emitting
+    // CommonJS would get its `export`s left as they are under a `.cjs` name, which is
+    // neither its own output nor anything a browser loads.
+    if config.emits_commonjs() {
+        return Err(Error::Vendor(format!(
+            "{package}: tsconfig.json emits CommonJS ({}), which this compiler does not \
+             produce — a browser-ready package has to be ES modules",
+            config.compiler_options.module.as_deref().map_or_else(
+                || format!("implied by target {:?}", config.compiler_options.target),
+                |m| format!("module {m}")
+            )
+        )));
+    }
+
+    let layout = config
+        .layout()
+        .map_err(|e| Error::Vendor(format!("{package}: {e}")))?;
+    Ok(SourcePlan {
+        layout,
+        defines_class_fields: config.defines_class_fields(),
+        legacy_decorators: config.compiler_options.experimental_decorators == Some(true),
+        rewrite_import_extensions: config.compiler_options.rewrite_relative_import_extensions
+            == Some(true),
+        config,
+    })
+}
+
+/// Compile a source-built package in place: TypeScript under the layout's root becomes
+/// JavaScript under its out directory, non-TS assets are copied alongside, and the
+/// TypeScript is removed.
+///
+/// The result is a browser-ready package in the vendor tree, so nothing downstream needs
+/// to know it arrived as source — no mount, no prefix specifier, no compilation at serve
+/// or build time.
+#[cfg(feature = "typescript")]
+fn compile_source_tree(pkg_dir: &Path, package: &str) -> Result<()> {
+    use crate::processors::typescript::{ClassFields, Decorators, TranspileOptions};
+
+    let plan = source_plan(pkg_dir, package)?;
+
+    // The dependency's own emit semantics, not this project's: the zero-config compile is
+    // the Lit preset, which would hand a package legacy decorators and assignment-style
+    // class fields it never asked for.
+    let options = TranspileOptions {
+        decorators: if plan.legacy_decorators {
+            Decorators::Lit
+        } else {
+            Decorators::Standard
+        },
+        class_fields: if plan.defines_class_fields {
+            ClassFields::Define
+        } else {
+            ClassFields::Assign
+        },
+        rewrite_import_extensions: plan.rewrite_import_extensions,
+        ..TranspileOptions::default()
+    };
+
+    // `files` and `include` name the program's *root* files; a file one of them imports is
+    // in the program too, and `exclude` does not remove it. So the roots are collected and
+    // then followed, which is also what makes the emitted imports resolvable: a sibling
+    // skipped here would be deleted below and its importer left pointing at nothing.
+    let carried = crate::walk::files_within(pkg_dir)?;
+    let mut queue: std::collections::VecDeque<PathBuf> = carried
+        .iter()
+        .filter(|rel| plan.config.is_root_file(rel))
+        .cloned()
+        .collect();
+
+    let mut seen: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+    let mut compiled: std::collections::BTreeMap<PathBuf, String> =
+        std::collections::BTreeMap::new();
+    let mut assets: std::collections::BTreeSet<PathBuf> = std::collections::BTreeSet::new();
+
+    while let Some(rel) = queue.pop_front() {
+        if !seen.insert(rel.clone()) {
+            continue;
+        }
+        let entry = pkg_dir.join(&rel);
+        if is_commonjs_source(&rel) {
+            return Err(Error::Vendor(format!(
+                "{package}: `{}` is CommonJS source, which this compiler does not convert",
+                rel.display()
+            )));
+        }
+        match compiled_extension(&rel) {
+            None => {
+                assets.insert(rel);
+            }
+            Some(_) => {
+                let source =
+                    fs::read_to_string(&entry).map_err(|e| Error::Vendor(e.to_string()))?;
+                let output =
+                    crate::processors::typescript::compile_str_capturing(&source, &entry, &options)
+                        .map_err(|e| {
+                            Error::Vendor(format!("{package}: compiling {}: {e}", rel.display()))
+                        })?;
+                // Read off the emitted AST, so what is followed is what the output imports.
+                for import in &output.imports {
+                    // The source it names is compiled and then removed, so an emitted
+                    // specifier still ending in a TypeScript extension resolves to nothing.
+                    // `rewriteRelativeImportExtensions` is how a package that writes
+                    // `./util.ts` avoids this; without it, the output is broken.
+                    if is_typescript_source(Path::new(import.specifier.as_str())) {
+                        return Err(Error::Vendor(format!(
+                            "{package}: {} imports `{}`, a TypeScript path that does not \
+                             survive compiling — the package needs \
+                             `rewriteRelativeImportExtensions`",
+                            rel.display(),
+                            import.specifier
+                        )));
+                    }
+                    if let Some(next) = resolve_relative_import(pkg_dir, &rel, &import.specifier) {
+                        queue.push_back(next);
+                    }
+                }
+                compiled.insert(rel, output.code);
+            }
+        }
+    }
+
+    if compiled.is_empty() {
+        return Err(Error::Vendor(format!(
+            "{package}: declared as a source dependency but carries no TypeScript"
+        )));
+    }
+
+    // `tsc` infers a missing `rootDir` from the program's own input files, so it is read off
+    // what was compiled rather than off the patterns that found it.
+    let root_rel = match &plan.layout.root {
+        Some(root) => root.clone(),
+        None => crate::tsconfig::common_input_dir(compiled.keys().map(PathBuf::as_path)),
+    };
+    let root = pkg_dir.join(&root_rel);
+    if !root.is_dir() {
+        return Err(Error::Vendor(format!(
+            "{package}: no `{root_rel}` directory to compile — the archive carried no sources"
+        )));
+    }
+    // The components were refused if they read as leaving the package; this is what they
+    // *reach*, which a link inside the archive can make different.
+    let out_dir = pkg_dir.join(&plan.layout.out);
+    for (dir, named) in [(&root, &root_rel), (&out_dir, &plan.layout.out)] {
+        if dir.exists() && !crate::walk::contains(pkg_dir, dir) {
+            return Err(Error::Vendor(format!(
+                "{package}: `{named}` resolves outside the package"
+            )));
+        }
+    }
+
+    // `tsc` refuses a program whose inputs are not all under the `rootDir` it was given
+    // (TS6059), and so does this: the alternative is emitting an importer whose import was
+    // compiled to nowhere. Only an explicit root can fail this way — an inferred one is the
+    // directory the inputs share, so it contains them by construction.
+    if plan.layout.root.is_some() {
+        if let Some(stray) = compiled.keys().find(|rel| !rel.starts_with(&root_rel)) {
+            return Err(Error::Vendor(format!(
+                "{package}: `{}` is in the program but not under `rootDir` `{root_rel}`, so \
+                 it has nowhere to be emitted",
+                stray.display()
+            )));
+        }
+    }
+
+    let destination = |rel: &Path| -> Option<PathBuf> {
+        // An asset outside the root keeps its place: the layout says nothing about it, and
+        // an emitted module reaching it still resolves.
+        let under = rel.strip_prefix(&root_rel).ok()?;
+        Some(out_dir.join(under))
+    };
+
+    for (rel, code) in &compiled {
+        let Some(dest) = destination(rel) else {
+            continue;
+        };
+        let ext = compiled_extension(rel).unwrap_or("js");
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| Error::Vendor(e.to_string()))?;
+        }
+        fs::write(dest.with_extension(ext), code).map_err(|e| Error::Vendor(e.to_string()))?;
+    }
+    // Assets a compiled module still reaches — the JSON a dynamic `import()` pulls.
+    for rel in &assets {
+        let Some(dest) = destination(rel) else {
+            continue;
+        };
+        if dest == pkg_dir.join(rel) {
+            continue;
+        }
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent).map_err(|e| Error::Vendor(e.to_string()))?;
+        }
+        fs::copy(pkg_dir.join(rel), &dest).map_err(|e| Error::Vendor(e.to_string()))?;
+    }
+
+    // The TypeScript was an intermediate; the vendor tree holds what a browser loads.
+    // Removed only when the root is a strict descendant of the package that does not hold
+    // the output — deleting the root would otherwise take the files just written with it.
+    let removable = !root_rel.is_empty()
+        && root_rel != plan.layout.out
+        && root != pkg_dir
+        && crate::walk::contains(pkg_dir, &root)
+        && !out_dir.starts_with(&root);
+    if removable {
+        fs::remove_dir_all(&root).map_err(|e| Error::Vendor(e.to_string()))?;
+    }
+    // Whatever the layout, nothing uncompiled may ship — a stray source elsewhere in the
+    // archive would be served as TypeScript no browser can import.
+    for rel in crate::walk::files_within(pkg_dir)? {
+        if is_typescript_source(&rel) {
+            fs::remove_file(pkg_dir.join(&rel)).map_err(|e| Error::Vendor(e.to_string()))?;
+        }
+    }
+
+    // The whole point is that the package's own manifest still points at its output, and
+    // the layout was reproduced from a config that may not say everything. If the entry is
+    // missing, `auto_entries` would quietly drop the package from the import map, so the
+    // mismatch is reported here with both halves of it.
+    if let Ok(manifest) = PackageJson::from_path(&pkg_dir.join("package.json")) {
+        for entry in manifest.entries() {
+            if let Entry::Bare(target) = entry {
+                if !pkg_dir.join(&target).is_file() {
+                    return Err(Error::Vendor(format!(
+                        "{package}: compiled into `{}`, but its manifest points at `{target}`, \
+                         which is not there — the layout its tsconfig.json describes is not \
+                         the one it was published with, so `rootDir` needs stating",
+                        if plan.layout.out.is_empty() {
+                            "the package root".to_string()
+                        } else {
+                            plan.layout.out.clone()
+                        }
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The source file a relative import names, if the package carries one.
+///
+/// TypeScript writes the *emitted* specifier in its sources — `./util.js` for `util.ts` —
+/// so the extension is mapped back before looking, and a directory stands for its `index`.
+/// A specifier that climbs out of the package resolves to nothing.
+#[cfg(feature = "typescript")]
+fn resolve_relative_import(pkg_dir: &Path, from: &Path, specifier: &str) -> Option<PathBuf> {
+    if !specifier.starts_with("./") && !specifier.starts_with("../") {
+        return None;
+    }
+    let joined = from.parent().unwrap_or(Path::new("")).join(specifier);
+    let rel = lexically_normalize(&joined)?;
+    let stem = rel.with_extension("");
+
+    // The module format travels with the extension both ways: `./foo.mjs` is written by
+    // `foo.mts`, and only by it. Guessing `foo.ts` for it would compile the wrong file when
+    // a package carries both.
+    let sources: &[&str] = match rel.extension().and_then(|e| e.to_str()) {
+        Some("mjs") => &["mts"],
+        Some("cjs") => &["cts"],
+        Some("jsx") => &["tsx"],
+        Some("js") => &["ts", "tsx"],
+        // An extensionless specifier, or one naming an asset.
+        _ => &[],
+    };
+
+    let mut candidates = sources
+        .iter()
+        .map(|ext| stem.with_extension(ext))
+        // `./foo` names `foo.ts`, and `./dir` names the module inside it.
+        .chain(["ts", "tsx"].iter().map(|ext| {
+            let mut path = rel.clone();
+            path.as_mut_os_string().push(format!(".{ext}"));
+            path
+        }))
+        .chain(["index.ts", "index.tsx"].iter().map(|f| rel.join(f)))
+        // A real `.js`/`.json` beside the sources is an asset the output still reaches.
+        .chain(std::iter::once(rel.clone()));
+
+    candidates.find(|candidate| pkg_dir.join(candidate).is_file())
+}
+
+/// A relative path with `.` and `..` resolved textually, or `None` when it climbs out.
+#[cfg(feature = "typescript")]
+fn lexically_normalize(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out: Vec<std::ffi::OsString> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop()?;
+            }
+            Component::Normal(segment) => out.push(segment.to_os_string()),
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(out.iter().collect())
+}
+
+/// The extension TypeScript emits for a source file, or `None` when the file is not one it
+/// compiles.
+///
+/// The module format travels with the extension: `.mts` emits `.mjs`, which is what a
+/// `package.json` pointing at `lib/index.mjs` needs to find. `.cts` is CommonJS source and
+/// has no entry here — see [`is_commonjs_source`]. A declaration has no runtime form at all.
+fn compiled_extension(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?;
+    if is_declaration(name) {
+        return None;
+    }
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("ts" | "tsx") => Some("js"),
+        Some("mts") => Some("mjs"),
+        _ => None,
+    }
+}
+
+/// Whether a file name is a TypeScript declaration, in any of the three module forms.
+fn is_declaration(name: &str) -> bool {
+    [".d.ts", ".d.mts", ".d.cts"]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
+}
+
+/// Whether a path is CommonJS TypeScript source, which `.cts` is by definition.
+fn is_commonjs_source(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| !is_declaration(name) && name.ends_with(".cts"))
+}
+
+/// Whether a path is TypeScript source in any form, declarations included — what must not
+/// remain in a vendored tree.
+fn is_typescript_source(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("ts" | "tsx" | "mts" | "cts")
+    )
+}
+
+/// A source dependency without a compiler is a contradiction, so say so rather than
+/// vendoring TypeScript a browser cannot load.
+#[cfg(not(feature = "typescript"))]
+fn compile_source_tree(_pkg_dir: &Path, package: &str) -> Result<()> {
+    Err(Error::Vendor(format!(
+        "{package} is a source dependency, which needs the `typescript` feature to compile"
+    )))
+}
+
+/// Fingerprint of the source-compilation path, mixed into a compiled spec's cache key.
+///
+/// A compiled tree is derived output, so the source identifier alone does not describe it:
+/// the same commit through a different compiler is a different tree, and a marker naming
+/// only the commit would keep the old JavaScript across an upgrade. The crate version moves
+/// whenever the transform or the extraction rules can have moved, and needs nobody to
+/// remember to bump it.
+const COMPILE_SCHEMA: &str = concat!("compile", env!("CARGO_PKG_VERSION"));
+
+/// A spec's cache key, carrying the compile fingerprint when the destination is compiled.
+///
+/// An uncompiled destination is the archive's contents and nothing else, so its key stays
+/// as it is; a compiled one is also the compiler's output, and a key that ignored that
+/// would call a stale tree fresh.
+fn compiled_key(key: String, compile: bool) -> String {
+    if compile {
+        format!("{key}+{COMPILE_SCHEMA}")
+    } else {
+        key
+    }
+}
+
+/// Whether a git reference is a commit id, and so cannot move.
+///
+/// A branch or tag can be repointed at any time, which is what makes keying a cache on
+/// the reference name wrong; a commit id names one tree forever.
+fn is_commit_ref(reference: &str) -> bool {
+    reference.len() == 40 && reference.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// A cache key derived from an archive's bytes, for a source whose key is not knowable
+/// before fetching.
+///
+/// Same position-weighted fold `npm_utils::cache::file_hash` uses, and for the same
+/// reason: this distinguishes one archive from another, and is not an integrity check.
+fn content_key(bytes: &[u8]) -> String {
+    let mut hash: u64 = 0;
+    for (i, byte) in bytes.iter().enumerate() {
+        hash = hash.wrapping_add((*byte as u64).wrapping_mul((i as u64).wrapping_add(1)));
+    }
+    format!("{hash:016x}")
+}
+
 fn vendor_inner(
     vendor_dir: &Path,
     mount: &str,
@@ -713,11 +1220,19 @@ fn vendor_inner(
         let flat = spec.dir.replace('/', "_");
         let marker = vendor_dir.join(format!(".{flat}.version"));
 
-        // Resolve the archive URL + the cache key (npm version, or the git ref).
+        // Resolve the archive URL and, when it can be known without fetching, the cache
+        // key. `None` means only the archive itself can say whether anything changed: a
+        // branch or tag keeps its name across a force-push, so keying on the reference
+        // would hold a stale tree forever. npm keys on the resolved version and a
+        // tarball on its URL, both of which move with the content.
         let (archive_url, cache_key, is_git) = match &spec.source {
             Source::Npm { package, range } => {
                 let resolved = Registry::npm().resolve(package, &Range::parse(range)?)?;
-                (resolved.tarball_url, resolved.version.to_string(), false)
+                (
+                    resolved.tarball_url,
+                    Some(resolved.version.to_string()),
+                    false,
+                )
             }
             Source::Git {
                 owner,
@@ -725,26 +1240,50 @@ fn vendor_inner(
                 reference,
             } => (
                 download::github_archive_url(owner, repo, reference),
-                reference.clone(),
+                is_commit_ref(reference).then(|| reference.clone()),
                 true,
             ),
             // A pre-packed `.tgz`: fetch the URL directly and extract like an npm
             // tarball (`package/` layout, `is_git = false`). The URL is the cache
             // key, so a new release (a new URL) re-fetches.
-            Source::Tarball { url, .. } => (url.clone(), url.clone(), false),
+            Source::Tarball { url, .. } => (url.clone(), Some(url.clone()), false),
         };
 
-        if !is_up_to_date(&marker, &cache_key, &dest_dir, &spec.extract) {
+        // A known key can settle freshness without the network. A mutable reference
+        // cannot, so it always fetches and then compares the archive's contents.
+        let keyed = |key: String| compiled_key(key, spec.compile);
+        let cache_key = cache_key.map(keyed);
+        let fresh = |key: &Option<String>| {
+            key.as_deref()
+                .is_some_and(|k| is_up_to_date(&marker, k, &dest_dir, &spec.extract))
+        };
+        if !fresh(&cache_key) {
             let lock = vendor_dir.join(format!(".{flat}.lock"));
             cache::with_lock(&lock)(
                 || -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     // Re-check inside the lock: a concurrent build may have just done it.
-                    if is_up_to_date(&marker, &cache_key, &dest_dir, &spec.extract) {
+                    if fresh(&cache_key) {
                         return Ok(());
                     }
                     let bytes = download::fetch(&archive_url)?;
+                    // The archive is the key when the reference is not one: a moved branch
+                    // yields different bytes, which is what makes it re-extract.
+                    let key = match &cache_key {
+                        Some(key) => key.clone(),
+                        None => keyed(content_key(&bytes)),
+                    };
+                    // An unchanged archive leaves the tree — and, for a source dependency,
+                    // the compiled output — exactly as it is.
+                    if is_up_to_date(&marker, &key, &dest_dir, &spec.extract) {
+                        return Ok(());
+                    }
                     extract_archive(&bytes, is_git, &spec.extract, &dest_dir)?;
-                    cache::write_marker(&marker, &cache_key)?;
+                    // Compile inside the lock and before the marker, so the cached state is
+                    // always the finished, browser-ready tree.
+                    if spec.compile {
+                        compile_source_tree(&dest_dir, spec.name())?;
+                    }
+                    cache::write_marker(&marker, &key)?;
                     Ok(())
                 },
             )?;
@@ -970,13 +1509,15 @@ fn import_entries(spec: &PackageSpec, mount: &str, dest_dir: &Path) -> Vec<(Stri
             .collect(),
         Imports::Auto => {
             let pkg = PackageJson::from_path(&dest_dir.join("package.json")).ok();
-            auto_entries(
-                pkg.as_ref(),
-                source_name(&spec.source),
-                &spec.dir,
-                mount,
-                dest_dir,
-            )
+            // A source dependency is imported by the name its manifest gave it, which is
+            // `dir` — the repository it was fetched from is not what anyone writes in an
+            // `import`. Registry and tarball specs keep naming themselves.
+            let specifier = if spec.compile {
+                spec.dir.as_str()
+            } else {
+                source_name(&spec.source)
+            };
+            auto_entries(pkg.as_ref(), specifier, &spec.dir, mount, dest_dir)
         }
     }
 }
@@ -1532,6 +2073,671 @@ mod tests {
 
     /// The distinction the feature turns on: a package that publishes only sources is
     /// empty under the browser-asset filter, and whole under this one.
+    fn write_tsconfig(dir: &Path, body: &str) {
+        std::fs::write(dir.join("tsconfig.json"), body).unwrap();
+    }
+
+    /// Reproducing tsc's own mapping is what lets a compiled package keep the entry its
+    /// manifest already declares, so no entry has to be guessed. The shape esptool-js
+    /// ships: an `outDir` with the root implied by `include`.
+    #[test]
+    fn the_plan_carries_the_layout_to_reproduce() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        write_tsconfig(
+            dir.path(),
+            r#"{"compilerOptions":{"outDir":"./lib"},"include":["src/**/*"]}"#,
+        );
+        let plan = source_plan(dir.path(), "pkg").unwrap();
+        assert_eq!(
+            plan.layout.root, None,
+            "inferred from the inputs, not the globs"
+        );
+        assert_eq!(plan.layout.out, "lib");
+    }
+
+    #[test]
+    fn without_a_tsconfig_a_package_compiles_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = source_plan(dir.path(), "pkg").unwrap();
+        assert_eq!(plan.layout.root, None);
+        assert_eq!(plan.layout.out, "");
+        assert!(
+            !plan.defines_class_fields,
+            "tsc's own default below ES 2022"
+        );
+        assert!(!plan.legacy_decorators);
+    }
+
+    /// A dependency is compiled the way its own build compiles it. The zero-config default
+    /// here is the Lit preset, and handing that to a package targeting ES 2022 would give
+    /// it assignment-style class fields — observably different code, since a defined field
+    /// shadows an inherited getter where an assigned one calls its setter.
+    #[test]
+    fn the_plan_takes_emit_semantics_from_the_dependency() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = |body: &str| {
+            write_tsconfig(dir.path(), body);
+            source_plan(dir.path(), "pkg").unwrap()
+        };
+
+        let es2019 = plan(r#"{"compilerOptions":{"target":"ES2019"}}"#);
+        assert!(!es2019.defines_class_fields);
+        assert!(!es2019.legacy_decorators);
+
+        let es2022 = plan(r#"{"compilerOptions":{"target":"ES2022"}}"#);
+        assert!(es2022.defines_class_fields);
+
+        let lit = plan(r#"{"compilerOptions":{"experimentalDecorators":true,"target":"ES2019"}}"#);
+        assert!(lit.legacy_decorators);
+        assert!(!lit.defines_class_fields);
+
+        // Standard decorators with define semantics: neither of the two old presets.
+        let modern = plan(r#"{"compilerOptions":{"target":"ESNext"}}"#);
+        assert!(modern.defines_class_fields);
+        assert!(!modern.legacy_decorators);
+    }
+
+    /// Aliases, inherited configs and decorator metadata are refused rather than guessed:
+    /// the emitted specifiers would not resolve in a browser, the real options are
+    /// elsewhere, and the metadata needs a runtime this compiler does not emit.
+    #[test]
+    fn the_plan_refuses_what_it_cannot_honour() {
+        let dir = tempfile::tempdir().unwrap();
+        for body in [
+            r#"{"compilerOptions":{"paths":{"@/*":["src/*"]}}}"#,
+            r#"{"compilerOptions":{"baseUrl":"."}}"#,
+            r#"{"compilerOptions":{"emitDecoratorMetadata":true}}"#,
+            r#"{"extends":"../base.json"}"#,
+            r#"{"extends":["../base.json","../more.json"]}"#,
+        ] {
+            write_tsconfig(dir.path(), body);
+            let Err(err) = source_plan(dir.path(), "acme-ui") else {
+                panic!("expected a refusal for {body}");
+            };
+            assert!(
+                err.to_string().contains("acme-ui"),
+                "names the package: {err}"
+            );
+        }
+    }
+
+    /// A manifest pointing at `lib/index.mjs` finds nothing if `.mts` emits `.js`.
+    #[test]
+    fn the_module_format_travels_with_the_extension() {
+        for (source, emitted) in [
+            ("src/index.ts", Some("js")),
+            ("src/app.tsx", Some("js")),
+            ("src/index.mts", Some("mjs")),
+            // CommonJS source, refused rather than renamed.
+            ("src/index.cts", None),
+            // A declaration has no runtime form, in any of its three module spellings.
+            ("src/index.d.ts", None),
+            ("src/index.d.mts", None),
+            ("src/index.d.cts", None),
+            ("src/data.json", None),
+            ("src/style.css", None),
+        ] {
+            assert_eq!(compiled_extension(Path::new(source)), emitted, "{source}");
+        }
+        // A declaration is not a source, whichever module form it declares.
+        for name in ["index.d.ts", "index.d.mts", "index.d.cts"] {
+            assert_eq!(keep_sources(&format!("src/{name}")), None, "{name}");
+        }
+        // The filter carries every source form through, so an unsupported one is refused
+        // with a message rather than vanishing from the tree.
+        for ext in ["ts", "tsx", "mts", "cts"] {
+            assert!(
+                keep_sources(&format!("src/index.{ext}")).is_some(),
+                ".{ext} reaches the compiler"
+            );
+        }
+    }
+
+    /// The same commit through a different compiler is a different tree, so a compiled
+    /// destination's key has to move when the compiler does — otherwise an upgrade carrying
+    /// a transform fix leaves the old JavaScript in place, pinned and apparently fresh.
+    #[test]
+    fn a_compiled_destination_keys_on_the_compiler_too() {
+        let commit = "433170bc68fe2339a2f5b465f8839ae2370f96a0".to_string();
+        assert_eq!(
+            compiled_key(commit.clone(), false),
+            commit,
+            "an uncompiled tree is the archive and nothing else"
+        );
+        let compiled = compiled_key(commit.clone(), true);
+        assert_ne!(compiled, commit);
+        assert!(compiled.starts_with(&commit), "the source is still named");
+        assert!(
+            compiled.contains(env!("CARGO_PKG_VERSION")),
+            "and the compiler with it: {compiled}"
+        );
+    }
+
+    /// A package declaring `exports: ./lib/index.mjs` finds nothing if `.mts` emits `.js`,
+    /// and `auto_entries` then skips the package rather than resolving it.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn compiling_a_tree_preserves_the_module_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        write_tsconfig(
+            pkg,
+            r#"{"compilerOptions":{"outDir":"lib","rootDir":"src","target":"ES2019"}}"#,
+        );
+        std::fs::write(pkg.join("src/index.mts"), "export const a: number = 1;").unwrap();
+        std::fs::write(pkg.join("src/plain.ts"), "export const c: boolean = true;").unwrap();
+        std::fs::write(pkg.join("src/data.json"), "{}").unwrap();
+
+        compile_source_tree(pkg, "acme").unwrap();
+
+        assert!(pkg.join("lib/index.mjs").is_file(), "an .mts emits .mjs");
+        assert!(pkg.join("lib/plain.js").is_file());
+        assert!(pkg.join("lib/data.json").is_file(), "assets travel along");
+        assert!(
+            !pkg.join("lib/index.js").exists(),
+            "and not under the wrong name"
+        );
+        assert!(
+            !pkg.join("src").exists(),
+            "the TypeScript was an intermediate"
+        );
+    }
+
+    /// `files` and `include` name root files, not the whole program: a file a root imports
+    /// is in it too, and `exclude` does not take it out. Skipping it would emit an importer
+    /// whose import was then deleted by the cleanup — a package that cannot load.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn an_imported_source_joins_the_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        std::fs::create_dir_all(pkg.join("src/deep")).unwrap();
+        write_tsconfig(
+            pkg,
+            r#"{"compilerOptions":{"rootDir":"src","outDir":"lib","target":"ES2019"},
+                "files":["src/index.ts"],"exclude":["src/deep/**"]}"#,
+        );
+        // The one root, importing a sibling `files` does not name and a file `exclude` does.
+        std::fs::write(
+            pkg.join("src/index.ts"),
+            "export { util } from \"./util.js\";\nexport { deep } from \"./deep/inner.js\";",
+        )
+        .unwrap();
+        std::fs::write(pkg.join("src/util.ts"), "export const util: number = 1;").unwrap();
+        std::fs::write(
+            pkg.join("src/deep/inner.ts"),
+            "export const deep: number = 2;",
+        )
+        .unwrap();
+        // And one nobody imports, which the exclude keeps out.
+        std::fs::write(
+            pkg.join("src/deep/scratch.ts"),
+            "export const s: number = 3;",
+        )
+        .unwrap();
+
+        compile_source_tree(pkg, "acme").unwrap();
+
+        assert!(pkg.join("lib/index.js").is_file(), "the root");
+        assert!(
+            pkg.join("lib/util.js").is_file(),
+            "a sibling `files` does not name, reached by import"
+        );
+        assert!(
+            pkg.join("lib/deep/inner.js").is_file(),
+            "and one `exclude` names, reached the same way"
+        );
+        assert!(
+            !pkg.join("lib/deep/scratch.js").exists(),
+            "while an excluded file nobody imports stays out"
+        );
+        // Every import the emitted root makes resolves to a file beside it.
+        let emitted = std::fs::read_to_string(pkg.join("lib/index.js")).unwrap();
+        for specifier in ["./util.js", "./deep/inner.js"] {
+            assert!(emitted.contains(specifier), "{specifier} in {emitted}");
+            assert!(
+                pkg.join("lib")
+                    .join(specifier.trim_start_matches("./"))
+                    .is_file(),
+                "{specifier} resolves"
+            );
+        }
+    }
+
+    /// `tsc` infers a missing `rootDir` from the input files, so a package whose sources all
+    /// sit one level down emits from there — `lib/index.js`, not `lib/deep/index.js`. Taking
+    /// the glob's own prefix would put the output where the manifest does not point.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn the_inferred_root_follows_the_inputs_not_the_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        std::fs::create_dir_all(pkg.join("src/deep")).unwrap();
+        write_tsconfig(
+            pkg,
+            r#"{"compilerOptions":{"outDir":"lib","target":"ES2019"},"include":["src/**/*.ts"]}"#,
+        );
+        std::fs::write(pkg.join("src/deep/index.ts"), "export const a: number = 1;").unwrap();
+        std::fs::write(pkg.join("src/deep/util.ts"), "export const b: number = 2;").unwrap();
+
+        compile_source_tree(pkg, "acme").unwrap();
+
+        assert!(pkg.join("lib/index.js").is_file(), "rooted at src/deep");
+        assert!(pkg.join("lib/util.js").is_file());
+        assert!(
+            !pkg.join("lib/deep/index.js").exists(),
+            "and not at the glob's prefix"
+        );
+    }
+
+    /// `tsc` refuses a program with an input outside its `rootDir` (TS6059). Emitting the
+    /// importer and dropping the import would be worse than refusing: the output would load
+    /// and then fail at its first specifier.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn a_reachable_source_outside_an_explicit_root_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        std::fs::create_dir_all(pkg.join("shared")).unwrap();
+        write_tsconfig(
+            pkg,
+            r#"{"compilerOptions":{"rootDir":"src","outDir":"lib","target":"ES2022"},
+                "files":["src/index.ts"]}"#,
+        );
+        std::fs::write(
+            pkg.join("src/index.ts"),
+            "export { util } from \"../shared/util.js\";",
+        )
+        .unwrap();
+        std::fs::write(pkg.join("shared/util.ts"), "export const util: number = 1;").unwrap();
+
+        let Err(err) = compile_source_tree(pkg, "acme") else {
+            panic!("expected a refusal");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("shared/util.ts"),
+            "names the file: {message}"
+        );
+        assert!(message.contains("rootDir"), "and why: {message}");
+        assert!(
+            !pkg.join("lib/index.js").exists(),
+            "and nothing was emitted before failing"
+        );
+    }
+
+    /// A package whose sources name `.ts` paths needs `rewriteRelativeImportExtensions` for
+    /// its output to resolve, since the source it names is compiled and then removed.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn a_typescript_specifier_is_rewritten_when_the_config_says_so() {
+        let write = |pkg: &Path, rewrite: bool| {
+            std::fs::create_dir_all(pkg.join("src")).unwrap();
+            write_tsconfig(
+                pkg,
+                &format!(
+                    r#"{{"compilerOptions":{{"rootDir":"src","outDir":"lib","target":"ES2022",
+                        "rewriteRelativeImportExtensions":{rewrite}}}}}"#
+                ),
+            );
+            std::fs::write(
+                pkg.join("src/index.ts"),
+                "export { util } from \"./util.ts\";",
+            )
+            .unwrap();
+            std::fs::write(pkg.join("src/util.ts"), "export const util: number = 1;").unwrap();
+        };
+
+        let on = tempfile::tempdir().unwrap();
+        write(on.path(), true);
+        compile_source_tree(on.path(), "acme").unwrap();
+        let emitted = std::fs::read_to_string(on.path().join("lib/index.js")).unwrap();
+        assert!(
+            emitted.contains("./util.js") && !emitted.contains("./util.ts"),
+            "the emitted specifier names what was emitted: {emitted}"
+        );
+        assert!(on.path().join("lib/util.js").is_file(), "and it is there");
+
+        // Without it, the specifier would survive into output that cannot load, so the
+        // package is refused while the reason is still visible.
+        let off = tempfile::tempdir().unwrap();
+        write(off.path(), false);
+        let Err(err) = compile_source_tree(off.path(), "acme") else {
+            panic!("expected a refusal");
+        };
+        assert!(
+            err.to_string().contains("rewriteRelativeImportExtensions"),
+            "says what the package needs: {err}"
+        );
+    }
+
+    /// The module format travels with the extension in both directions: `./foo.mjs` is
+    /// written by `foo.mts` and by nothing else.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn an_import_resolves_to_the_source_of_its_own_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        write_tsconfig(
+            pkg,
+            r#"{"compilerOptions":{"rootDir":"src","outDir":"lib","target":"ES2022"},
+                "files":["src/index.mts"]}"#,
+        );
+        std::fs::write(
+            pkg.join("src/index.mts"),
+            "export { pick } from \"./foo.mjs\";",
+        )
+        .unwrap();
+        // Both spellings exist; only the `.mts` one is what `./foo.mjs` names.
+        std::fs::write(pkg.join("src/foo.mts"), "export const pick = \"mts\";").unwrap();
+        std::fs::write(pkg.join("src/foo.ts"), "export const pick = \"ts\";").unwrap();
+
+        compile_source_tree(pkg, "acme").unwrap();
+
+        let emitted = std::fs::read_to_string(pkg.join("lib/foo.mjs")).unwrap();
+        assert!(emitted.contains("mts"), "the .mts was compiled: {emitted}");
+        assert!(
+            !pkg.join("lib/foo.js").exists(),
+            "and the .ts sibling was never in the program"
+        );
+    }
+
+    /// The program is the *runtime* graph: a type-only import is erased before the imports
+    /// are read, so the file it named is neither compiled nor shipped. Nothing loads it, and
+    /// declarations are excluded from root inference by `tsc` too.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn a_type_only_import_does_not_join_the_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        write_tsconfig(
+            pkg,
+            r#"{"compilerOptions":{"rootDir":"src","outDir":"lib","target":"ES2022"},
+                "files":["src/index.ts"]}"#,
+        );
+        std::fs::write(
+            pkg.join("src/index.ts"),
+            "import type { Shape } from \"./shapes.js\";\nexport const one: Shape = 1 as Shape;",
+        )
+        .unwrap();
+        std::fs::write(pkg.join("src/shapes.ts"), "export type Shape = number;").unwrap();
+
+        compile_source_tree(pkg, "acme").unwrap();
+
+        assert!(pkg.join("lib/index.js").is_file());
+        assert!(
+            !pkg.join("lib/shapes.js").exists(),
+            "a type-only import has no runtime file to emit"
+        );
+        let emitted = std::fs::read_to_string(pkg.join("lib/index.js")).unwrap();
+        assert!(
+            !emitted.contains("shapes"),
+            "and the emitted module does not reach for it: {emitted}"
+        );
+    }
+
+    /// The feature rests on the manifest still pointing at the output. When the layout the
+    /// config describes is not the one the package was published with, `auto_entries` would
+    /// drop the package from the import map without a word; this says so instead.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn a_manifest_pointing_at_nothing_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        std::fs::write(
+            pkg.join("package.json"),
+            r#"{"name":"acme","module":"lib/index.js"}"#,
+        )
+        .unwrap();
+        // `rootDir: "."` is TypeScript 6's default, and puts the output a level deeper.
+        write_tsconfig(
+            pkg,
+            r#"{"compilerOptions":{"rootDir":".","outDir":"lib","target":"ES2022"}}"#,
+        );
+        std::fs::write(pkg.join("src/index.ts"), "export const a: number = 1;").unwrap();
+
+        let Err(err) = compile_source_tree(pkg, "acme") else {
+            panic!("expected the mismatch to be reported");
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("lib/index.js"),
+            "names the target: {message}"
+        );
+        assert!(message.contains("rootDir"), "and the way out: {message}");
+        assert!(
+            pkg.join("lib/src/index.js").is_file(),
+            "the output it did produce is still there to look at"
+        );
+    }
+
+    /// `.cts` is CommonJS source by definition. Renaming it `.cjs` while leaving its
+    /// `export`s alone produces neither the package's own output nor anything a browser
+    /// loads, so it is refused while it is still explicable.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn commonjs_source_is_refused_rather_than_renamed() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        write_tsconfig(
+            pkg,
+            r#"{"compilerOptions":{"rootDir":"src","outDir":"lib","target":"ES2019"}}"#,
+        );
+        std::fs::write(pkg.join("src/index.ts"), "export const a: number = 1;").unwrap();
+        std::fs::write(pkg.join("src/legacy.cts"), "export const b = 2;").unwrap();
+
+        let Err(err) = compile_source_tree(pkg, "acme") else {
+            panic!("expected a refusal");
+        };
+        let message = err.to_string();
+        assert!(message.contains("acme"), "names the package: {message}");
+        assert!(message.contains("legacy.cts"), "and the file: {message}");
+    }
+
+    /// A config declaring CommonJS output is refused too, before any file is read.
+    #[test]
+    fn a_commonjs_config_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for body in [
+            r#"{"compilerOptions":{"module":"CommonJS"}}"#,
+            r#"{"compilerOptions":{"module":"NodeNext"}}"#,
+            r#"{"compilerOptions":{"target":"ES5"}}"#,
+        ] {
+            write_tsconfig(dir.path(), body);
+            let Err(err) = source_plan(dir.path(), "acme-ui") else {
+                panic!("expected a refusal for {body}");
+            };
+            assert!(err.to_string().contains("CommonJS"), "says why: {err}");
+        }
+    }
+
+    /// A dependency gets its own emit semantics. Below ES 2022 a field declared without an
+    /// initializer emits nothing, as tsc does; from ES 2022 it is defined on the instance.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn compiling_a_tree_uses_the_dependency_semantics_not_this_project_s() {
+        let source = "export class A { declared: number; ready = 1; }";
+        let compile = |tsconfig: &str| {
+            let dir = tempfile::tempdir().unwrap();
+            let pkg = dir.path();
+            std::fs::create_dir_all(pkg.join("src")).unwrap();
+            write_tsconfig(pkg, tsconfig);
+            std::fs::write(pkg.join("src/index.ts"), source).unwrap();
+            compile_source_tree(pkg, "acme").unwrap();
+            std::fs::read_to_string(pkg.join("lib/index.js")).unwrap()
+        };
+
+        let assigned =
+            compile(r#"{"compilerOptions":{"outDir":"lib","rootDir":"src","target":"ES2019"}}"#);
+        assert!(
+            !assigned.contains("declared"),
+            "assignment semantics drop an uninitialized field: {assigned}"
+        );
+
+        let defined =
+            compile(r#"{"compilerOptions":{"outDir":"lib","rootDir":"src","target":"ES2022"}}"#);
+        assert!(
+            defined.contains("declared"),
+            "define semantics keep it, as ES 2022 specifies: {defined}"
+        );
+    }
+
+    /// The config is archive content, so a root that leaves the package must never be
+    /// walked, written beside, or — as the cleanup does — deleted.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn a_root_outside_the_package_is_refused_before_anything_is_touched() {
+        let outer = tempfile::tempdir().unwrap();
+        let sibling = outer.path().join("other-package");
+        std::fs::create_dir_all(sibling.join("lib")).unwrap();
+        std::fs::write(sibling.join("lib/keep.js"), "export {};").unwrap();
+
+        let pkg = outer.path().join("acme");
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        std::fs::write(pkg.join("src/index.ts"), "export const a: number = 1;").unwrap();
+        write_tsconfig(
+            &pkg,
+            r#"{"compilerOptions":{"rootDir":"..","outDir":"lib"}}"#,
+        );
+
+        let Err(err) = compile_source_tree(&pkg, "acme") else {
+            panic!("expected a refusal");
+        };
+        assert!(err.to_string().contains("acme"), "names the package: {err}");
+        assert!(
+            sibling.join("lib/keep.js").exists(),
+            "and the neighbour it would have deleted is still there"
+        );
+    }
+
+    /// An `outDir` inside the `rootDir` puts the output where the cleanup sweeps.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn output_nested_in_the_source_root_survives_the_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        std::fs::create_dir_all(pkg.join("src")).unwrap();
+        write_tsconfig(
+            pkg,
+            r#"{"compilerOptions":{"rootDir":"src","outDir":"src/out"}}"#,
+        );
+        std::fs::write(pkg.join("src/index.ts"), "export const a: number = 1;").unwrap();
+
+        compile_source_tree(pkg, "acme").unwrap();
+        assert!(pkg.join("src/out/index.js").is_file(), "the output is kept");
+        assert!(
+            !pkg.join("src/index.ts").exists(),
+            "and the source it came from is gone"
+        );
+    }
+
+    /// A package that excludes its own dev sources does not build them, and neither does
+    /// this — one of them failing to compile would otherwise fail the whole vendoring.
+    #[test]
+    #[cfg(feature = "typescript")]
+    fn only_the_declared_inputs_are_compiled() {
+        let dir = tempfile::tempdir().unwrap();
+        let pkg = dir.path();
+        std::fs::create_dir_all(pkg.join("src/dev")).unwrap();
+        write_tsconfig(
+            pkg,
+            r#"{"compilerOptions":{"rootDir":"src","outDir":"lib"},
+                "include":["src/**/*"],"exclude":["src/dev/**"]}"#,
+        );
+        std::fs::write(pkg.join("src/index.ts"), "export const a: number = 1;").unwrap();
+        std::fs::write(
+            pkg.join("src/dev/scratch.ts"),
+            "export const b: number = 2;",
+        )
+        .unwrap();
+
+        compile_source_tree(pkg, "acme").unwrap();
+        assert!(pkg.join("lib/index.js").is_file());
+        assert!(
+            !pkg.join("lib/dev/scratch.js").exists(),
+            "an excluded source is not an input"
+        );
+    }
+
+    /// A `.tsx` source compiles, so a config naming a JSX mode or factory would be emitted
+    /// against something other than what it asked for.
+    #[test]
+    fn jsx_settings_are_refused_rather_than_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        for body in [
+            r#"{"compilerOptions":{"jsx":"react-jsx"}}"#,
+            r#"{"compilerOptions":{"jsxImportSource":"preact"}}"#,
+            r#"{"compilerOptions":{"jsxFactory":"h"}}"#,
+            r#"{"compilerOptions":{"jsxFragmentFactory":"Fragment"}}"#,
+        ] {
+            write_tsconfig(dir.path(), body);
+            let Err(err) = source_plan(dir.path(), "acme-ui") else {
+                panic!("expected a refusal for {body}");
+            };
+            assert!(
+                err.to_string().contains("acme-ui"),
+                "names the package: {err}"
+            );
+        }
+    }
+
+    /// The repository furniture a whole-repo archive carries is not the package.
+    /// The distinction the git cache key turns on: a commit names one tree forever, a
+    /// branch or tag can be repointed, and keying on the name kept a stale tree.
+    #[test]
+    fn only_a_commit_id_counts_as_immutable() {
+        assert!(is_commit_ref("433170bc68fe2339a2f5b465f8839ae2370f96a0"));
+        assert!(is_commit_ref(&"a".repeat(40)));
+
+        assert!(!is_commit_ref("gronke"), "a branch moves");
+        assert!(!is_commit_ref("v0.6.1"), "a tag can be repointed");
+        assert!(!is_commit_ref("HEAD"));
+        assert!(!is_commit_ref("main"));
+        // An abbreviated id is not enough to be sure, so it is treated as mutable.
+        assert!(!is_commit_ref("433170b"));
+        // Right length, wrong alphabet.
+        assert!(!is_commit_ref(&"z".repeat(40)));
+    }
+
+    #[test]
+    fn content_key_tracks_the_bytes() {
+        assert_eq!(content_key(b"abc"), content_key(b"abc"));
+        assert_ne!(content_key(b"abc"), content_key(b"abd"));
+        // Position-weighted, so a reordering is not a collision.
+        assert_ne!(content_key(b"ab"), content_key(b"ba"));
+        assert_eq!(content_key(b"").len(), 16, "fixed-width hex");
+    }
+
+    #[test]
+    fn keep_sources_drops_repo_furniture() {
+        for path in [
+            "examples/typescript/src/index.ts",
+            "test/spec.ts",
+            "tests/spec.ts",
+            "docs/guide.js",
+            ".github/workflows/ci.yml",
+            ".vscode/settings.json",
+            ".devcontainer/devcontainer.json",
+            "package-lock.json",
+        ] {
+            assert_eq!(
+                keep_sources(path),
+                None,
+                "{path} is not part of the package"
+            );
+        }
+        // The package's own sources still come through.
+        assert!(keep_sources("src/index.ts").is_some());
+        assert!(keep_sources("package.json").is_some());
+    }
+
     #[test]
     fn keep_sources_keeps_the_src_tree_that_browser_assets_drops() {
         assert_eq!(keep_browser_assets("src/esploader.ts"), None);
@@ -1558,7 +2764,10 @@ mod tests {
         assert_eq!(keep_sources("development/debug.js"), None);
         // Not part of a module graph.
         assert_eq!(keep_sources("README.md"), None);
-        assert_eq!(keep_sources("LICENSE"), None);
+        // A licence covers the sources beside it, so it travels with them.
+        assert_eq!(keep_sources("LICENSE").as_deref(), Some("LICENSE"));
+        assert_eq!(keep_sources("LICENSE-MIT").as_deref(), Some("LICENSE-MIT"));
+        assert_eq!(keep_sources("NOTICE").as_deref(), Some("NOTICE"));
     }
 
     #[test]
@@ -1576,8 +2785,52 @@ mod tests {
         assert_eq!(specs.len(), 1);
         // The dependency key names the directory and the specifier, not the repo.
         assert_eq!(specs[0].dir, "acme-ui");
-        assert!(matches!(specs[0].imports, Imports::None));
+        assert!(specs[0].compile, "its TypeScript is compiled by vendoring");
         assert!(matches!(specs[0].extract, Extract::Filter(_)));
+        // A git spec derives no entries by default; compiling into the layout the manifest
+        // declares is what makes the ordinary auto-derivation correct here.
+        assert!(matches!(specs[0].imports, Imports::Auto));
+    }
+
+    /// The CLI assembles its spec list from `specs_from_package_json` and
+    /// `source_specs_from_package_json` and dedupes by spec name. A git spec is named after the
+    /// repository and a source spec after the dependency key, so those names differ and a source
+    /// dependency left in the vend list survives the dedupe — fetching one repository twice,
+    /// into `fork-esptool-js/` beside `esptool-js/`.
+    #[test]
+    fn the_vend_list_skips_a_source_dependency_in_both_forms() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("package.json");
+        let manifest = r#"{"dependencies":{"esptool-js":"github:gronke/fork-esptool-js#v1","pako":"^2"},
+                "web_modules":{"sourceDependencies":["esptool-js"]}}"#;
+        std::fs::write(&p, manifest).unwrap();
+        assert_eq!(
+            specs_from_package_json(&p)
+                .unwrap()
+                .iter()
+                .map(PackageSpec::name)
+                .collect::<Vec<_>>(),
+            vec!["pako"],
+            "the git dep is the source dep, vendored from its own spec"
+        );
+
+        // The same rule under a webDependencies whitelist that names it too.
+        let p = dir.path().join("whitelisted.json");
+        std::fs::write(
+            &p,
+            r#"{"dependencies":{"esptool-js":"github:gronke/fork-esptool-js#v1","pako":"^2"},
+                "web_modules":{"sourceDependencies":["esptool-js"],
+                               "webDependencies":["esptool-js","pako"]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            specs_from_package_json(&p)
+                .unwrap()
+                .iter()
+                .map(PackageSpec::name)
+                .collect::<Vec<_>>(),
+            vec!["pako"]
+        );
     }
 
     /// Fetching the same package into two trees would be worse than either, so the
@@ -1597,7 +2850,7 @@ mod tests {
         assert_eq!(
             specs.iter().map(PackageSpec::name).collect::<Vec<_>>(),
             vec!["pako"],
-            "the source dependency is left to vendor_sources"
+            "a source dependency is vendored from its own spec"
         );
     }
 

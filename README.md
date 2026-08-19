@@ -59,6 +59,9 @@ Options:
 
 `build` is the **static counterpart of `dev`** — same source roots and processors, emitted to `--out` instead of served — and it vendors npm only when you pass `--package`/`--manifest`; `vendor` just fetches dependencies into `web_modules/`. Each compiler processor (typescript, scss, tera, minify, gzip) has a `--<name>` / `--no-<name>` toggle, and `--no-default-features` turns the default-on set (typescript, scss, tera) off so you re-enable them individually. Run `web-modules <command> --help` for flags.
 
+A dependency may be a registry range, an https `.tgz`, or a git reference (`github:owner/repo#ref`); name it under `web_modules.sourceDependencies` and its TypeScript is compiled into the layout its own `tsconfig.json` declares.
+Pin a git dependency to a commit rather than a branch: a commit is cached by name and costs no network once vendored, while a branch is re-downloaded every run so that moving it is noticed.
+
 ### HTML policy
 
 The build never reads or rewrites your HTML.

@@ -1,9 +1,9 @@
-// The whole point of this example is the import below: `esptool-js/` is a git dependency
-// that publishes only TypeScript, mounted from source (see ../src/main.rs) and compiled
-// by the same pipeline that compiles this file. The specifier is a prefix into that
-// mount — exactly how the compose example imports its siblings — and it resolves through
-// the co-generated import map. Nothing here is aware that the package came from git.
-import { ESPLoader, Transport } from 'esptool-js/src/index.js';
+// The whole point of this example is that this import is unremarkable. `esptool-js` is a
+// git dependency that publishes only TypeScript; vendoring compiled it (see ../src/main.rs)
+// into the layout its own tsconfig declares, so the bare specifier resolves through the
+// generated import map exactly as a prebuilt package's would. Nothing here — and nothing in
+// the browser — can tell that it arrived as source.
+import { ESPLoader, Transport } from 'esptool-js';
 
 const ESPRESSIF_USB_VENDOR_ID = 0x303a;
 

@@ -9,6 +9,10 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 The crate gains a tarball dependency source (below); the rest of this release carries the release pipeline and the maintainer documentation.
 
+### Fixed
+
+- A vendored package keeps its `LICENSE`, `NOTICE`, `COPYING` and `AUTHORS` files, which the asset filter dropped. Serving a vendor tree is redistribution, and MIT and Apache-2.0 both require the notice to travel with the code.
+
 ### Changed
 
 - crates.io publication is gated on a human signature covering the release commit — the signed `v<version>` tag satisfies it. An unsigned release rehearses the packaging instead of uploading, and a signed `v<version>-sig` companion pushed later completes the publication, retroactively.

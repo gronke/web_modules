@@ -473,12 +473,28 @@ fn parse_github_dep(value: &str) -> Option<(String, String)> {
 /// sources** (so packages like Bootstrap can be themed from their SCSS) while
 /// dropping TypeScript sources and the node-only / development build trees some
 /// packages ship.
+/// A licence or notice file, which travels with the code it covers: MIT asks for the notice
+/// in all copies, Apache-2.0 for the licence with every distribution, and a vendored tree is
+/// served as it stands.
+fn is_legal_notice(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    matches!(
+        stem.as_str(),
+        "LICENSE" | "LICENCE" | "NOTICE" | "COPYING" | "COPYRIGHT" | "AUTHORS" | "PATENTS"
+    ) || stem.starts_with("LICENSE-")
+        || stem.starts_with("LICENCE-")
+}
+
 pub fn keep_browser_assets(rel: &str) -> Option<String> {
     if rel
         .split('/')
         .any(|seg| matches!(seg, "src" | "node" | "development"))
     {
         return None;
+    }
+    if is_legal_notice(rel) {
+        return Some(rel.to_string());
     }
     (rel.ends_with(".js")
         || rel.ends_with(".mjs")
@@ -1333,5 +1349,33 @@ mod tests {
         std::fs::create_dir_all(dir.join("dropped")).unwrap();
         prune(&dir, &[], &[]).unwrap();
         assert!(!dir.exists(), "an emptied vendor dir does not ship");
+    }
+
+    /// A vendored tree is redistribution: the licence has to come with the code.
+    #[test]
+    fn keep_browser_assets_keeps_licences_and_notices() {
+        for path in [
+            "LICENSE",
+            "LICENSE.md",
+            "LICENCE.txt",
+            "license",
+            "LICENSE-MIT",
+            "LICENSE-APACHE",
+            "NOTICE",
+            "COPYING",
+            "AUTHORS",
+            "dist/LICENSE",
+        ] {
+            assert_eq!(
+                keep_browser_assets(path).as_deref(),
+                Some(path),
+                "{path} covers the code beside it"
+            );
+        }
+        // Prose and metadata are still not part of the package.
+        assert_eq!(keep_browser_assets("README.md"), None);
+        assert_eq!(keep_browser_assets("CHANGELOG.md"), None);
+        // The excluded trees stay excluded, licence or not.
+        assert_eq!(keep_browser_assets("src/LICENSE"), None);
     }
 }

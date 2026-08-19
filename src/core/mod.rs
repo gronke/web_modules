@@ -17,3 +17,4 @@ pub mod static_files;
 pub mod symlinks;
 pub mod tsconfig;
 pub mod vendor;
+pub mod walk;

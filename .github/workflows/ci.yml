@@ -23,16 +23,21 @@ jobs:
   build:
     name: build
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
 
       # The full workspace build (incl. react-esm's rolldown/oxc tree and the opt-in `bundle`
-      # feature) needs more than the runner's default free space. Reclaim ~20 GB of preinstalled
-      # tooling we never use, and make sure zstd is present (actions/cache uses it to compress).
-      - name: Prepare runner (free disk + zstd for actions/cache)
+      # feature) needs more than the runner's default free space, so reclaim ~20 GB of preinstalled
+      # tooling we never use. No apt here: zstd (which actions/cache compresses with) already ships
+      # in the runner image, so `apt-get install -y zstd` reported "already the newest version, 0
+      # newly installed" — and on a stalled mirror it hung for over 40 minutes with every later step
+      # pending behind it. Dropping it takes ~20 s off a healthy run; the rest of this step is the
+      # reclamation itself.
+      - name: Prepare runner (free disk)
         run: |
           sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /usr/local/share/boost
-          sudo apt-get update && sudo apt-get install -y zstd
+          command -v zstd >/dev/null || echo "::warning::zstd missing from the runner image; actions/cache will fall back to gzip"
           df -h /
 
       # Cargo cache via the shared first-party action: registry/git + a bounded `target/` (keyed on
@@ -142,12 +147,23 @@ jobs:
         if: ${{ !cancelled() }}
         run: du -sh ~/.cargo/registry ~/.cargo/git target 2>/dev/null || true
 
+      # The save half of the cache above, which restores target/ but — by that action's design —
+      # never writes it: composite actions have no post hooks, so the save is a separate action the
+      # consumer calls last. Without this the restore could only ever miss, and every run compiled
+      # the workspace cold across each of the feature sets above. Saving on main only keeps pull
+      # requests as pure consumers of what a main build leaves behind.
+      - name: Save Rust cache
+        uses: gronke/rust-ci/.github/actions/rust-cache-save@main
+        with:
+          save: ${{ github.ref == 'refs/heads/main' }}
+
   # Per-example Playwright e2e, one parallel job each, off the prebuilt binaries from `build`. Each
   # suite's playwright.config.ts runs `$E2E_SERVER` (the downloaded binary) instead of `cargo run`.
   e2e:
     name: e2e · ${{ matrix.example }}
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -172,6 +188,7 @@ jobs:
 
       # Cache the browser so the three parallel jobs don't each re-download chromium.
       - name: Cache Playwright browsers
+        id: pw-cache
         uses: actions/cache@v6
         with:
           path: ~/.cache/ms-playwright
@@ -184,10 +201,20 @@ jobs:
         working-directory: examples/${{ matrix.example }}
         env:
           E2E_SERVER: ${{ github.workspace }}/e2e-bins/${{ matrix.example }}
+          PW_CACHE_HIT: ${{ steps.pw-cache.outputs.cache-hit }}
         run: |
           npm ci
           npm run test:types
-          npx playwright install --with-deps chromium
+          # `--with-deps` shells out to apt, and only the browser is cached — so on a cache hit the
+          # apt round bought nothing and cost the happy path a minute apiece, three jobs in
+          # parallel. It is also how a stalled archive.ubuntu.com burned 25 minutes here. The
+          # runner image already carries what headless chromium needs; install the system libraries
+          # only when the browser itself has to be fetched.
+          if [ "$PW_CACHE_HIT" = "true" ]; then
+            npx playwright install chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
           npm run test:e2e
 
       - name: Upload Playwright report
@@ -208,6 +235,7 @@ jobs:
   # workflow. It is not part of any release path.
   tauri:
     name: tauri example
+    timeout-minutes: 45
     if: >-
       ${{ github.event_name == 'workflow_dispatch'
           || (github.event_name == 'pull_request'
@@ -283,6 +311,7 @@ jobs:
   msrv:
     name: msrv
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - name: Check on the declared MSRV
@@ -303,6 +332,7 @@ jobs:
   action-guard:
     name: action min-version guard
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
       - name: Run the action against a pre-contract (0.3.0) binary
@@ -331,6 +361,7 @@ jobs:
   actionlint:
     name: actionlint
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
       - name: actionlint
@@ -344,6 +375,7 @@ jobs:
   changelog-check:
     name: changelog coherence
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:

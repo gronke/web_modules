@@ -29,6 +29,24 @@ pub enum Decorators {
     Standard,
 }
 
+/// How class fields are emitted, which `tsc` decides with `useDefineForClassFields` — and,
+/// without it, with the target: define from ES 2022 upwards, assign below it.
+///
+/// The two differ observably. A field *defined* on the instance shadows an inherited
+/// getter; the same field *assigned* calls that getter's setter, and throws when there is
+/// none. Compiling a package the other way from its own build changes what it does at run
+/// time, so this travels separately from [`Decorators`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ClassFields {
+    /// Assignment semantics, and a field declared without an initializer emits nothing —
+    /// `useDefineForClassFields: false`, which is `tsc`'s own default below ES 2022.
+    #[default]
+    Assign,
+    /// Define semantics: `Object.defineProperty` per field, as ES 2022 specifies.
+    Define,
+}
+
 #[cfg(feature = "typescript")]
 pub mod typescript;
 

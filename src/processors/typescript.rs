@@ -28,7 +28,7 @@ use crate::{Error, Result};
 /// Decorator handling for the transform. Defined in the always-compiled [`processors`](super)
 /// module so the build `Processors` set can carry it without the `typescript` feature; re-exported
 /// here as `web_modules::typescript::Decorators` for the transform that consumes it.
-pub use super::Decorators;
+pub use super::{ClassFields, Decorators};
 
 /// Knobs for [`compile_str_with`] / [`compile_directory_with`]. `Default` is the
 /// Lit preset, so the zero-config [`compile_str`] / [`compile_directory`] keep the
@@ -38,6 +38,15 @@ pub use super::Decorators;
 pub struct TranspileOptions {
     /// How decorators are lowered. Defaults to [`Decorators::Lit`].
     pub decorators: Decorators,
+    /// How class fields are emitted. Defaults to [`ClassFields::Assign`], which with the
+    /// default decorators is the Lit preset; a dependency built against ES 2022 or above
+    /// needs [`ClassFields::Define`] to be emitted the way it builds.
+    pub class_fields: ClassFields,
+    /// Rewrite a relative import's TypeScript extension to the one emitted beside it —
+    /// `./util.ts` becomes `./util.js`, `.mts` becomes `.mjs`. This is `tsconfig`'s
+    /// `rewriteRelativeImportExtensions`, and a package whose sources name `.ts` files
+    /// needs it for its output to resolve. Defaults to `false`, as TypeScript does.
+    pub rewrite_import_extensions: bool,
     /// Emit minified JS (an *output* option, like SCSS's compressed style). With the
     /// `minify` feature this runs the full `oxc_minifier` (compress + mangle) in the
     /// same pass; without it, codegen still strips whitespace. Defaults to `false`.
@@ -56,6 +65,8 @@ impl TranspileOptions {
     pub fn standard() -> Self {
         Self {
             decorators: Decorators::Standard,
+            class_fields: ClassFields::Define,
+            rewrite_import_extensions: false,
             minify: false,
         }
     }
@@ -103,15 +114,21 @@ crate::cli_config::feature_args!(
     TypescriptConfig
 );
 
-/// Build oxc transform options from our [`TranspileOptions`]. The Lit preset sets
-/// legacy decorators plus class fields *assigned* rather than *defined* (the
-/// `useDefineForClassFields: false` equivalent).
+/// Build oxc transform options from our [`TranspileOptions`]. Decorator lowering and
+/// class-field semantics are set independently: the default pairing — legacy decorators
+/// with fields *assigned* rather than *defined* — is the Lit preset.
 fn transform_options(opts: &TranspileOptions) -> TransformOptions {
     let mut options = TransformOptions::default();
     if opts.decorators == Decorators::Lit {
         options.decorator.legacy = true;
+    }
+    if opts.class_fields == ClassFields::Assign {
         options.typescript.remove_class_fields_without_initializer = true;
         options.assumptions.set_public_class_fields = true;
+    }
+    if opts.rewrite_import_extensions {
+        options.typescript.rewrite_import_extensions =
+            Some(oxc_transformer::RewriteExtensionsMode::Rewrite);
     }
     options
 }

@@ -42,7 +42,7 @@ pub use error::{Error, Result};
 mod core;
 pub use core::mount::Mount;
 pub use core::symlinks::SymlinkMode;
-pub use core::{importmap, mount, reject, static_files, symlinks, tsconfig, vendor};
+pub use core::{importmap, mount, reject, static_files, symlinks, tsconfig, vendor, walk};
 // Crate-internal for now: the graph's overwrite/ownership semantics are still
 // settling, so it is not part of the public API yet.
 pub(crate) use core::module_graph;
@@ -55,9 +55,10 @@ pub(crate) use core::npm_link;
 /// vendor/import-map core and the build/serve toolchain.
 mod processors;
 
-/// The decorator-lowering mode (`web_modules::Decorators`), always available so the build
+/// The decorator-lowering mode and class-field semantics (`web_modules::Decorators`,
+/// `web_modules::ClassFields`), always available so the build
 /// [`Processors`](build::Processors) set can carry it regardless of which processors are compiled.
-pub use processors::Decorators;
+pub use processors::{ClassFields, Decorators};
 
 #[cfg(feature = "dts")]
 pub use processors::dts;

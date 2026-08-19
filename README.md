@@ -36,6 +36,10 @@ Each is a Cargo `--features` flag:
 cargo install web_modules --features cli
 ```
 
+`--features cli` is required, and deliberately so: the CLI pulls clap and a server runtime, which would land in every library build that took the default features — including the build scripts this crate is mostly used from.
+Without the flag cargo installs no binary and says which feature the target wanted.
+In CI you need none of this: the [action](#github-actions) downloads a prebuilt binary.
+
 <!-- regenerate: cargo run -p web_modules --bin web-modules --features cli -- --help -->
 
 ```console

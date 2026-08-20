@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, Parser, Subcommand};
 use serde_json::Value;
 use web_modules::build::DEFAULT_HTML;
+use web_modules::importmap::Importmap;
 use web_modules::vendor::{vendor, PackageSpec};
 
 /// This binary's fallible return, `()` by default.
@@ -282,6 +283,50 @@ fn build_vendor_specs(
     let mut seen = std::collections::HashSet::new();
     specs.retain(|s| seen.insert(s.name().to_string()));
     Ok(specs)
+}
+
+/// The import-map specifiers that resolve into a vendored package's own directory.
+///
+/// Attribution is by URL prefix rather than by asking the library, because the map is
+/// the only artefact that matters to a browser: an entry that does not point inside
+/// `<mount>/<dir>/` is not this package's, whatever produced it.
+fn specifiers_for<'a>(spec: &PackageSpec, map: &'a Importmap, mount: &str) -> Vec<&'a str> {
+    let prefix = format!("{}/{}/", mount.trim_end_matches('/'), spec.name());
+    let mut specifiers: Vec<&str> = map
+        .iter()
+        .filter(|(_, url)| url.starts_with(&prefix))
+        .map(|(specifier, _)| specifier)
+        .collect();
+    specifiers.sort_unstable();
+    specifiers
+}
+
+/// Warn about any vendored package the import map does not mention.
+///
+/// This is the failure worth naming, because nothing else shows it: the tree is on
+/// disk, the exit status is zero, and the break surfaces later as a bare specifier the
+/// browser cannot resolve — or, worse, as a stale inline import map that still can,
+/// until someone syncs it.
+///
+/// A git dependency is the usual cause. A whole-repo archive has no reliable browser
+/// entry, so it derives none until it is compiled into the layout its own
+/// `tsconfig.json` declares, which is what `web_modules.sourceDependencies` asks for.
+///
+/// `vendor` only. `build` vendors through [`web_modules::build::build`], which does not
+/// hand the map back, so the same check there needs that signature to change first.
+fn warn_unmapped(specs: &[PackageSpec], map: &Importmap, mount: &str) {
+    for spec in specs {
+        if !specifiers_for(spec, map, mount).is_empty() {
+            continue;
+        }
+        eprintln!(
+            "warning: vendored `{name}` into {mount}/{name}/, but no import-map entry points \
+             there — a browser cannot resolve it. A package that publishes only TypeScript \
+             has to be named under `web_modules.sourceDependencies` to be compiled first.",
+            name = spec.name(),
+            mount = mount.trim_end_matches('/'),
+        );
+    }
 }
 
 /// The decoded `web_modules` block from a project's `package.json`. Every field is optional so
@@ -565,10 +610,16 @@ async fn main() -> Res {
         } => {
             let specs = build_vendor_specs(&packages, &manifest, true)?;
             let map = vendor(&out, &mount, &specs)?;
+            warn_unmapped(&specs, &map, &mount);
             match importmap {
                 Some(path) => {
                     map.write_to(&path)?;
-                    println!("wrote import map → {}", path.display());
+                    println!(
+                        "wrote import map → {} ({} package(s), {} entries)",
+                        path.display(),
+                        specs.len(),
+                        map.len()
+                    );
                 }
                 None => println!("{}", map.to_json()),
             }
@@ -609,6 +660,63 @@ mod tests {
             Command::Build { compiler, .. } => compiler.resolve_with(&PkgConfig::default()),
             _ => panic!("expected Build"),
         }
+    }
+
+    fn map_of(entries: &[(&str, &str)]) -> Importmap {
+        let mut map = Importmap::new();
+        for (specifier, url) in entries {
+            map.insert(*specifier, *url);
+        }
+        map
+    }
+
+    #[test]
+    fn specifiers_are_attributed_by_the_directory_they_point_into() {
+        let map = map_of(&[
+            ("lit", "./web_modules/lit/index.js"),
+            ("lit/", "./web_modules/lit/"),
+            ("pako", "./web_modules/pako/dist/pako.esm.mjs"),
+        ]);
+        let lit = PackageSpec::npm("lit", "^3");
+        assert_eq!(
+            specifiers_for(&lit, &map, "./web_modules"),
+            ["lit", "lit/"],
+            "both the bare specifier and its prefix belong to the package"
+        );
+        // A trailing slash on the mount must not change the attribution.
+        assert_eq!(
+            specifiers_for(&lit, &map, "./web_modules/"),
+            ["lit", "lit/"]
+        );
+        assert_eq!(
+            specifiers_for(&PackageSpec::npm("pako", "^2"), &map, "./web_modules"),
+            ["pako"]
+        );
+    }
+
+    /// A name that is a prefix of another's must not borrow its entries.
+    #[test]
+    fn specifiers_do_not_leak_across_similar_names() {
+        let map = map_of(&[("lit-html", "./web_modules/lit-html/lit-html.js")]);
+        assert!(specifiers_for(&PackageSpec::npm("lit", "^3"), &map, "./web_modules").is_empty());
+        assert_eq!(
+            specifiers_for(&PackageSpec::npm("lit-html", "^3"), &map, "./web_modules"),
+            ["lit-html"]
+        );
+    }
+
+    /// The case the warning exists for: a git dependency vendored under its repository
+    /// name, contributing nothing a browser can resolve.
+    #[test]
+    fn a_git_dependency_maps_nothing_until_it_is_compiled() {
+        let map = map_of(&[("pako", "./web_modules/pako/dist/pako.esm.mjs")]);
+        let git = PackageSpec::git("gronke/fork-esptool-js", "433170b");
+        assert_eq!(
+            git.name(),
+            "fork-esptool-js",
+            "mounted under the repository"
+        );
+        assert!(specifiers_for(&git, &map, "./web_modules").is_empty());
     }
 
     #[test]

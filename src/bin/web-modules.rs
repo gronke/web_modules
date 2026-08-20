@@ -311,6 +311,8 @@ fn specifiers_for<'a>(spec: &PackageSpec, map: &'a Importmap, mount: &str) -> Ve
 /// A git dependency is the usual cause. A whole-repo archive has no reliable browser
 /// entry, so it derives none until it is compiled into the layout its own
 /// `tsconfig.json` declares, which is what `web_modules.sourceDependencies` asks for.
+/// An asset-only package legitimately maps nothing, so the message offers the remedy
+/// as a conditional rather than asserting it.
 ///
 /// `vendor` only. `build` vendors through [`web_modules::build::build`], which does not
 /// hand the map back, so the same check there needs that signature to change first.
@@ -321,8 +323,8 @@ fn warn_unmapped(specs: &[PackageSpec], map: &Importmap, mount: &str) {
         }
         eprintln!(
             "warning: vendored `{name}` into {mount}/{name}/, but no import-map entry points \
-             there — a browser cannot resolve it. A package that publishes only TypeScript \
-             has to be named under `web_modules.sourceDependencies` to be compiled first.",
+             there — a browser cannot resolve it. If it publishes only TypeScript, name it \
+             under `web_modules.sourceDependencies` to have it compiled first.",
             name = spec.name(),
             mount = mount.trim_end_matches('/'),
         );

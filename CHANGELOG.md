@@ -11,6 +11,8 @@ The crate gains a tarball dependency source (below); the rest of this release ca
 
 ### Fixed
 
+- `vendor` warns about a package it vendored that nothing in the import map points at, and names `web_modules.sourceDependencies` as the remedy. Silence here is the worst case: the tree is on disk, the exit status is zero, and the break surfaces later in a browser — or not at all, while a stale inline import map still resolves. A git dependency is the usual cause, since a whole-repo archive derives no entry until it is compiled. (`build` vendors through `build::build`, which does not return the map, so it is not covered yet.)
+- `vendor` reports how many packages and entries it wrote, so a run that quietly did less than expected is visible in the one line it prints.
 - A source dependency's compiled entry is checked against its own manifest: when the layout its `tsconfig.json` describes is not the one it was published with, vendoring says so instead of leaving `auto_entries` to drop the package from the import map without a word.
 - A program source outside an explicit `rootDir` is refused, as `tsc` refuses it (TS6059). It was skipped, so an importer was emitted whose import had been compiled to nowhere and then deleted.
 - `rewriteRelativeImportExtensions` is honoured, so a package whose sources name `./util.ts` emits `./util.js` beside the file it names. An emitted specifier that still carries a TypeScript extension is refused, since the source it names does not survive vendoring.

@@ -5,7 +5,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Per-release notes are also published on each [GitHub Release](https://github.com/gronke/web_modules/releases) (sourced from the annotated tag) and on [crates.io](https://crates.io/crates/web_modules).
 
-## [Unreleased]
+## [0.7.0] - 2026-08-21
 
 The crate gains a tarball dependency source (below); the rest of this release carries the release pipeline and the maintainer documentation.
 

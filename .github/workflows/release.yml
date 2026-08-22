@@ -306,11 +306,13 @@ jobs:
       # registry secret is stored. crates.io must trust this repository, the
       # release.yml workflow and the crates-io environment.
       - if: steps.sig.outputs.signed == 'true'
+        id: cratesio-auth
         uses: rust-lang/crates-io-auth-action@v1
       - uses: gronke/rust-ci/.github/actions/cargo-publish@v1
         with:
           package: web_modules
           publish: ${{ steps.sig.outputs.signed }}
+          registry-token: ${{ steps.cratesio-auth.outputs.token }}
           allow-already-published: "true"
 
   # A human pushing the signed v<version>-sig companion is the registry go
@@ -374,9 +376,11 @@ jobs:
       # The gate above already answered whether a signature covers this commit —
       # the companion that triggered the run is that signature.
       - if: steps.release.outputs.signed == 'true'
+        id: cratesio-auth
         uses: rust-lang/crates-io-auth-action@v1
       - uses: gronke/rust-ci/.github/actions/cargo-publish@v1
         with:
           package: web_modules
           publish: ${{ steps.release.outputs.signed }}
+          registry-token: ${{ steps.cratesio-auth.outputs.token }}
           allow-already-published: "true"

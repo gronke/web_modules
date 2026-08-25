@@ -72,9 +72,13 @@ inputs:
     required: false
     default: ""
   minify:
-    description: Minify the emitted JS (true/false).
+    description: Minify the emitted JS — the whole dist tree (true/false).
     required: false
     default: "false"
+  minify-web-modules:
+    description: With minify, also minify the vendored web_modules/ tree (true/false).
+    required: false
+    default: "true"
   sourcemap:
     description: Emit source maps for compiled JS (true/false).
     required: false
@@ -262,6 +266,7 @@ runs:
         INPUT_OUT: ${{ inputs.out }}
         INPUT_MOUNT: ${{ inputs.mount }}
         INPUT_MINIFY: ${{ inputs.minify }}
+        INPUT_MINIFY_WEB_MODULES: ${{ inputs.minify-web-modules }}
         INPUT_SOURCEMAP: ${{ inputs.sourcemap }}
         INPUT_GZIP: ${{ inputs.gzip }}
         INPUT_PACKAGES: ${{ inputs.packages }}
@@ -299,6 +304,7 @@ runs:
         # Booleans → presence flags. `--minify` / `--gzip` are CLI-only now; the released binary
         # carries the `compress` feature, so `--gzip` works.
         case "$INPUT_MINIFY" in 1 | true | yes | on) args+=(--minify) ;; esac
+        case "$INPUT_MINIFY_WEB_MODULES" in 0 | false | no | off) args+=(--no-minify-web-modules) ;; esac
         case "$INPUT_SOURCEMAP" in 1 | true | yes | on) args+=(--sourcemap) ;; esac
         case "$INPUT_GZIP" in 1 | true | yes | on) args+=(--gzip) ;; esac
         # Each package spec becomes a repeatable `--package`.

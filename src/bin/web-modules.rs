@@ -193,6 +193,7 @@ struct ResolvedCompiler {
     scss: bool,
     tera: bool,
     minify: bool,
+    minify_web_modules: bool,
     sourcemap: bool,
     gzip: bool,
     ts_decorators: web_modules::typescript::Decorators,
@@ -212,6 +213,14 @@ impl CompilerConfig {
             scss: self.scss.enabled_with(cfg.scss, true, nd),
             tera: self.tera.enabled_with(cfg.tera, true, nd),
             minify: self.minify.enabled_with(cfg.minify, false, nd),
+            // The vendor knob defaults on (under --minify): --no-… > --… > block > true.
+            minify_web_modules: if self.minify.config.no_web_modules {
+                false
+            } else if self.minify.config.web_modules {
+                true
+            } else {
+                cfg.minify_web_modules.unwrap_or(true)
+            },
             sourcemap: self.sourcemap.enabled_with(cfg.sourcemap, false, nd),
             #[cfg(feature = "compress")]
             gzip: self.gzip.enabled_with(cfg.gzip, false, nd),
@@ -349,6 +358,7 @@ struct PkgConfig {
     template: Option<PathBuf>,
     packages: Vec<String>,
     minify: Option<bool>,
+    minify_web_modules: Option<bool>,
     sourcemap: Option<bool>,
     gzip: Option<bool>,
     typescript: Option<bool>,
@@ -462,7 +472,12 @@ fn parse_block(block: &Value) -> Res<PkgConfig> {
                 cfg.template = Some(PathBuf::from(as_string(val, "web_modules.template")?));
             }
             "packages" => cfg.packages = string_array(val, "web_modules.packages")?,
-            "minify" => cfg.minify = Some(as_bool(val, "web_modules.minify")?),
+            "minify" => {
+                cfg.minify = Some(processor_enabled(val, "web_modules.minify")?);
+                if let Some(wm) = val.as_object().and_then(|o| o.get("webModules")) {
+                    cfg.minify_web_modules = Some(as_bool(wm, "web_modules.minify.webModules")?);
+                }
+            }
             "sourcemap" => cfg.sourcemap = Some(as_bool(val, "web_modules.sourcemap")?),
             "gzip" => cfg.gzip = Some(as_bool(val, "web_modules.gzip")?),
             "typescript" => {
@@ -569,7 +584,8 @@ async fn main() -> Res {
             let (cfg, pkg_path) = load_pkg_config()?;
             let resolved = compiler.resolve_with(&cfg);
             let (minify, sourcemap, gzip) = (resolved.minify, resolved.sourcemap, resolved.gzip);
-            let output = web_modules::build::Output::new(minify, gzip);
+            let output = web_modules::build::Output::new(minify, gzip)
+                .minify_web_modules(resolved.minify_web_modules);
             let mut processors = resolved.into_processors();
             processors.reject = compiler.reject()?;
 
@@ -901,6 +917,58 @@ mod tests {
         };
         assert!(from_block(&[]), "block enables");
         assert!(!from_block(&["--no-sourcemap"]), "flag beats block");
+    }
+
+    #[test]
+    fn minify_web_modules_defaults_on_and_resolves() {
+        assert!(
+            resolve_build(&["--minify"]).minify_web_modules,
+            "vendored content minifies by default"
+        );
+        assert!(!resolve_build(&["--minify", "--no-minify-web-modules"]).minify_web_modules);
+        assert!(
+            !resolve_build(&["--minify-web-modules", "--no-minify-web-modules"]).minify_web_modules,
+            "--no- wins regardless of order"
+        );
+
+        // The block's object form sits under the flags.
+        let block = PkgConfig {
+            minify: Some(true),
+            minify_web_modules: Some(false),
+            ..PkgConfig::default()
+        };
+        let resolved = |extra: &[&str]| {
+            let argv: Vec<&str> = [&["web-modules", "build", "--out", "out"][..], extra].concat();
+            match Cli::try_parse_from(argv).unwrap().command {
+                Command::Build { compiler, .. } => compiler.resolve_with(&block),
+                _ => panic!("expected Build"),
+            }
+        };
+        assert!(resolved(&[]).minify, "block enables minify");
+        assert!(!resolved(&[]).minify_web_modules, "block opts vendor out");
+        assert!(
+            resolved(&["--minify-web-modules"]).minify_web_modules,
+            "flag beats block"
+        );
+    }
+
+    #[test]
+    fn minify_block_accepts_bool_and_object() {
+        let on = write_pkg(r#"{"web_modules":{"minify":{"webModules":false}}}"#);
+        let (cfg, _) = load_pkg_config_at(on.path()).unwrap();
+        assert_eq!(cfg.minify, Some(true), "object form enables");
+        assert_eq!(cfg.minify_web_modules, Some(false));
+
+        let off = write_pkg(r#"{"web_modules":{"minify":false}}"#);
+        let (cfg, _) = load_pkg_config_at(off.path()).unwrap();
+        assert_eq!(cfg.minify, Some(false));
+        assert_eq!(cfg.minify_web_modules, None);
+
+        let bad = write_pkg(r#"{"web_modules":{"minify":{"webModules":"yes"}}}"#);
+        assert!(
+            load_pkg_config_at(bad.path()).is_err(),
+            "typed key enforced"
+        );
     }
 
     #[test]

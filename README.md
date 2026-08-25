@@ -63,6 +63,8 @@ Options:
 
 `build` is the **static counterpart of `dev`** — same source roots and processors, emitted to `--out` instead of served — and it vendors npm only when you pass `--package`/`--manifest`; `vendor` just fetches dependencies into `web_modules/`. Each compiler processor (typescript, scss, tera, minify, sourcemap, gzip) has a `--<name>` / `--no-<name>` toggle, and `--no-default-features` turns the default-on set (typescript, scss, tera) off so you re-enable them individually. Run `web-modules <command> --help` for flags.
 
+`--minify` covers the whole dist tree — compiled TypeScript, copied `.js`/`.mjs`, Tera-rendered JS, `npm://` assets, and the vendored `web_modules/` (opt the npm content out with `--no-minify-web-modules` or `"minify": {"webModules": false}`). Every file is rewritten through one oxc parse→codegen pass; CSS needs no toggle, since grass always emits compressed.
+
 `--sourcemap` (off by default, so an embedded dist stays lean) emits a source map for every compiled TypeScript file, with the sources embedded (`sourcesContent`) since `.ts` files never ship: `build` writes a `<file>.map` sidecar linked by file name, `dev` serves the map inline as a `data:` URL. Vendored packages' own shipped `.map` files follow the same toggle, and flipping it re-vendors instead of reusing the differently-shaped cache. SCSS is not covered — grass emits no source maps.
 
 A dependency may be a registry range, an https `.tgz`, or a git reference (`github:owner/repo#ref`); name it under `web_modules.sourceDependencies` and its TypeScript is compiled into the layout its own `tsconfig.json` declares.

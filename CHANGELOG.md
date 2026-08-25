@@ -7,7 +7,16 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking:** `--minify` now minifies the whole dist tree — byte-copied `.js`/`.mjs`, Tera-rendered JS, `npm://` assets, and the vendored `web_modules/` — instead of only compiled TypeScript output.
+  Every file goes through one oxc parse→codegen pass: a first-party module that fails to parse is now a build error (it was copied with a warning), and its recorded imports come from the final AST, so an import removed by dead-code elimination no longer counts against the import map.
+  Vendored files that fail to parse are left as shipped, aloud.
+  The vendor shaping joins the `vendor-profile:` marker line, so a toggled rebuild re-vendors instead of reusing the differently-shaped cache.
+
 ### Added
+
+- `--minify-web-modules` / `--no-minify-web-modules` (package.json `"minify": {"webModules": false}`, builder `Build::minify_web_modules`, action input `minify-web-modules`) keep the vendored `web_modules/` tree and `npm://` assets out of `--minify`, byte-identical to what the packages shipped. On by default under `--minify`.
 
 - `--sourcemap` emits source maps for compiled TypeScript, in `build` and `dev` alike (package.json key `sourcemap`; builders `Build::sourcemap` / `Dev::sourcemap`).
   `build` writes a `<file>.map` sidecar beside each compiled file and links it by file name; `dev` appends the map inline as a `data:` URL, so no extra route or cache entry exists.

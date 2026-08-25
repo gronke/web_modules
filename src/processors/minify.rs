@@ -7,49 +7,40 @@
 
 use std::path::Path;
 
-use oxc_allocator::Allocator;
-use oxc_codegen::Codegen;
-use oxc_minifier::{Minifier, MinifierOptions};
-use oxc_parser::Parser;
-use oxc_span::SourceType;
-
-use crate::{Error, Result};
+use crate::typescript::{rewrite_js_capturing, RewriteOptions};
+use crate::Result;
 
 /// Minify a single JS source string. `path` only informs the source type and
-/// diagnostics.
+/// diagnostics. The thin string wrapper over the crate's one rewrite pass
+/// ([`typescript`](crate::typescript)'s parse → `oxc_minifier` → codegen).
 pub fn minify_str(source: &str, path: &Path) -> Result<String> {
-    let allocator = Allocator::default();
-    let source_type = SourceType::from_path(path).unwrap_or_default();
-
-    let parsed = Parser::new(&allocator, source, source_type).parse();
-    if parsed.diagnostics.has_errors() {
-        let body = parsed
-            .diagnostics
-            .iter()
-            .map(|e| format!("{e:?}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        return Err(Error::Minify(format!(
-            "parse error(s) in {}:\n{body}",
-            path.display()
-        )));
-    }
-    let mut program = parsed.program;
-
-    // Compress + mangle the AST; codegen applies the returned mangler scoping so
-    // renamed identifiers are emitted, then strips whitespace (`minify: true`).
-    let ret = Minifier::new(MinifierOptions::default()).minify(&allocator, &mut program);
-
-    let code = Codegen::new()
-        .with_options(crate::typescript::codegen_options(true, None))
-        .with_scoping(ret.scoping)
-        .build(&program)
-        .code;
-    Ok(code)
+    Ok(rewrite_js_capturing(
+        source,
+        path,
+        path,
+        RewriteOptions {
+            minify: true,
+            source_map: false,
+        },
+    )?
+    .code)
 }
 
-// Minify has no flags of its own beyond the on/off toggle (it's off by default).
-// (`--minify` / `--no-minify`.)
+/// Feature-specific `--minify-*` flags, paired with the `--minify` / `--no-minify`
+/// toggle in [`MinifyArgs`].
+#[cfg(feature = "cli")]
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct MinifyConfig {
+    /// Also minify the vendored `web_modules/` tree and `npm://` assets (the default
+    /// under `--minify`).
+    #[arg(long = "minify-web-modules")]
+    pub web_modules: bool,
+    /// Keep the vendored `web_modules/` tree and `npm://` assets as shipped.
+    #[arg(long = "no-minify-web-modules")]
+    pub no_web_modules: bool,
+}
+
+// The `--minify` / `--no-minify` toggle (off by default), plus the vendor-tree knob.
 #[cfg(feature = "cli")]
 crate::cli_config::feature_args!(
     MinifyArgs,
@@ -57,7 +48,7 @@ crate::cli_config::feature_args!(
     "minify",
     no_minify,
     "no-minify",
-    crate::cli_config::NoConfig
+    MinifyConfig
 );
 
 #[cfg(test)]

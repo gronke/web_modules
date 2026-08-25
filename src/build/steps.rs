@@ -81,6 +81,11 @@ pub(crate) struct Emitted {
 pub(crate) struct StepConfig {
     #[cfg(feature = "typescript")]
     pub transpile: crate::typescript::TranspileOptions,
+    /// Rewrite already-emitted JS (copied / Tera-rendered) through the shared oxc
+    /// pass. `None` — the default, and the dev server's claims-only configuration —
+    /// keeps the byte-copy behavior.
+    #[cfg(feature = "minify")]
+    pub rewrite_js: Option<crate::typescript::RewriteOptions>,
     #[cfg(feature = "scss")]
     pub scss_load_paths: Vec<PathBuf>,
 }
@@ -95,11 +100,21 @@ pub(crate) fn enabled_steps(
     let mut steps: Vec<Box<dyn Step>> = Vec::new();
     #[cfg(feature = "tera")]
     if processors.tera {
-        steps.push(Box::new(TeraStep));
+        #[allow(unused_mut)]
+        let mut tera_step = TeraStep::default();
+        #[cfg(feature = "minify")]
+        {
+            tera_step.rewrite_js = config.rewrite_js;
+        }
+        steps.push(Box::new(tera_step));
     }
-    steps.push(Box::new(crate::static_files::StaticStep::new(
-        processors.reject.clone(),
-    )));
+    #[allow(unused_mut)]
+    let mut static_step = crate::static_files::StaticStep::new(processors.reject.clone());
+    #[cfg(feature = "minify")]
+    {
+        static_step.rewrite_js = config.rewrite_js;
+    }
+    steps.push(Box::new(static_step));
     #[cfg(feature = "typescript")]
     if processors.typescript {
         steps.push(Box::new(crate::typescript::TypeScriptStep::new(
@@ -119,7 +134,13 @@ pub(crate) fn enabled_steps(
 /// registry, so each file renders independently; the `_`-partial skip is a
 /// convention, not an inheritance system.
 #[cfg(feature = "tera")]
-pub(crate) struct TeraStep;
+#[derive(Default)]
+pub(crate) struct TeraStep {
+    /// With output rewriting on, a rendered `.js`/`.mjs` goes through the shared oxc
+    /// pass after rendering — render is textual, so the one-parse rule still holds.
+    #[cfg(feature = "minify")]
+    pub(crate) rewrite_js: Option<crate::typescript::RewriteOptions>,
+}
 
 #[cfg(feature = "tera")]
 impl Preflight for TeraStep {
@@ -155,6 +176,22 @@ impl Step for TeraStep {
         // module graph like any other emitted JS, read from the rendered text before
         // the write through the same shared helper the copy step uses.
         let ext = dest.extension().and_then(|x| x.to_str()).unwrap_or("");
+        // With output rewriting on, rendered JS goes through the shared oxc pass:
+        // minified codegen, imports off the final AST, and — when asked — a map whose
+        // source is the template (its `sourcesContent` carries the rendered text, the
+        // actual parse input).
+        #[cfg(feature = "minify")]
+        if let Some(rewrite) = self.rewrite_js {
+            if crate::module_graph::is_emitted_js(ext) {
+                let out_rel = rel.with_extension("");
+                let out =
+                    crate::typescript::rewrite_js_capturing(&rendered, &out_rel, rel, rewrite)?;
+                crate::typescript::write_js_output(dest, out.code, out.map.map(|m| m.json))?;
+                return Ok(Emitted {
+                    imports: Some(out.imports),
+                });
+            }
+        }
         let imports = crate::module_graph::imports_for_emitted_js(&rendered, ext, rel)?;
         std::fs::write(dest, rendered)?;
         Ok(Emitted { imports })

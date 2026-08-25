@@ -28,6 +28,11 @@ pub use pipeline::*;
 // warnings) run on: every stage states what it would emit before anything is written.
 pub(crate) mod steps;
 
+// The vendored-tree rewrite behind whole-dist minification (`web_modules/` is npm
+// content, produced by extraction rather than a step, so it gets its own pass).
+#[cfg(feature = "minify")]
+pub(crate) mod optimize;
+
 // The fluent builder over `build()` / `BuildOptions`, re-exported at the crate root as
 // `web_modules::Build` (and `web_modules::build::Build`). Behind the `builder` feature so the bare
 // struct API can be used without it.

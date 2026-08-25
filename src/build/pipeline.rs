@@ -137,16 +137,33 @@ impl Default for Processors {
     }
 }
 
-/// Output-optimization toggles. Each processor applies what it can: TS minifies,
-/// SCSS already emits compressed, static assets gzip-only. Both default off, so an
-/// unset `BuildOptions { .. }` leaves the output unoptimized.
-#[derive(Clone, Copy, Debug, Default)]
+/// Output-optimization toggles. The toggles default off, so an unset
+/// `BuildOptions { .. }` leaves the output unoptimized. With `minify` on the whole
+/// dist tree minifies — compiled TS, copied `.js`/`.mjs`, Tera-rendered JS, `npm://`
+/// assets, and (unless [`minify_web_modules`](Self::minify_web_modules) opts out) the
+/// vendored `web_modules/` tree; SCSS already always emits compressed.
+#[derive(Clone, Copy, Debug)]
 #[non_exhaustive]
 pub struct Output {
-    /// Minify the emitted JS (via the TS compile's output; see [`crate::typescript`]).
+    /// Minify the emitted JS — every file of the dist tree, each through one oxc
+    /// parse→codegen pass (see [`crate::typescript`] and [`crate::minify`]).
     pub minify: bool,
     /// Write `<file>.gz` sidecars for servable assets. Requires the `compress` feature.
     pub gzip: bool,
+    /// With `minify`: also minify the vendored `web_modules/` tree and `npm://`
+    /// assets (default on). Off keeps npm content byte-identical to what the
+    /// packages shipped; without `minify` this has no effect.
+    pub minify_web_modules: bool,
+}
+
+impl Default for Output {
+    fn default() -> Self {
+        Self {
+            minify: false,
+            gzip: false,
+            minify_web_modules: true,
+        }
+    }
 }
 
 impl Output {
@@ -155,7 +172,11 @@ impl Output {
     /// built field-by-field from other crates — including this crate's own `web-modules` binary,
     /// which maps the CLI's `--minify`/`--gzip` flags through here.
     pub fn new(minify: bool, gzip: bool) -> Self {
-        Self { minify, gzip }
+        Self {
+            minify,
+            gzip,
+            ..Self::default()
+        }
     }
 
     /// The production preset: minify the emitted JS **and** write `.gz` sidecars (both
@@ -163,6 +184,36 @@ impl Output {
     /// `minify` and `compress` features.
     pub fn optimized() -> Self {
         Self::new(true, true)
+    }
+
+    /// Set whether the vendored `web_modules/` tree (and `npm://` assets) minify too
+    /// (default on; effective only with `minify`). Chainable, like the builders.
+    pub fn minify_web_modules(mut self, on: bool) -> Self {
+        self.minify_web_modules = on;
+        self
+    }
+
+    /// The rewrite policy for already-emitted first-party JS (copied, Tera-rendered):
+    /// `Some` when minification is on. The vendored tree follows
+    /// [`vendor_rewrite`](Self::vendor_rewrite) instead.
+    #[cfg(feature = "minify")]
+    pub(crate) fn js_rewrite(&self, source_map: bool) -> Option<crate::typescript::RewriteOptions> {
+        self.minify.then_some(crate::typescript::RewriteOptions {
+            minify: true,
+            source_map,
+        })
+    }
+
+    /// The rewrite policy for vendored npm content (`web_modules/`, `npm://` assets):
+    /// [`js_rewrite`](Self::js_rewrite) gated by the vendor knob.
+    #[cfg(feature = "minify")]
+    pub(crate) fn vendor_rewrite(
+        &self,
+        source_map: bool,
+    ) -> Option<crate::typescript::RewriteOptions> {
+        self.minify_web_modules
+            .then(|| self.js_rewrite(source_map))
+            .flatten()
     }
 }
 
@@ -221,11 +272,18 @@ const OUT_MARKER: &str = ".web-modules-out";
 /// The vendor-profile line for the output marker: how this build shapes the vendored
 /// tree beyond extraction. Empty means pristine — the shape of every pre-profile
 /// output, so old markers compare correctly.
-fn vendor_profile(processors: &Processors) -> String {
+fn vendor_profile(processors: &Processors, output: &Output) -> String {
+    let mut tokens = Vec::new();
     if processors.sourcemap {
-        "vendor-profile: sourcemaps".to_string()
-    } else {
+        tokens.push("sourcemaps");
+    }
+    if output.minify && output.minify_web_modules {
+        tokens.push("minify");
+    }
+    if tokens.is_empty() {
         String::new()
+    } else {
+        format!("vendor-profile: {}", tokens.join(","))
     }
 }
 
@@ -352,7 +410,7 @@ fn seed_vendor_cache(previous: &Path, stage: &Path) -> Result<()> {
 fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<()> {
     // Marks the output as replaceable by the next build; written first so even an
     // interrupted stage is recognizable.
-    let profile = vendor_profile(&opts.processors);
+    let profile = vendor_profile(&opts.processors, &opts.output);
     let mut marker = concat!(env!("CARGO_PKG_VERSION"), "\n").to_string();
     if !profile.is_empty() {
         marker.push_str(&profile);
@@ -390,6 +448,8 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
         steps::StepConfig {
             #[cfg(feature = "typescript")]
             transpile,
+            #[cfg(feature = "minify")]
+            rewrite_js: opts.output.js_rewrite(opts.processors.sourcemap),
             #[cfg(feature = "scss")]
             scss_load_paths,
         },
@@ -521,20 +581,28 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     // the deliberate exception, modelled the other way around: it is synthesised only
     // when no source claims that target, so a source page always wins.
     let winners = report.winners();
-    // The `.js` targets the TypeScript transform emits — with `--sourcemap`, each also
-    // produces a generated `<target>.map` sidecar (and, with gzip, that sidecar's `.gz`).
-    let transform_js: std::collections::BTreeSet<&Path> = winners
+    // The targets that emit a generated `<target>.map` sidecar under `--sourcemap`
+    // (and, with gzip, that sidecar's `.gz`): compiled `.js` always; with minify's
+    // whole-tree rewrite, every emitted `.js`/`.mjs`, whichever step wins it.
+    #[cfg(feature = "minify")]
+    let rewrite_active = opts.output.js_rewrite(opts.processors.sourcemap).is_some();
+    #[cfg(not(feature = "minify"))]
+    let rewrite_active = false;
+    let map_bearing: std::collections::BTreeSet<&Path> = winners
         .iter()
-        .filter(|winner| {
-            winner.rank == steps::Rank::Transform
-                && winner.out_rel.extension().and_then(|e| e.to_str()) == Some("js")
-        })
+        .filter(
+            |winner| match winner.out_rel.extension().and_then(|e| e.to_str()) {
+                Some("js") => rewrite_active || winner.rank == steps::Rank::Transform,
+                Some("mjs") => rewrite_active,
+                _ => false,
+            },
+        )
         .map(|winner| winner.out_rel.as_path())
         .collect();
     let map_emitting = |target: &Path| -> bool {
         opts.processors.sourcemap
             && target.extension().and_then(|e| e.to_str()) == Some("map")
-            && transform_js.contains(target.with_extension("").as_path())
+            && map_bearing.contains(target.with_extension("").as_path())
     };
     let violations: Vec<String> = winners
         .iter()
@@ -619,6 +687,11 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
         emit_winner(&steps, winner, opts, stage, &importmap, &mut graph)?;
     }
 
+    // npm content — `npm://` assets here, the vendored tree after pruning below —
+    // follows the vendor knob for output rewriting.
+    #[cfg(feature = "minify")]
+    let vendor_rewrite = opts.output.vendor_rewrite(opts.processors.sourcemap);
+
     // Emit every `npm://` asset symlink: resolve it into node_modules and write the
     // file(s) at the link's own output path. These are package references rather than
     // filesystem links, so the symlink mode never applied to them in the preflight; a
@@ -660,6 +733,23 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
+            // With the vendor knob on, a JS asset goes through the shared rewrite
+            // pass; anything else — and anything unreadable or unparseable, said
+            // aloud — copies byte-for-byte, like the vendored tree's pass.
+            #[cfg(feature = "minify")]
+            if let Some(rewrite) = vendor_rewrite {
+                let ext = out_rel.extension().and_then(|x| x.to_str()).unwrap_or("");
+                if crate::module_graph::is_emitted_js(ext) {
+                    if let Some(out) = rewrite_npm_asset(&source, &out_rel, rewrite)? {
+                        crate::typescript::write_js_output(
+                            &dest,
+                            out.code,
+                            out.map.map(|m| m.json),
+                        )?;
+                        continue;
+                    }
+                }
+            }
             std::fs::copy(&source, &dest)?;
         }
     }
@@ -681,6 +771,13 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
         &[]
     };
     vendor::prune(&stage.join("web_modules"), opts.specs, extra_vendored)?;
+
+    // The vendored tree minifies through the same one-pass rewrite as everything
+    // else — after the prune, so no rewrite is spent on a package about to vanish.
+    #[cfg(feature = "minify")]
+    if let Some(rewrite) = vendor_rewrite {
+        super::optimize::rewrite_vendor_tree(&stage.join("web_modules"), rewrite)?;
+    }
 
     // Shipped `.map` sidecars follow the sourcemap toggle: without it they are swept,
     // so a lean build stays lean (in the gh-pages demo they outweigh the assets they
@@ -776,6 +873,34 @@ fn emit_winner(
     Ok(())
 }
 
+/// Rewrite one `npm://` JS asset for emission, or `None` — aloud — when the shipped
+/// bytes cannot be read or parsed, in which case the caller copies them as they are
+/// (npm content must not brick the build; the same resilience as the vendored tree).
+#[cfg(feature = "minify")]
+fn rewrite_npm_asset(
+    source: &Path,
+    out_rel: &Path,
+    rewrite: crate::typescript::RewriteOptions,
+) -> Result<Option<crate::typescript::TranspileOutput>> {
+    let Ok(text) = std::fs::read_to_string(source) else {
+        crate::static_files::build_warning(&format!(
+            "web-modules: {}: not UTF-8 text; copied as shipped",
+            out_rel.display()
+        ));
+        return Ok(None);
+    };
+    match crate::typescript::rewrite_js_capturing(&text, out_rel, out_rel, rewrite) {
+        Ok(out) => Ok(Some(out)),
+        Err(e) => {
+            crate::static_files::build_warning(&format!(
+                "web-modules: {}: copied as shipped ({e})",
+                out_rel.display()
+            ));
+            Ok(None)
+        }
+    }
+}
+
 /// The runtime version to vendor, pinned exactly and tracking the oxc toolchain in
 /// `Cargo.toml` (bump the two together). An exact pin keeps a decorator in an untrusted
 /// source from resolving a floating, newest-published package at build time.
@@ -821,11 +946,22 @@ mod tests {
     }
 
     #[test]
-    fn vendor_profile_follows_the_sourcemap_toggle() {
+    fn vendor_profile_names_every_tree_shaping_toggle() {
         let mut p = Processors::default();
-        assert_eq!(vendor_profile(&p), "", "pristine by default");
+        let mut o = Output::default();
+        assert_eq!(vendor_profile(&p, &o), "", "pristine by default");
         p.sourcemap = true;
-        assert_eq!(vendor_profile(&p), "vendor-profile: sourcemaps");
+        assert_eq!(vendor_profile(&p, &o), "vendor-profile: sourcemaps");
+        o.minify = true;
+        assert_eq!(vendor_profile(&p, &o), "vendor-profile: sourcemaps,minify");
+        p.sourcemap = false;
+        assert_eq!(vendor_profile(&p, &o), "vendor-profile: minify");
+        o = o.minify_web_modules(false);
+        assert_eq!(
+            vendor_profile(&p, &o),
+            "",
+            "minify without the vendor knob leaves the tree pristine"
+        );
     }
 
     #[test]
@@ -876,6 +1012,25 @@ mod tests {
 
         build(&o).unwrap();
         assert!(vendored_maps(&out) > 0, "a same-profile rebuild keeps them");
+
+        #[cfg(feature = "minify")]
+        {
+            o.output = Output::new(true, false);
+            build(&o).unwrap();
+            assert_eq!(marker_profile(&out), "vendor-profile: sourcemaps,minify");
+            // lit publishes pre-minified files, so a size check cannot prove the
+            // rewrite — the fresh map can: ours labels the vendored file itself as
+            // the source, where lit's shipped maps name its `src/*.ts` files.
+            let map: serde_json::Value = serde_json::from_str(
+                &std::fs::read_to_string(out.join("web_modules/lit/index.js.map")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                map["sources"],
+                serde_json::json!(["lit/index.js"]),
+                "the rewrite superseded the shipped map"
+            );
+        }
     }
 
     #[test]
@@ -1025,6 +1180,132 @@ mod tests {
             out.join("app.js.map.gz").exists(),
             "the map sidecar is gzip-eligible"
         );
+    }
+
+    #[cfg(feature = "minify")]
+    #[test]
+    fn minify_covers_copied_js() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        let original =
+            "// a comment\nexport function add(a, b) {\n  const sum = a + b;\n  return sum;\n}\n";
+        std::fs::write(src.join("b.js"), original).unwrap();
+        let out = dir.path().join("out");
+
+        // Without transforms the copy is byte-identical.
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        assert_eq!(std::fs::read_to_string(out.join("b.js")).unwrap(), original);
+
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.output = Output::new(true, false);
+        build(&o).unwrap();
+        let minified = std::fs::read_to_string(out.join("b.js")).unwrap();
+        assert!(minified.len() < original.len(), "smaller; got {minified}");
+        assert!(minified.matches('\n').count() <= 1, "single line");
+    }
+
+    #[cfg(feature = "minify")]
+    #[test]
+    fn minified_copied_js_still_feeds_the_graph() {
+        // The rewrite reads imports off the final AST — a bare import in copied JS
+        // still fails the unresolved check, exactly as the text scan did.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("b.js"),
+            "import \"ghost-pkg\";\nexport const x = 1;\n",
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.output = Output::new(true, false);
+        let err = build(&o).unwrap_err().to_string();
+        assert!(err.contains("ghost-pkg"), "got {err}");
+    }
+
+    #[cfg(feature = "minify")]
+    #[test]
+    fn routed_parse_error_fails_the_build() {
+        // With minify on, a first-party module the rewrite cannot parse has no bytes
+        // to ship — a build error, where the plain copy only warned.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("broken.js"), "this is not { javascript").unwrap();
+        let out = dir.path().join("out");
+
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        assert!(
+            out.join("broken.js").exists(),
+            "plain copy ships it, warned"
+        );
+
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.output = Output::new(true, false);
+        let err = build(&o).unwrap_err().to_string();
+        assert!(
+            err.contains("minify") && err.contains("broken.js"),
+            "got {err}"
+        );
+    }
+
+    #[cfg(all(feature = "minify", feature = "tera"))]
+    #[test]
+    fn minify_covers_tera_rendered_js() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("app.js.tera"),
+            "export const rendered =\n  {{ 1 }} + 1;\n",
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.output = Output::new(true, false);
+        build(&o).unwrap();
+        let js = std::fs::read_to_string(out.join("app.js")).unwrap();
+        assert!(js.contains('2'), "rendered then folded; got {js}");
+        assert!(js.matches('\n').count() <= 1, "single line; got {js:?}");
+    }
+
+    #[cfg(all(feature = "minify", feature = "typescript"))]
+    #[test]
+    fn minify_with_sourcemap_maps_copied_js() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("b.js"), "export const value = 1 + 1;\n").unwrap();
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.output = Output::new(true, false);
+        o.processors.sourcemap = true;
+        build(&o).unwrap();
+        let map: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(out.join("b.js.map")).unwrap()).unwrap();
+        assert_eq!(
+            map["sources"],
+            serde_json::json!(["b.js"]),
+            "the rewritten file's immediate input is the source"
+        );
+        assert!(std::fs::read_to_string(out.join("b.js"))
+            .unwrap()
+            .ends_with("//# sourceMappingURL=b.js.map\n"));
+
+        // A source `b.js.map` beside a routed `b.js` collides with the generated map.
+        std::fs::write(src.join("b.js.map"), "{}").unwrap();
+        let err = build(&o).unwrap_err().to_string();
+        assert!(
+            err.contains("reserved") && err.contains("b.js.map"),
+            "got {err}"
+        );
+        // Without the rewrite (minify off), the literal sidecar ships untouched.
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors.sourcemap = true;
+        build(&o).unwrap();
+        assert_eq!(std::fs::read_to_string(out.join("b.js.map")).unwrap(), "{}");
     }
 
     #[cfg(feature = "typescript")]

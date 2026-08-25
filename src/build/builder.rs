@@ -103,9 +103,20 @@ impl Build {
         self
     }
 
-    /// Minify the emitted JS (default off). Requires the `minify` feature.
+    /// Minify the emitted JS (default off) — the whole dist tree: compiled TS, copied
+    /// `.js`/`.mjs`, Tera-rendered JS, `npm://` assets, and (see
+    /// [`minify_web_modules`](Self::minify_web_modules)) the vendored `web_modules/`.
+    /// Requires the `minify` feature.
     pub fn minify(mut self, on: bool) -> Self {
         self.output.minify = on;
+        self
+    }
+
+    /// With [`minify`](Self::minify): also minify the vendored `web_modules/` tree and
+    /// `npm://` assets (default on). Off keeps npm content byte-identical to what the
+    /// packages shipped.
+    pub fn minify_web_modules(mut self, on: bool) -> Self {
+        self.output.minify_web_modules = on;
         self
     }
 

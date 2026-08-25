@@ -84,7 +84,7 @@ pub(crate) struct StepConfig {
     /// Rewrite already-emitted JS (copied / Tera-rendered) through the shared oxc
     /// pass. `None` — the default, and the dev server's claims-only configuration —
     /// keeps the byte-copy behavior.
-    #[cfg(feature = "minify")]
+    #[cfg(feature = "typescript")]
     pub rewrite_js: Option<crate::typescript::RewriteOptions>,
     #[cfg(feature = "scss")]
     pub scss_load_paths: Vec<PathBuf>,
@@ -102,7 +102,7 @@ pub(crate) fn enabled_steps(
     if processors.tera {
         #[allow(unused_mut)]
         let mut tera_step = TeraStep::default();
-        #[cfg(feature = "minify")]
+        #[cfg(feature = "typescript")]
         {
             tera_step.rewrite_js = config.rewrite_js;
         }
@@ -110,7 +110,7 @@ pub(crate) fn enabled_steps(
     }
     #[allow(unused_mut)]
     let mut static_step = crate::static_files::StaticStep::new(processors.reject.clone());
-    #[cfg(feature = "minify")]
+    #[cfg(feature = "typescript")]
     {
         static_step.rewrite_js = config.rewrite_js;
     }
@@ -138,7 +138,7 @@ pub(crate) fn enabled_steps(
 pub(crate) struct TeraStep {
     /// With output rewriting on, a rendered `.js`/`.mjs` goes through the shared oxc
     /// pass after rendering — render is textual, so the one-parse rule still holds.
-    #[cfg(feature = "minify")]
+    #[cfg(feature = "typescript")]
     pub(crate) rewrite_js: Option<crate::typescript::RewriteOptions>,
 }
 
@@ -180,13 +180,26 @@ impl Step for TeraStep {
         // minified codegen, imports off the final AST, and — when asked — a map whose
         // source is the template (its `sourcesContent` carries the rendered text, the
         // actual parse input).
-        #[cfg(feature = "minify")]
+        #[cfg(feature = "typescript")]
         if let Some(rewrite) = self.rewrite_js {
             if crate::module_graph::is_emitted_js(ext) {
                 let out_rel = rel.with_extension("");
-                let out =
-                    crate::typescript::rewrite_js_capturing(&rendered, &out_rel, rel, rewrite)?;
-                crate::typescript::write_js_output(dest, out.code, out.map.map(|m| m.json))?;
+                let legal_file = (rewrite.comments == crate::Comments::Collect)
+                    .then(|| crate::typescript::legal_file_name(dest))
+                    .flatten();
+                let out = crate::typescript::rewrite_js_capturing(
+                    &rendered,
+                    &out_rel,
+                    rel,
+                    rewrite,
+                    legal_file.as_deref(),
+                )?;
+                crate::typescript::write_js_output(
+                    dest,
+                    out.code,
+                    out.map.map(|m| m.json),
+                    out.legal,
+                )?;
                 return Ok(Emitted {
                     imports: Some(out.imports),
                 });

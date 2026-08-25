@@ -28,9 +28,10 @@ pub use pipeline::*;
 // warnings) run on: every stage states what it would emit before anything is written.
 pub(crate) mod steps;
 
-// The vendored-tree rewrite behind whole-dist minification (`web_modules/` is npm
-// content, produced by extraction rather than a step, so it gets its own pass).
-#[cfg(feature = "minify")]
+// The vendored-tree rewrite behind whole-dist minification and the comment policy
+// (`web_modules/` is npm content, produced by extraction rather than a step, so it
+// gets its own pass).
+#[cfg(feature = "typescript")]
 pub(crate) mod optimize;
 
 // The fluent builder over `build()` / `BuildOptions`, re-exported at the crate root as

@@ -47,6 +47,63 @@ pub enum ClassFields {
     Define,
 }
 
+/// Comment policy for emitted JavaScript — what the single codegen pass prints.
+/// Defined here (always compiled) so the build [`Output`](crate::build::Output) can
+/// carry it whether or not the `typescript` processor is enabled; re-exported at the
+/// crate root as `web_modules::Comments`. It applies wherever the toolchain rewrites
+/// JS: compiled TypeScript always, copied/rendered/vendored JS whenever an output
+/// rewrite is active. CSS needs no policy — grass's compressed output already drops
+/// everything except `/*!` loud comments.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Comments {
+    /// Print every comment the printer supports — the byte-conservative default of a
+    /// plain build.
+    #[default]
+    Keep,
+    /// Drop normal, JSDoc and annotation comments; legal comments (`//!`, `/*!`,
+    /// `@license`, `@preserve`) stay inline, so license text always ships with the
+    /// code. The default under minification — deliberately not oxc's own minify
+    /// preset, which drops legal comments too.
+    Strip,
+    /// Like [`Strip`](Self::Strip), but move the legal comments into a
+    /// `<output>.LEGAL.txt` sidecar beside the file, leaving a pointer comment in the
+    /// code. The sidecar holds the deduplicated comment texts verbatim, blank-line
+    /// separated — a stable, tool-agnostic contract.
+    Collect,
+    /// Drop everything, legal comments included — for tiny embedded targets. The
+    /// vendored `LICENSE`/`NOTICE` files still ship.
+    None,
+}
+
+/// `--comments` value: the CLI mirror of [`Comments`] (which is `#[non_exhaustive]`
+/// and not a `clap::ValueEnum`).
+#[cfg(feature = "cli")]
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommentsArg {
+    /// Keep every comment (the default without `--minify`).
+    Keep,
+    /// Drop normal/JSDoc/annotation comments, keep legal comments inline (the
+    /// default under `--minify`).
+    Strip,
+    /// Strip, with legal comments collected into `<output>.LEGAL.txt` sidecars.
+    Collect,
+    /// Drop everything, legal comments included.
+    None,
+}
+
+#[cfg(feature = "cli")]
+impl From<CommentsArg> for Comments {
+    fn from(value: CommentsArg) -> Self {
+        match value {
+            CommentsArg::Keep => Comments::Keep,
+            CommentsArg::Strip => Comments::Strip,
+            CommentsArg::Collect => Comments::Collect,
+            CommentsArg::None => Comments::None,
+        }
+    }
+}
+
 #[cfg(feature = "typescript")]
 pub mod typescript;
 

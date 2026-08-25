@@ -156,6 +156,11 @@ struct CompilerConfig {
     tera: web_modules::templates::TeraArgs,
     #[command(flatten)]
     minify: web_modules::minify::MinifyArgs,
+    /// Comment policy for emitted JS: `keep`, `strip` (legal comments stay inline),
+    /// `collect` (legal → `<file>.LEGAL.txt` sidecars), or `none`. Unset, `--minify`
+    /// implies `strip`. Consumed by `build`; `dev` always keeps comments.
+    #[arg(long = "comments", value_enum, value_name = "MODE")]
+    comments: Option<web_modules::CommentsArg>,
     #[command(flatten)]
     sourcemap: web_modules::typescript::SourcemapArgs,
     #[cfg(feature = "compress")]
@@ -194,6 +199,7 @@ struct ResolvedCompiler {
     tera: bool,
     minify: bool,
     minify_web_modules: bool,
+    comments: Option<web_modules::Comments>,
     sourcemap: bool,
     gzip: bool,
     ts_decorators: web_modules::typescript::Decorators,
@@ -221,6 +227,8 @@ impl CompilerConfig {
             } else {
                 cfg.minify_web_modules.unwrap_or(true)
             },
+            // Explicit flag > block > unset (`build` then lets --minify imply strip).
+            comments: self.comments.map(Into::into).or(cfg.comments),
             sourcemap: self.sourcemap.enabled_with(cfg.sourcemap, false, nd),
             #[cfg(feature = "compress")]
             gzip: self.gzip.enabled_with(cfg.gzip, false, nd),
@@ -359,6 +367,7 @@ struct PkgConfig {
     packages: Vec<String>,
     minify: Option<bool>,
     minify_web_modules: Option<bool>,
+    comments: Option<web_modules::Comments>,
     sourcemap: Option<bool>,
     gzip: Option<bool>,
     typescript: Option<bool>,
@@ -478,6 +487,21 @@ fn parse_block(block: &Value) -> Res<PkgConfig> {
                     cfg.minify_web_modules = Some(as_bool(wm, "web_modules.minify.webModules")?);
                 }
             }
+            "comments" => {
+                let mode = as_string(val, "web_modules.comments")?;
+                cfg.comments = Some(match mode.as_str() {
+                    "keep" => web_modules::Comments::Keep,
+                    "strip" => web_modules::Comments::Strip,
+                    "collect" => web_modules::Comments::Collect,
+                    "none" => web_modules::Comments::None,
+                    other => {
+                        return Err(format!(
+                        "web_modules.comments: unknown mode {other:?} (keep, strip, collect, none)"
+                    )
+                        .into())
+                    }
+                });
+            }
             "sourcemap" => cfg.sourcemap = Some(as_bool(val, "web_modules.sourcemap")?),
             "gzip" => cfg.gzip = Some(as_bool(val, "web_modules.gzip")?),
             "typescript" => {
@@ -584,8 +608,11 @@ async fn main() -> Res {
             let (cfg, pkg_path) = load_pkg_config()?;
             let resolved = compiler.resolve_with(&cfg);
             let (minify, sourcemap, gzip) = (resolved.minify, resolved.sourcemap, resolved.gzip);
-            let output = web_modules::build::Output::new(minify, gzip)
+            let mut output = web_modules::build::Output::new(minify, gzip)
                 .minify_web_modules(resolved.minify_web_modules);
+            if let Some(mode) = resolved.comments {
+                output = output.comments(mode);
+            }
             let mut processors = resolved.into_processors();
             processors.reject = compiler.reject()?;
 
@@ -619,11 +646,18 @@ async fn main() -> Res {
                 output,
             })?;
             println!(
-                "built {} root(s) → {} ({} package spec(s), mount {mount}{}{}{})",
+                "built {} root(s) → {} ({} package spec(s), mount {mount}{}{}{}{})",
                 roots.len(),
                 out.display(),
                 specs.len(),
                 if minify { ", minified" } else { "" },
+                match output.effective_comments() {
+                    web_modules::Comments::Keep => "",
+                    web_modules::Comments::Strip => ", comments stripped",
+                    web_modules::Comments::Collect => ", legal comments collected",
+                    web_modules::Comments::None => ", comments dropped",
+                    _ => "",
+                },
                 if sourcemap { ", sourcemaps" } else { "" },
                 if gzip { ", gzipped" } else { "" },
             );
@@ -917,6 +951,44 @@ mod tests {
         };
         assert!(from_block(&[]), "block enables");
         assert!(!from_block(&["--no-sourcemap"]), "flag beats block");
+    }
+
+    #[test]
+    fn comments_flag_and_block_resolve() {
+        use web_modules::Comments;
+        assert_eq!(
+            resolve_build(&[]).comments,
+            None,
+            "unset lets minify decide"
+        );
+        assert_eq!(
+            resolve_build(&["--comments", "collect"]).comments,
+            Some(Comments::Collect)
+        );
+        assert!(
+            Cli::try_parse_from(["web-modules", "build", "--out", "o", "--comments", "bogus"])
+                .is_err(),
+            "unknown mode rejected"
+        );
+
+        let dir = write_pkg(r#"{"web_modules":{"comments":"strip"}}"#);
+        let (cfg, _) = load_pkg_config_at(dir.path()).unwrap();
+        assert_eq!(cfg.comments, Some(Comments::Strip));
+        let bad = write_pkg(r#"{"web_modules":{"comments":"loud"}}"#);
+        assert!(load_pkg_config_at(bad.path()).is_err());
+
+        // Flag beats block.
+        let block = PkgConfig {
+            comments: Some(Comments::Strip),
+            ..PkgConfig::default()
+        };
+        let argv = ["web-modules", "build", "--out", "o", "--comments", "keep"];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Build { compiler, .. } => {
+                assert_eq!(compiler.resolve_with(&block).comments, Some(Comments::Keep));
+            }
+            _ => panic!("expected Build"),
+        }
     }
 
     #[test]

@@ -9,6 +9,9 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Changed
 
+- **Breaking:** `--minify` now strips comments from emitted JS: normal, JSDoc and annotation comments go, legal comments (`//!`, `/*!`, `@license`, `@preserve`) stay inline — deliberately not oxc's own minify preset, which drops those too.
+  Previously every comment survived minification.
+  Pass `--comments keep` for the old behavior.
 - **Breaking:** `--minify` now minifies the whole dist tree — byte-copied `.js`/`.mjs`, Tera-rendered JS, `npm://` assets, and the vendored `web_modules/` — instead of only compiled TypeScript output.
   Every file goes through one oxc parse→codegen pass: a first-party module that fails to parse is now a build error (it was copied with a warning), and its recorded imports come from the final AST, so an import removed by dead-code elimination no longer counts against the import map.
   Vendored files that fail to parse are left as shipped, aloud.
@@ -16,6 +19,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Added
 
+- `--comments <keep|strip|collect|none>` (package.json `"comments"`, builder `Build::comments`, library `Output::comments`, action input `comments`) sets the comment policy for every emitted JS file.
 - `--minify-web-modules` / `--no-minify-web-modules` (package.json `"minify": {"webModules": false}`, builder `Build::minify_web_modules`, action input `minify-web-modules`) keep the vendored `web_modules/` tree and `npm://` assets out of `--minify`, byte-identical to what the packages shipped. On by default under `--minify`.
 
 - `--sourcemap` emits source maps for compiled TypeScript, in `build` and `dev` alike (package.json key `sourcemap`; builders `Build::sourcemap` / `Dev::sourcemap`).

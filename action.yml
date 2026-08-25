@@ -83,6 +83,10 @@ inputs:
     description: Emit source maps for compiled JS (true/false).
     required: false
     default: "false"
+  comments:
+    description: "Comment policy for emitted JS: keep, strip, collect, or none. Empty lets minify imply strip."
+    required: false
+    default: ""
   gzip:
     description: Write .gz sidecars next to assets (true/false). The released binary includes the `compress` feature, so this works.
     required: false
@@ -267,6 +271,7 @@ runs:
         INPUT_MOUNT: ${{ inputs.mount }}
         INPUT_MINIFY: ${{ inputs.minify }}
         INPUT_MINIFY_WEB_MODULES: ${{ inputs.minify-web-modules }}
+        INPUT_COMMENTS: ${{ inputs.comments }}
         INPUT_SOURCEMAP: ${{ inputs.sourcemap }}
         INPUT_GZIP: ${{ inputs.gzip }}
         INPUT_PACKAGES: ${{ inputs.packages }}
@@ -305,6 +310,7 @@ runs:
         # carries the `compress` feature, so `--gzip` works.
         case "$INPUT_MINIFY" in 1 | true | yes | on) args+=(--minify) ;; esac
         case "$INPUT_MINIFY_WEB_MODULES" in 0 | false | no | off) args+=(--no-minify-web-modules) ;; esac
+        if [ -n "$INPUT_COMMENTS" ]; then args+=(--comments "$INPUT_COMMENTS"); fi
         case "$INPUT_SOURCEMAP" in 1 | true | yes | on) args+=(--sourcemap) ;; esac
         case "$INPUT_GZIP" in 1 | true | yes | on) args+=(--gzip) ;; esac
         # Each package spec becomes a repeatable `--package`.

@@ -120,6 +120,13 @@ impl Build {
         self
     }
 
+    /// Comment policy for emitted JS (see [`Comments`](crate::Comments)); unset,
+    /// [`minify`](Self::minify) implies [`Strip`](crate::Comments::Strip).
+    pub fn comments(mut self, comments: crate::Comments) -> Self {
+        self.output.comments = Some(comments);
+        self
+    }
+
     /// Write `<file>.gz` sidecars for servable assets (default off). Requires the
     /// `compress` feature.
     pub fn gzip(mut self, on: bool) -> Self {

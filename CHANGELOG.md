@@ -19,6 +19,8 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Added
 
+- `examples/bundle`: a pure-frontend demo of `--bundle`, configured from the `web_modules` block in `package.json`.
+- The `embedded` example bakes source maps and collects legal comments; the gh-pages CI dogfood covers `--comments collect` and `--no-minify-web-modules`.
 - `--bundle` and `--bundle-entry <path>` (package.json `"bundle": {"entries": [...]}`, builder `Build::bundle` / `Build::bundle_entry`, action inputs `bundle`/`bundle-entries`) fold the built tree per entry point, inside the atomic build.
   Each entry keeps its exact URL with its imports inlined, shared and dynamically-imported code lands in content-hashed `chunks/`, and `importmap.json` + `web_modules/` drop out of the output; minify, comments and sourcemap apply through rolldown's own single pass.
   A surviving module whose bare imports relied on the removed import map fails the build by name — a worker script or second page needs its own entry.

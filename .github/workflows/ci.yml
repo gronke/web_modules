@@ -105,7 +105,9 @@ jobs:
       # feeds the released binary (vendor the manifest, render the template, mount under a subpath,
       # minify). Building from source surfaces a CLI or pipeline regression here in PR CI, not only
       # when the Pages deploy runs on main. Asserts the compiled targets land and that the raw sources
-      # and the config manifest (kept out by reject's `config` preset) never do.
+      # and the config manifest (kept out by reject's `config` preset) never do. `--comments collect`
+      # goes beyond what pages.yml feeds today: the released binary predates the flag; once a release
+      # carries it, pages.yml can follow.
       - name: Build the gh-pages demo (dogfood)
         run: |
           out="$RUNNER_TEMP/gh-pages-dist"
@@ -115,7 +117,8 @@ jobs:
             --template examples/gh-pages/index.html.tera \
             --mount /web_modules \
             --minify \
-            --sourcemap
+            --sourcemap \
+            --comments collect
           test -f "$out/index.html" && test -f "$out/app.js" && test -f "$out/styles.css"
           test -d "$out/web_modules"
           # The sourcemap flag writes a linked sidecar beside each compiled file and
@@ -123,11 +126,68 @@ jobs:
           test -f "$out/app.js.map"
           grep -q 'sourceMappingURL=app.js.map' "$out/app.js"
           find "$out/web_modules" -name '*.map' | grep -q .
+          # `collect` moved the legal comments into LEGAL.txt sidecars, the app's own
+          # banner and the vendored lit tree's @license headers alike, each file keeping
+          # a pointer comment.
+          test -f "$out/app.js.LEGAL.txt"
+          grep -q '@license' "$out/app.js.LEGAL.txt"
+          grep -q 'app.js.LEGAL.txt' "$out/app.js"
+          find "$out/web_modules" -name '*.LEGAL.txt' | grep -q .
           grep -q '<script type="importmap">' "$out/index.html"
           # The config manifest and the raw sources must never reach the output.
           test ! -e "$out/package.json"
           test ! -e "$out/app.ts"
           test ! -e "$out/styles.scss"
+          # Variant: --no-minify-web-modules ships the vendored tree byte-identical to what
+          # npm published, the comment policy included: the shipped @license headers stay in
+          # the files (lit publishes minified sources, so sizes alone prove little) and no
+          # LEGAL.txt sidecars appear; first-party app.js still minifies (its legal banner
+          # staying inline: no collect here) and still links its map.
+          out2="$RUNNER_TEMP/gh-pages-dist-pristine"
+          cargo run --features full --bin web-modules -- build examples/gh-pages \
+            --out "$out2" \
+            --manifest examples/gh-pages/package.json \
+            --template examples/gh-pages/index.html.tera \
+            --mount /web_modules \
+            --minify \
+            --sourcemap \
+            --no-minify-web-modules
+          grep -q '@license' "$out2/web_modules/@lit/reactive-element/reactive-element.js"
+          if grep -q '@license' "$out/web_modules/@lit/reactive-element/reactive-element.js"; then
+            echo "collect left @license inline in the vendored tree"; exit 1
+          fi
+          test -z "$(find "$out2/web_modules" -name '*.LEGAL.txt')"
+          test -f "$out2/app.js.map"
+          grep -q '@license' "$out2/app.js"
+
+      # Dogfood the bundle demo: a manifest-driven build; every knob (bundle entries, packages,
+      # minify, sourcemap, out) comes from the `web_modules` block in examples/bundle/package.json,
+      # which the CLI reads from its cwd, so the invocation carries no flag but --out. Needs the
+      # opt-in `bundle` feature, which library `full` excludes; the released binary ships with it
+      # (release.yml builds --features "full bundle"), so this mirrors what consumers download.
+      - name: Build the bundle demo (dogfood)
+        working-directory: examples/bundle
+        run: |
+          out="$RUNNER_TEMP/bundle-dist"
+          cargo run --features "full bundle" --bin web-modules -- build --out "$out"
+          # The entry kept its URL; the dynamically-imported module landed in content-hashed chunks/.
+          test -f "$out/index.html" && test -f "$out/app.js" && test -f "$out/styles.css"
+          find "$out/chunks" -name '*.js' | grep -q .
+          grep -q 'chunks/' "$out/app.js"
+          # The import map and the vendored tree dropped out of the output.
+          test ! -e "$out/importmap.json"
+          test ! -e "$out/web_modules"
+          # rolldown's single pass applied minify + sourcemap; legal comments stay inline
+          # (`collect` has no link mode while bundling).
+          test -f "$out/app.js.map"
+          grep -q 'sourceMappingURL=app.js.map' "$out/app.js"
+          find "$out/chunks" -name '*.js.map' | grep -q .
+          grep -q '@license' "$out/app.js"
+          # The config manifest, the README and the raw sources never ship: the manifest's
+          # `roots` points at web/, so the example's own docs stay out of the site.
+          test ! -e "$out/package.json"
+          test ! -e "$out/README.md"
+          test -z "$(find "$out" -name '*.ts')"
 
       # Hand the three e2e example binaries to the `e2e` matrix below, so those runners never
       # recompile Rust. They're self-contained: lit-element/react-esm bake the frontend in via

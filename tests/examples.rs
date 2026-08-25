@@ -188,13 +188,15 @@ fn lit_element_bake_emits_components_and_inlines_importmap() {
 
 // Unlike its network-gated siblings, the `embedded` example vendors nothing, so this runs
 // offline (no `#[ignore]`). It pins the *output-optimization* wiring the example turns on:
-// baking the same sources with `Output::optimized()` instead of the default yields smaller
-// JS and writes real `.gz` sidecars. gzip *serving* under `Accept-Encoding` is covered by
+// baking the same sources with the optimized policy set instead of the defaults yields
+// smaller JS, real `.gz` sidecars, a linked source map, and the legal banner collected
+// into `app.js.LEGAL.txt`. gzip *serving* under `Accept-Encoding` is covered by
 // `tests/output.rs`; here we only assert the bake-level result over the tracked sources.
 #[test]
 #[cfg(all(feature = "minify", feature = "compress"))]
-fn embedded_bake_minifies_and_gzips() {
-    use web_modules::build::Output;
+fn embedded_bake_minifies_gzips_and_writes_sidecars() {
+    use web_modules::build::{Output, Processors};
+    use web_modules::Comments;
 
     let web = examples().join("embedded/web");
     let html = "<!doctype html>{importmap}<link rel=stylesheet href=/styles.css>\
@@ -215,6 +217,10 @@ fn embedded_bake_minifies_and_gzips() {
         output: Output::default(), // both off
     })
     .unwrap();
+    // Mirror examples/embedded/build.rs: the optimized bake also emits source maps and
+    // collects legal comments.
+    let mut processors = Processors::default();
+    processors.sourcemap = true;
     build(&BuildOptions {
         specs: &[],
         roots: std::slice::from_ref(&web),
@@ -222,8 +228,8 @@ fn embedded_bake_minifies_and_gzips() {
         mount: "/web_modules",
         html,
         template: None,
-        processors: Default::default(),
-        output: Output::optimized(), // minify + gzip
+        processors,
+        output: Output::optimized().comments(Comments::Collect),
     })
     .unwrap();
 
@@ -253,4 +259,40 @@ fn embedded_bake_minifies_and_gzips() {
     //     nothing — but the tag is still emitted).
     let index = std::fs::read_to_string(optimized.join("index.html")).unwrap();
     assert!(index.contains("type=\"importmap\""));
+
+    // (5) The optimized bake linked a source map beside the minified file, and gzip
+    //     covers it like any other servable asset; the plain bake emitted none.
+    assert!(optimized.join("app.js.map").is_file(), "app.js.map sidecar");
+    let min_src = std::fs::read_to_string(optimized.join("app.js")).unwrap();
+    assert!(min_src.contains("sourceMappingURL=app.js.map"));
+    assert!(
+        optimized.join("app.js.map.gz").is_file(),
+        "app.js.map.gz sidecar"
+    );
+    assert!(
+        !plain.join("app.js.map").exists(),
+        "plain bake writes no map"
+    );
+
+    // (6) `Comments::Collect` moved the legal banner into the LEGAL.txt sidecar: the
+    //     minified file carries the pointer, not the banner.
+    let legal = std::fs::read_to_string(optimized.join("app.js.LEGAL.txt")).unwrap();
+    assert!(
+        legal.contains("@license"),
+        "banner landed in app.js.LEGAL.txt"
+    );
+    assert!(
+        min_src.contains("app.js.LEGAL.txt"),
+        "pointer comment in app.js"
+    );
+    assert!(
+        !min_src.contains("embedded example"),
+        "banner text left app.js"
+    );
+
+    // (7) The plain bake (comments unset → Keep) still ships the banner inline and no
+    //     sidecar, the contrast that makes (6) meaningful.
+    let plain_src = std::fs::read_to_string(plain.join("app.js")).unwrap();
+    assert!(plain_src.contains("embedded example"));
+    assert!(!plain.join("app.js.LEGAL.txt").exists());
 }

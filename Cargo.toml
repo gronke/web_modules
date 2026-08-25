@@ -172,4 +172,6 @@ members = ["examples/*"]
 # - tauri: a nested crate at examples/tauri/src-tauri with its own [workspace] (and a heavyweight
 #   webkit2gtk tree), so it can't be a workspace member; it has a dedicated CI job.
 # - gh-pages: a pure-frontend demo (TS/SCSS/HTML), built by `web-modules build` in pages.yml, not cargo.
-exclude = ["examples/tauri", "examples/gh-pages"]
+# - bundle: a pure-frontend `--bundle` demo (TS/SCSS/HTML), built by the CLI in ci.yml's dogfood
+#   step, not cargo.
+exclude = ["examples/tauri", "examples/gh-pages", "examples/bundle"]

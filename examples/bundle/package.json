@@ -1,0 +1,13 @@
+{
+  "name": "web-modules-bundle-demo",
+  "private": true,
+  "description": "Pure-frontend demo of the build pipeline's bundle stage, driven entirely by the web_modules block below: it IS the CLI config, read by `web-modules build` from the directory it runs in, so the build takes no flags at all (ci.yml's dogfood step only redirects --out). `roots` points the build at web/, keeping this manifest and the README out of the shipped tree. `packages` plays the role `dependencies` + `--manifest` play in the gh-pages demo, and lit's sub-packages are listed explicitly because vendoring is not transitive, though after bundling all of them are inlined into app.js, and the vendored tree plus the import map drop out of the output. No `comments` key: `collect` has no link mode under rolldown, so legal comments (lit's @license headers, the app banner) stay inline in the bundle. No `minify.webModules` either: the bundler consumes the vendored tree, it is never rewritten in place.",
+  "web_modules": {
+    "roots": ["web"],
+    "out": "dist",
+    "minify": true,
+    "sourcemap": true,
+    "packages": ["@lit/reactive-element@^2", "lit@^3", "lit-element@^4", "lit-html@^3"],
+    "bundle": { "entries": ["app.js"] }
+  }
+}

@@ -87,6 +87,14 @@ inputs:
     description: "Comment policy for emitted JS: keep, strip, collect, or none. Empty lets minify imply strip."
     required: false
     default: ""
+  bundle:
+    description: Bundle the built tree per entry point (true/false). Entries keep their URLs; importmap.json and web_modules/ drop out of the output.
+    required: false
+    default: "false"
+  bundle-entries:
+    description: Space-separated bundle entry points, output-relative (default app.js).
+    required: false
+    default: ""
   gzip:
     description: Write .gz sidecars next to assets (true/false). The released binary includes the `compress` feature, so this works.
     required: false
@@ -272,6 +280,8 @@ runs:
         INPUT_MINIFY: ${{ inputs.minify }}
         INPUT_MINIFY_WEB_MODULES: ${{ inputs.minify-web-modules }}
         INPUT_COMMENTS: ${{ inputs.comments }}
+        INPUT_BUNDLE: ${{ inputs.bundle }}
+        INPUT_BUNDLE_ENTRIES: ${{ inputs.bundle-entries }}
         INPUT_SOURCEMAP: ${{ inputs.sourcemap }}
         INPUT_GZIP: ${{ inputs.gzip }}
         INPUT_PACKAGES: ${{ inputs.packages }}
@@ -311,6 +321,11 @@ runs:
         case "$INPUT_MINIFY" in 1 | true | yes | on) args+=(--minify) ;; esac
         case "$INPUT_MINIFY_WEB_MODULES" in 0 | false | no | off) args+=(--no-minify-web-modules) ;; esac
         if [ -n "$INPUT_COMMENTS" ]; then args+=(--comments "$INPUT_COMMENTS"); fi
+        case "$INPUT_BUNDLE" in 1 | true | yes | on) args+=(--bundle) ;; esac
+        if [ -n "$INPUT_BUNDLE_ENTRIES" ]; then
+          read -ra bundle_entries <<< "$INPUT_BUNDLE_ENTRIES"
+          for e in "${bundle_entries[@]}"; do args+=(--bundle-entry "$e"); done
+        fi
         case "$INPUT_SOURCEMAP" in 1 | true | yes | on) args+=(--sourcemap) ;; esac
         case "$INPUT_GZIP" in 1 | true | yes | on) args+=(--gzip) ;; esac
         # Each package spec becomes a repeatable `--package`.

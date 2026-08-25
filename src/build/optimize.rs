@@ -63,6 +63,46 @@ pub(crate) fn rewrite_vendor_tree(dir: &Path, options: RewriteOptions) -> Result
     Ok(count)
 }
 
+/// Rewrite every non-bundled `.js`/`.mjs` under the stage after a bundling build —
+/// the output rewrite that emission deferred while rolldown handled its own outputs
+/// (`exclude`, stage-relative: entries, chunks and their sidecars). These are
+/// first-party files, so unlike the vendored pass a file that cannot be read or
+/// parsed is a build error.
+#[cfg(feature = "bundle")]
+pub(crate) fn rewrite_survivors(
+    stage: &Path,
+    exclude: &std::collections::BTreeSet<PathBuf>,
+    options: RewriteOptions,
+) -> Result<usize> {
+    let mut count = 0;
+    for entry in WalkDir::new(stage)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| !e.path_is_symlink())
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        if !is_emitted_js(ext) {
+            continue;
+        }
+        let rel = path.strip_prefix(stage).unwrap_or(path);
+        if exclude.contains(rel) {
+            continue;
+        }
+        let source = std::fs::read_to_string(path)?;
+        let legal_file = (options.comments == crate::Comments::Collect)
+            .then(|| crate::typescript::legal_file_name(path))
+            .flatten();
+        let out = rewrite_js_capturing(&source, path, rel, options, legal_file.as_deref())?;
+        write_rewritten(path, out.code, out.map.map(|m| m.json), out.legal)?;
+        count += 1;
+    }
+    Ok(count)
+}
+
 /// Replace a vendored file with its rewritten form. The staged tree seeds
 /// `web_modules/` as hardlinks into the previous output, so nothing may write
 /// through an existing directory entry: stale sidecars are unlinked (safe — the

@@ -60,7 +60,7 @@ jobs:
       - name: Clippy (workspace · full)
         run: cargo clippy --workspace --all-targets --features full -- -D warnings
       - name: Clippy (bundle feature · rolldown)
-        run: cargo clippy --features "bundle npm" --all-targets -- -D warnings
+        run: cargo clippy --features "bundle npm cli" --all-targets -- -D warnings
 
       # Feature isolation: the bare crate and a few single features must each compile on their
       # own — catches a feature that only builds because another happens to be enabled. `full`
@@ -68,7 +68,7 @@ jobs:
       - name: Feature-isolation check
         run: |
           cargo check -p web_modules --no-default-features
-          for f in axum dev minify i18n builder scss tera; do
+          for f in axum dev minify i18n builder scss tera bundle; do
             cargo check -p web_modules --no-default-features --features "$f"
           done
           # the processor-agnostic build pipeline + the fluent builders (gated on `builder`) paired
@@ -82,7 +82,7 @@ jobs:
       - name: Tests (workspace · incl. network-gated)
         run: cargo test --workspace --features full --tests -- --include-ignored
       - name: Tests (bundle feature · network)
-        run: cargo test --features "bundle npm" --test bundle -- --include-ignored
+        run: cargo test --features "bundle npm cli" --lib --bins --test bundle --test bundle_split --test bundle_build -- --include-ignored
 
       # Doctests (the API examples in `///` docs): `--tests` above excludes the `--doc` target,
       # so run it explicitly. No network-gated doctests, so no `--include-ignored` needed.

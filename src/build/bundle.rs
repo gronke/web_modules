@@ -69,17 +69,34 @@ pub struct BundleOptions<'a> {
     pub production: bool,
 }
 
+/// Run rolldown's async work to completion from synchronous code: a dedicated thread
+/// hosts its own current-thread runtime, so the call works from a plain `build.rs`
+/// **and** from inside someone else's tokio runtime (the CLI's async `main`), where a
+/// nested `block_on` on the caller's thread would panic.
+fn run_bundler<T, F>(fut: F) -> Result<T>
+where
+    T: Send,
+    F: std::future::Future<Output = Result<T>> + Send,
+{
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| Error::Bundle(format!("tokio runtime: {e}")))?
+                    .block_on(fut)
+            })
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 /// Bundle [`BundleOptions::entry`] and everything it imports from `<cwd>/node_modules/` into a single
 /// browser ES module under `out_dir`. The dependencies must already be installed (see the module
 /// docs). Pure Rust; rolldown runs in-process, no Node.
 pub fn bundle(opts: &BundleOptions<'_>) -> Result<()> {
-    // rolldown's bundle is async; run it on a dedicated current-thread runtime so a sync `build.rs`
-    // (or any sync caller) can drive it without being async itself.
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| Error::Bundle(format!("tokio runtime: {e}")))?
-        .block_on(bundle_async(opts))
+    run_bundler(bundle_async(opts))
 }
 
 async fn bundle_async(opts: &BundleOptions<'_>) -> Result<()> {
@@ -174,24 +191,57 @@ pub struct SplitBundleOptions<'a> {
     /// downleveling pass is applied either way, so class-field and `static` semantics survive
     /// byte-for-byte.
     pub minify: bool,
+    /// Write `<file>.map` sidecars for every emitted entry and chunk — rolldown writes
+    /// the maps and appends the `sourceMappingURL` footers itself, with the input
+    /// modules' sources embedded.
+    pub sourcemap: bool,
+    /// Comment policy for the bundled output (see [`crate::Comments`]). rolldown has
+    /// no collect/link mode, so [`Collect`](crate::Comments::Collect) degrades to
+    /// keeping legal comments inline; normal comments do not survive bundling under
+    /// any mode.
+    pub comments: crate::Comments,
 }
 
 /// What [`bundle_split`] produced.
+#[non_exhaustive]
 pub struct SplitBundleOutput {
     /// Absolute paths of every source module folded into the output (entries included).
     /// External modules never appear. Callers that bundle a served tree in place can prune
     /// exactly these files (minus the entries) — nothing else — from the original layout.
     pub bundled_modules: Vec<PathBuf>,
+    /// `out_dir`-relative paths of everything rolldown wrote: entry facades, shared
+    /// chunks, and (with [`sourcemap`](SplitBundleOptions::sourcemap)) their `.map`
+    /// sidecars. What an in-place caller must exempt from its own post-processing.
+    pub emitted: Vec<PathBuf>,
 }
+
+/// Feature-specific `--bundle-*` flags, paired with the `--bundle` / `--no-bundle`
+/// toggle in [`BundleArgs`].
+#[cfg(feature = "cli")]
+#[derive(clap::Args, Clone, Debug, Default)]
+pub struct BundleConfig {
+    /// Bundle entry point, output-relative (repeatable; default `app.js`). Every
+    /// module the page references by URL needs its own entry.
+    #[arg(long = "bundle-entry", value_name = "PATH")]
+    pub entries: Vec<PathBuf>,
+}
+
+// The `--bundle` / `--no-bundle` toggle (off by default — the buildless dist is the
+// contract), plus the entry list.
+#[cfg(feature = "cli")]
+crate::cli_config::feature_args!(
+    BundleArgs,
+    bundle,
+    "bundle",
+    no_bundle,
+    "no-bundle",
+    BundleConfig
+);
 
 /// Bundle [`SplitBundleOptions::entries`] into facades + shared chunks under `out_dir`,
 /// preserving each entry's relative path and export signature. See [`SplitBundleOptions`].
 pub fn bundle_split(opts: &SplitBundleOptions<'_>) -> Result<SplitBundleOutput> {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| Error::Bundle(format!("tokio runtime: {e}")))?
-        .block_on(bundle_split_async(opts))
+    run_bundler(bundle_split_async(opts))
 }
 
 /// Decide whether `specifier` (raw, or an import-map-resolved URL path) is external.
@@ -368,6 +418,32 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
             .collect::<Vec<_>>()
     });
 
+    // Comment policy → rolldown's printer knobs. Normal comments never survive
+    // bundling; rolldown has no collect/link mode, so `Collect` degrades to inline
+    // legal comments (the documented bundling caveat).
+    let (comments, legal_comments) = match opts.comments {
+        crate::Comments::None => (
+            rolldown_common::CommentsOptions {
+                legal: false,
+                annotation: false,
+                jsdoc: false,
+            },
+            rolldown_common::LegalComments::None,
+        ),
+        crate::Comments::Strip | crate::Comments::Collect => (
+            rolldown_common::CommentsOptions {
+                legal: true,
+                annotation: false,
+                jsdoc: false,
+            },
+            rolldown_common::LegalComments::Inline,
+        ),
+        _ => (
+            rolldown_common::CommentsOptions::default(),
+            rolldown_common::LegalComments::Inline,
+        ),
+    };
+
     let mut bundler = rolldown::Bundler::new(rolldown::BundlerOptions {
         input: Some(input),
         cwd: Some(root.clone()),
@@ -381,6 +457,11 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
             ..Default::default()
         }),
         minify: Some(opts.minify.into()),
+        sourcemap: opts
+            .sourcemap
+            .then_some(rolldown_common::SourceMapType::File),
+        comments: Some(comments),
+        legal_comments: Some(legal_comments),
         ..Default::default()
     })
     .map_err(|e| Error::Bundle(format!("{e:?}")))?;
@@ -390,20 +471,36 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
         .await
         .map_err(|e| Error::Bundle(format!("{e:?}")))?;
 
-    // Report which source files got folded: chunk module ids are absolute
-    // filesystem paths for file modules; externals never join a chunk.
+    // Report which source files got folded (chunk module ids are absolute filesystem
+    // paths for file modules; externals never join a chunk) and everything written.
     let mut bundled_modules = Vec::new();
+    let mut emitted = Vec::new();
     for asset in &output.assets {
-        if let rolldown_common::Output::Chunk(chunk) = asset {
-            for id in &chunk.module_ids {
-                let path = PathBuf::from(id.to_string());
-                if path.is_absolute() && path.exists() {
-                    bundled_modules.push(path);
+        match asset {
+            rolldown_common::Output::Chunk(chunk) => {
+                emitted.push(PathBuf::from(chunk.filename.to_string()));
+                if let Some(map) = &chunk.map {
+                    let _ = map; // rolldown writes `<filename>.map` beside the chunk.
+                    emitted.push(PathBuf::from(format!("{}.map", chunk.filename)));
                 }
+                for id in &chunk.module_ids {
+                    let path = PathBuf::from(id.to_string());
+                    if path.is_absolute() && path.exists() {
+                        bundled_modules.push(path);
+                    }
+                }
+            }
+            rolldown_common::Output::Asset(asset) => {
+                emitted.push(PathBuf::from(asset.filename.to_string()));
             }
         }
     }
     bundled_modules.sort();
     bundled_modules.dedup();
-    Ok(SplitBundleOutput { bundled_modules })
+    emitted.sort();
+    emitted.dedup();
+    Ok(SplitBundleOutput {
+        bundled_modules,
+        emitted,
+    })
 }

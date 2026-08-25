@@ -127,6 +127,22 @@ impl Build {
         self
     }
 
+    /// Bundle the built tree per entry point (requires the `bundle` feature; default
+    /// off — the buildless dist is the contract). Entries keep their URLs with their
+    /// imports inlined, shared code lands in content-hashed `chunks/`, and
+    /// `importmap.json` + `web_modules/` drop out of the output.
+    pub fn bundle(mut self, on: bool) -> Self {
+        self.processors.bundle = on;
+        self
+    }
+
+    /// Add a bundle entry point, output-relative (without any, the entry is
+    /// `app.js`). Every module the page references by URL needs one. Repeatable.
+    pub fn bundle_entry(mut self, entry: impl Into<PathBuf>) -> Self {
+        self.processors.bundle_entries.push(entry.into());
+        self
+    }
+
     /// Write `<file>.gz` sidecars for servable assets (default off). Requires the
     /// `compress` feature.
     pub fn gzip(mut self, on: bool) -> Self {

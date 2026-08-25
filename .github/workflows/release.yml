@@ -190,7 +190,7 @@ jobs:
       # The full lean toolchain (only the heavy `bundle`/rolldown is excluded) in release mode,
       # reproducibly — `--locked` uses the committed Cargo.lock. Native build: host == target.
       - name: Build
-        run: cargo build --release --locked --bin web-modules --features full
+        run: cargo build --release --locked --bin web-modules --features "full bundle"
 
       - name: Package
         shell: bash

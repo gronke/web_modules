@@ -39,8 +39,14 @@ pub fn render_file(path: &Path, context: &Context) -> Result<String> {
 /// One constructor, so the build's `.tera` step, the `--template` fallback, and the
 /// dev server cannot diverge in what a template sees.
 pub(crate) fn importmap_context(importmap: &crate::importmap::Importmap) -> Context {
+    tag_context(&importmap.to_script_tag())
+}
+
+/// Like [`importmap_context`], with the `<script>` tag already rendered — the build's
+/// bundling path hands an empty one, since a bundled page needs no import map at all.
+pub(crate) fn tag_context(importmap_tag: &str) -> Context {
     let mut ctx = Context::new();
-    ctx.insert("importmap", &importmap.to_script_tag());
+    ctx.insert("importmap", importmap_tag);
     ctx
 }
 

@@ -119,6 +119,18 @@ pub struct Processors {
     /// by `build` and `dev`, like the rest of this struct; inert without the
     /// `typescript` feature. SCSS is not covered — grass emits no source maps.
     pub sourcemap: bool,
+    /// Bundle the built tree per entry point (requires the `bundle` feature; build
+    /// only — `dev` always serves buildless). Each entry keeps its exact URL with
+    /// its imports inlined, shared code lands in content-hashed `chunks/`, and
+    /// `importmap.json` + `web_modules/` drop out of the output. Minify, comments
+    /// and sourcemap apply through rolldown's own single pass. Default off — the
+    /// buildless dist is the contract.
+    pub bundle: bool,
+    /// Bundle entry points, output-relative (empty ⇒ `app.js`, the fallback HTML's
+    /// entry). Every module the page references by URL — a worker script, a second
+    /// page's module — needs its own entry, or its bare imports fail the build once
+    /// the import map is gone.
+    pub bundle_entries: Vec<PathBuf>,
 }
 
 impl Default for Processors {
@@ -133,6 +145,8 @@ impl Default for Processors {
             symlinks: crate::SymlinkMode::default(),
             skip_duplicates: false,
             sourcemap: false,
+            bundle: false,
+            bundle_entries: Vec::new(),
         }
     }
 }
@@ -452,9 +466,22 @@ fn seed_vendor_cache(previous: &Path, stage: &Path) -> Result<()> {
 /// current `out`, if any) only seeds the vendor cache. The caller promotes the stage
 /// on success and removes it on failure.
 fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<()> {
+    // Bundling folds the tree after emission and defers minify/comments to rolldown's
+    // own single pass — those stay off at emit so bundle inputs are pristine, and the
+    // vendored tree (consumed and deleted below) is never shaped, so the profile stays
+    // empty: a bundled build seeds only from a pristine vendor cache.
+    #[cfg(feature = "bundle")]
+    let bundling = opts.processors.bundle;
+    #[cfg(not(feature = "bundle"))]
+    let bundling = false;
+
     // Marks the output as replaceable by the next build; written first so even an
     // interrupted stage is recognizable.
-    let profile = vendor_profile(&opts.processors, &opts.output);
+    let profile = if bundling {
+        String::new()
+    } else {
+        vendor_profile(&opts.processors, &opts.output)
+    };
     let mut marker = concat!(env!("CARGO_PKG_VERSION"), "\n").to_string();
     if !profile.is_empty() {
         marker.push_str(&profile);
@@ -467,10 +494,14 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     // transformed, never copied raw), exactly as `dev` serves a tree with TS off.
     #[cfg(feature = "typescript")]
     let transpile = crate::typescript::TranspileOptions {
-        minify: opts.output.minify,
+        minify: opts.output.minify && !bundling,
         decorators: opts.processors.ts_decorators,
         source_map: opts.processors.sourcemap,
-        comments: opts.output.effective_comments(),
+        comments: if bundling {
+            crate::Comments::Keep
+        } else {
+            opts.output.effective_comments()
+        },
         ..Default::default()
     };
 
@@ -494,7 +525,11 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
             #[cfg(feature = "typescript")]
             transpile,
             #[cfg(feature = "typescript")]
-            rewrite_js: opts.output.js_rewrite(opts.processors.sourcemap),
+            rewrite_js: if bundling {
+                None
+            } else {
+                opts.output.js_rewrite(opts.processors.sourcemap)
+            },
             #[cfg(feature = "scss")]
             scss_load_paths,
         },
@@ -668,6 +703,8 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
                 Some("the output marker".to_string())
             } else if out_rel.starts_with("web_modules") {
                 Some("the vendored modules directory (web_modules/)".to_string())
+            } else if bundling && out_rel.starts_with("chunks") {
+                Some("the bundled chunks directory (chunks/)".to_string())
             } else if map_emitting(out_rel) {
                 Some(format!(
                     "the generated source map of {}",
@@ -750,9 +787,14 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     }
 
     // npm content — `npm://` assets here, the vendored tree after pruning below —
-    // follows the vendor knob for output rewriting.
+    // follows the vendor knob for output rewriting; a bundling build leaves it
+    // pristine (rolldown consumes it, then it is deleted).
     #[cfg(feature = "typescript")]
-    let vendor_rewrite = opts.output.vendor_rewrite(opts.processors.sourcemap);
+    let vendor_rewrite = if bundling {
+        None
+    } else {
+        opts.output.vendor_rewrite(opts.processors.sourcemap)
+    };
 
     // Emit every `npm://` asset symlink: resolve it into node_modules and write the
     // file(s) at the link's own output path. These are package references rather than
@@ -845,8 +887,9 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     // Shipped `.map` sidecars follow the sourcemap toggle: without it they are swept,
     // so a lean build stays lean (in the gh-pages demo they outweigh the assets they
     // describe). The vendor profile above keeps a swept tree from seeding a build
-    // that wants the maps back.
-    if !opts.processors.sourcemap {
+    // that wants the maps back. A bundling build skips the sweep — the whole tree is
+    // consumed and deleted below.
+    if !opts.processors.sourcemap && !bundling {
         remove_vendor_maps(&stage.join("web_modules"))?;
     }
 
@@ -866,12 +909,20 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     // `index.html.tera` when tera runs) — in effect a synthetic claim at the lowest
     // precedence, keyed off the preflight rather than probing the stage.
     if !report.claims_target("index.html") {
+        // A bundled page needs no import map — every bare import is inlined — so the
+        // synthesized fallback drops the script tag entirely, in the inline HTML and
+        // the `--template` alike.
+        let map_tag = if bundling {
+            String::new()
+        } else {
+            importmap.to_script_tag()
+        };
         let html = match opts.template {
             Some(template) => {
                 rerun_if_changed(template);
-                render_template(template, &importmap)?
+                render_template(template, &map_tag)?
             }
-            None => opts.html.replace("{importmap}", &importmap.to_script_tag()),
+            None => opts.html.replace("{importmap}", &map_tag),
         };
         std::fs::write(stage.join("index.html"), html)?;
     }
@@ -894,6 +945,15 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
              specs / import map:\n{details}",
             unresolved.len()
         )));
+    }
+
+    // Bundling folds the validated tree in place: rolldown's single pass applies
+    // minify/comments/sourcemap to what it emits, the import map and the vendored
+    // tree leave the output, and the non-bundled survivors get the rewrite that
+    // emission deferred. Gzip below then compresses the final bytes.
+    #[cfg(feature = "bundle")]
+    if bundling {
+        bundle_stage(stage, opts, &importmap, &graph)?;
     }
 
     #[cfg(feature = "compress")]
@@ -932,6 +992,131 @@ fn emit_winner(
         steps[winner.step].emit(&steps::EmitCx { importmap }, &src, &winner.rel, &dest)?;
     if let Some(imports) = emitted.imports {
         graph.insert(winner.out_rel.clone(), imports);
+    }
+    Ok(())
+}
+
+/// Fold the validated stage per entry point: rolldown bundles in place — its single
+/// pass applies minify, the comment policy and source maps to everything it emits —
+/// then `web_modules/`, `importmap.json` and every inlined module leave the tree,
+/// and the non-bundled survivors get the output rewrite emission deferred.
+#[cfg(feature = "bundle")]
+fn bundle_stage(
+    stage: &Path,
+    opts: &BuildOptions<'_>,
+    importmap: &crate::importmap::Importmap,
+    graph: &crate::module_graph::ModuleGraph,
+) -> Result<()> {
+    let default_entry = [PathBuf::from("app.js")];
+    let entries: &[PathBuf] = if opts.processors.bundle_entries.is_empty() {
+        &default_entry
+    } else {
+        &opts.processors.bundle_entries
+    };
+    for entry in entries {
+        if !stage.join(entry).is_file() {
+            return Err(Error::Build(format!(
+                "web-modules: bundle entry {} does not exist in the output - name an \
+                 emitted module with --bundle-entry (without one, the entry is app.js)",
+                entry.display()
+            )));
+        }
+    }
+
+    // The bundler's alias resolver expects URL = `/` + stage-relative path; a subpath
+    // mount (`/repo/web_modules`, GitHub project pages) or a relative one is
+    // normalized here so resolution still lands in the staged tree.
+    let mut normalized = crate::importmap::Importmap::new();
+    for (spec, url) in importmap.iter() {
+        let value = url
+            .strip_prefix(opts.mount)
+            .map(|rest| format!("/web_modules{rest}"))
+            .unwrap_or_else(|| url.to_string());
+        normalized.insert(spec, &value);
+    }
+
+    let out = super::bundle::bundle_split(&super::bundle::SplitBundleOptions {
+        entries,
+        root: stage,
+        out_dir: stage,
+        importmap: Some(&normalized),
+        external: &[],
+        chunk_filenames: "chunks/[name]-[hash].js",
+        minify: opts.output.minify,
+        sourcemap: opts.processors.sourcemap,
+        comments: opts.output.effective_comments(),
+    })?;
+
+    // Everything the bundle inlined leaves the tree (the entries were rewritten in
+    // place as self-contained facades), along with the import map and the vendored
+    // packages — the browser no longer consults either. Emit-time `.map` sidecars of
+    // deleted modules go with them; rolldown wrote fresh maps for what it emitted.
+    let stage_real = stage.canonicalize()?;
+    let entry_files: std::collections::BTreeSet<PathBuf> = entries
+        .iter()
+        .filter_map(|entry| stage_real.join(entry).canonicalize().ok())
+        .collect();
+    remove_dir_all_if_present(&stage.join("web_modules"))?;
+    let _ = std::fs::remove_file(stage.join("importmap.json"));
+    for module in &out.bundled_modules {
+        if entry_files.contains(module) || !module.starts_with(&stage_real) {
+            continue;
+        }
+        let _ = std::fs::remove_file(module);
+        for suffix in [".map", ".LEGAL.txt"] {
+            let mut sidecar = module.as_os_str().to_owned();
+            sidecar.push(suffix);
+            let _ = std::fs::remove_file(PathBuf::from(sidecar));
+        }
+    }
+    remove_empty_dirs(stage)?;
+
+    // Orphan guard: with the import map gone, a surviving module whose bare imports
+    // the map used to resolve is broken in the shipped tree — a worker script or a
+    // second page's module needs its own entry, so its imports inline too.
+    let emitted: std::collections::BTreeSet<PathBuf> = out.emitted.iter().cloned().collect();
+    let unresolved = graph.unresolved(&crate::importmap::Importmap::new());
+    let orphaned: Vec<String> = unresolved
+        .iter()
+        .filter(|(file, _)| {
+            let rel = Path::new(file.as_str());
+            !emitted.contains(rel) && stage.join(rel).exists()
+        })
+        .map(|(file, spec)| format!("  {file}: import \"{spec}\""))
+        .collect();
+    if !orphaned.is_empty() {
+        return Err(Error::Build(format!(
+            "web-modules: --bundle removes the import map, but {} surviving module(s) \
+             still import bare specifiers - add each as a --bundle-entry so its imports \
+             inline too:\n{}",
+            orphaned.len(),
+            orphaned.join("\n")
+        )));
+    }
+
+    // Non-bundled survivors get the output rewrite that emission deferred while
+    // bundling (rolldown handled its own outputs, exempted via `emitted`). Their
+    // maps reference the staged compiled modules — the same contract as the bundle's
+    // own maps.
+    #[cfg(feature = "typescript")]
+    if let Some(rewrite) = opts.output.js_rewrite(opts.processors.sourcemap) {
+        super::optimize::rewrite_survivors(stage, &emitted, rewrite)?;
+    }
+    Ok(())
+}
+
+/// Drop the directories the bundle surgery emptied — depth-first, so nested empties
+/// collapse; a non-empty directory simply refuses removal.
+#[cfg(feature = "bundle")]
+fn remove_empty_dirs(root: &Path) -> Result<()> {
+    for entry in walkdir::WalkDir::new(root)
+        .contents_first(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_dir() && entry.path() != root {
+            let _ = std::fs::remove_dir(entry.path());
+        }
     }
     Ok(())
 }
@@ -990,17 +1175,17 @@ pub fn vendor_transform_runtime(out: &Path, mount: &str) -> Result<crate::import
     )
 }
 
-/// Render `index.html` from a Tera `template`, exposing the import-map script tag
-/// as an `importmap` variable.
+/// Render `index.html` from a Tera `template`, exposing the (already rendered)
+/// import-map script tag as the `importmap` variable — empty when bundling.
 #[cfg(feature = "tera")]
-fn render_template(template: &Path, importmap: &crate::importmap::Importmap) -> Result<String> {
-    let ctx = crate::templates::importmap_context(importmap);
+fn render_template(template: &Path, importmap_tag: &str) -> Result<String> {
+    let ctx = crate::templates::tag_context(importmap_tag);
     crate::templates::render_file(template, &ctx)
 }
 
 /// Without the `tera` feature a `template` can't be rendered; surface a clear error.
 #[cfg(not(feature = "tera"))]
-fn render_template(_template: &Path, _importmap: &crate::importmap::Importmap) -> Result<String> {
+fn render_template(_template: &Path, _importmap_tag: &str) -> Result<String> {
     Err(Error::Build(
         "rendering a `template` requires the `tera` feature".into(),
     ))
@@ -1166,7 +1351,7 @@ mod tests {
         std::fs::write(&tpl, "<head>{{ importmap | safe }}</head>").unwrap();
         let mut map = Importmap::new();
         map.insert("lit", "/web_modules/lit/index.js");
-        let html = render_template(&tpl, &map).unwrap();
+        let html = render_template(&tpl, &map.to_script_tag()).unwrap();
         assert!(html.contains("<script type=\"importmap\">"));
         assert!(html.contains("/web_modules/lit/index.js"));
     }

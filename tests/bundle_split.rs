@@ -77,6 +77,8 @@ fn run_split(root: &Path, out: &Path) -> BTreeMap<String, String> {
         external: &["lit".into(), "web_modules/".into()],
         chunk_filenames: "chunks/[name]-[hash].js",
         minify: false,
+        sourcemap: false,
+        comments: web_modules::Comments::Keep,
     })
     .unwrap();
 
@@ -218,6 +220,8 @@ fn dynamic_imports_split_and_unanalyzable_ones_survive() {
         external: &["lit".into(), "web_modules/".into()],
         chunk_filenames: "chunks/[name]-[hash].js",
         minify: false,
+        sourcemap: false,
+        comments: web_modules::Comments::Keep,
     })
     .unwrap();
 
@@ -280,6 +284,8 @@ export const page = (globalThis.__m ?? 'MARKER_PAGE_IMPL').length;
         external: &["lit".into(), "web_modules/".into(), "/config.js".into()],
         chunk_filenames: "chunks/[name]-[hash].js",
         minify: false,
+        sourcemap: false,
+        comments: web_modules::Comments::Keep,
     })
     .unwrap();
 
@@ -346,6 +352,8 @@ fn split_refuses_a_relative_import_escaping_root() {
         external: &[],
         chunk_filenames: "chunks/[name]-[hash].js",
         minify: false,
+        sourcemap: false,
+        comments: web_modules::Comments::Keep,
     });
     let err = match result {
         Ok(_) => panic!("an escaping import must fail the build"),

@@ -163,6 +163,9 @@ struct CompilerConfig {
     comments: Option<web_modules::CommentsArg>,
     #[command(flatten)]
     sourcemap: web_modules::typescript::SourcemapArgs,
+    #[cfg(feature = "bundle")]
+    #[command(flatten)]
+    bundle: web_modules::bundle::BundleArgs,
     #[cfg(feature = "compress")]
     #[command(flatten)]
     gzip: web_modules::compress::GzipArgs,
@@ -201,6 +204,8 @@ struct ResolvedCompiler {
     minify_web_modules: bool,
     comments: Option<web_modules::Comments>,
     sourcemap: bool,
+    bundle: bool,
+    bundle_entries: Vec<PathBuf>,
     gzip: bool,
     ts_decorators: web_modules::typescript::Decorators,
     extra_scss_load_paths: Vec<PathBuf>,
@@ -230,6 +235,17 @@ impl CompilerConfig {
             // Explicit flag > block > unset (`build` then lets --minify imply strip).
             comments: self.comments.map(Into::into).or(cfg.comments),
             sourcemap: self.sourcemap.enabled_with(cfg.sourcemap, false, nd),
+            #[cfg(feature = "bundle")]
+            bundle: self.bundle.enabled_with(cfg.bundle, false, nd),
+            #[cfg(not(feature = "bundle"))]
+            bundle: false,
+            #[cfg(feature = "bundle")]
+            bundle_entries: pick_vec(
+                self.bundle.config.entries.clone(),
+                cfg.bundle_entries.clone(),
+            ),
+            #[cfg(not(feature = "bundle"))]
+            bundle_entries: Vec::new(),
             #[cfg(feature = "compress")]
             gzip: self.gzip.enabled_with(cfg.gzip, false, nd),
             #[cfg(not(feature = "compress"))]
@@ -271,6 +287,8 @@ impl ResolvedCompiler {
         p.symlinks = self.symlinks;
         p.skip_duplicates = self.skip_duplicates;
         p.sourcemap = self.sourcemap;
+        p.bundle = self.bundle;
+        p.bundle_entries = self.bundle_entries;
         p
     }
 }
@@ -369,6 +387,8 @@ struct PkgConfig {
     minify_web_modules: Option<bool>,
     comments: Option<web_modules::Comments>,
     sourcemap: Option<bool>,
+    bundle: Option<bool>,
+    bundle_entries: Vec<PathBuf>,
     gzip: Option<bool>,
     typescript: Option<bool>,
     scss: Option<bool>,
@@ -453,6 +473,9 @@ fn contain_block_paths(dir: &Path, cfg: &PkgConfig) -> Res<()> {
     for path in &cfg.scss_load_paths {
         check("web_modules.scss.loadPaths", path)?;
     }
+    for path in &cfg.bundle_entries {
+        check("web_modules.bundle.entries", path)?;
+    }
     if let Some(template) = &cfg.template {
         check("web_modules.template", template)?;
     }
@@ -503,6 +526,12 @@ fn parse_block(block: &Value) -> Res<PkgConfig> {
                 });
             }
             "sourcemap" => cfg.sourcemap = Some(as_bool(val, "web_modules.sourcemap")?),
+            "bundle" => {
+                cfg.bundle = Some(processor_enabled(val, "web_modules.bundle")?);
+                if let Some(entries) = val.as_object().and_then(|o| o.get("entries")) {
+                    cfg.bundle_entries = path_array(entries, "web_modules.bundle.entries")?;
+                }
+            }
             "gzip" => cfg.gzip = Some(as_bool(val, "web_modules.gzip")?),
             "typescript" => {
                 cfg.typescript = Some(processor_enabled(val, "web_modules.typescript")?)
@@ -635,6 +664,7 @@ async fn main() -> Res {
 
             // Internal code builds via the explicit `BuildOptions` struct; the `Build` builder is
             // the developer-facing wrapper over this same call.
+            let bundled = processors.bundle;
             web_modules::build::build(&web_modules::build::BuildOptions {
                 specs: &specs,
                 roots: &roots,
@@ -646,10 +676,11 @@ async fn main() -> Res {
                 output,
             })?;
             println!(
-                "built {} root(s) → {} ({} package spec(s), mount {mount}{}{}{}{})",
+                "built {} root(s) → {} ({} package spec(s), mount {mount}{}{}{}{}{})",
                 roots.len(),
                 out.display(),
                 specs.len(),
+                if bundled { ", bundled" } else { "" },
                 if minify { ", minified" } else { "" },
                 match output.effective_comments() {
                     web_modules::Comments::Keep => "",
@@ -986,6 +1017,65 @@ mod tests {
         match Cli::try_parse_from(argv).unwrap().command {
             Command::Build { compiler, .. } => {
                 assert_eq!(compiler.resolve_with(&block).comments, Some(Comments::Keep));
+            }
+            _ => panic!("expected Build"),
+        }
+    }
+
+    #[cfg(feature = "bundle")]
+    #[test]
+    fn bundle_flag_entries_and_block_resolve() {
+        assert!(!resolve_build(&[]).bundle, "off by default");
+        assert!(!resolve_build(&["--bundle", "--no-bundle"]).bundle);
+        let r = resolve_build(&[
+            "--bundle",
+            "--bundle-entry",
+            "app.js",
+            "--bundle-entry",
+            "w.js",
+        ]);
+        assert!(r.bundle);
+        assert_eq!(
+            r.bundle_entries,
+            [PathBuf::from("app.js"), PathBuf::from("w.js")]
+        );
+        let p = r.into_processors();
+        assert!(p.bundle);
+        assert_eq!(p.bundle_entries.len(), 2);
+
+        // Block: bool-or-object, entries contained to the project.
+        let dir = write_pkg(r#"{"web_modules":{"bundle":{"entries":["app.js","worker.js"]}}}"#);
+        let (cfg, _) = load_pkg_config_at(dir.path()).unwrap();
+        assert_eq!(cfg.bundle, Some(true), "object form enables");
+        assert_eq!(
+            cfg.bundle_entries,
+            [PathBuf::from("app.js"), PathBuf::from("worker.js")]
+        );
+        let bad = write_pkg(r#"{"web_modules":{"bundle":{"entries":["../x.js"]}}}"#);
+        assert!(
+            load_pkg_config_at(bad.path()).is_err(),
+            "entries must stay inside the project"
+        );
+
+        // Flag entries beat block entries; the block still enables the toggle.
+        let block = PkgConfig {
+            bundle: Some(true),
+            bundle_entries: vec![PathBuf::from("block.js")],
+            ..PkgConfig::default()
+        };
+        let argv = [
+            "web-modules",
+            "build",
+            "--out",
+            "o",
+            "--bundle-entry",
+            "cli.js",
+        ];
+        match Cli::try_parse_from(argv).unwrap().command {
+            Command::Build { compiler, .. } => {
+                let r = compiler.resolve_with(&block);
+                assert!(r.bundle, "block enables");
+                assert_eq!(r.bundle_entries, [PathBuf::from("cli.js")]);
             }
             _ => panic!("expected Build"),
         }

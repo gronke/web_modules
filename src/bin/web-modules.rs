@@ -156,6 +156,8 @@ struct CompilerConfig {
     tera: web_modules::templates::TeraArgs,
     #[command(flatten)]
     minify: web_modules::minify::MinifyArgs,
+    #[command(flatten)]
+    sourcemap: web_modules::typescript::SourcemapArgs,
     #[cfg(feature = "compress")]
     #[command(flatten)]
     gzip: web_modules::compress::GzipArgs,
@@ -191,6 +193,7 @@ struct ResolvedCompiler {
     scss: bool,
     tera: bool,
     minify: bool,
+    sourcemap: bool,
     gzip: bool,
     ts_decorators: web_modules::typescript::Decorators,
     extra_scss_load_paths: Vec<PathBuf>,
@@ -201,7 +204,7 @@ struct ResolvedCompiler {
 impl CompilerConfig {
     /// Resolve each processor toggle + config, layering a `package.json` `web_modules` block under
     /// the CLI flags: `--no-<name>` > `--<name>` > block > (`default_on && !--no-default-features`).
-    /// typescript/scss/tera default on; minify/gzip default off.
+    /// typescript/scss/tera default on; minify/sourcemap/gzip default off.
     fn resolve_with(&self, cfg: &PkgConfig) -> ResolvedCompiler {
         let nd = self.no_default_features;
         ResolvedCompiler {
@@ -209,6 +212,7 @@ impl CompilerConfig {
             scss: self.scss.enabled_with(cfg.scss, true, nd),
             tera: self.tera.enabled_with(cfg.tera, true, nd),
             minify: self.minify.enabled_with(cfg.minify, false, nd),
+            sourcemap: self.sourcemap.enabled_with(cfg.sourcemap, false, nd),
             #[cfg(feature = "compress")]
             gzip: self.gzip.enabled_with(cfg.gzip, false, nd),
             #[cfg(not(feature = "compress"))]
@@ -238,7 +242,8 @@ impl CompilerConfig {
 impl ResolvedCompiler {
     /// Map to the build pipeline's [`Processors`](web_modules::build::Processors) — also the dev
     /// server's `DevConfig` (a type alias for the same struct). `#[non_exhaustive]`, so built from
-    /// `default()` and assigned (minify/gzip live in `Output`, not here).
+    /// `default()` and assigned (minify/gzip live in `Output`, not here; sourcemap is a shared
+    /// compile-emission policy, so it rides along and reaches `dev` too).
     fn into_processors(self) -> web_modules::build::Processors {
         let mut p = web_modules::build::Processors::default();
         p.typescript = self.typescript;
@@ -248,6 +253,7 @@ impl ResolvedCompiler {
         p.extra_scss_load_paths = self.extra_scss_load_paths;
         p.symlinks = self.symlinks;
         p.skip_duplicates = self.skip_duplicates;
+        p.sourcemap = self.sourcemap;
         p
     }
 }
@@ -343,6 +349,7 @@ struct PkgConfig {
     template: Option<PathBuf>,
     packages: Vec<String>,
     minify: Option<bool>,
+    sourcemap: Option<bool>,
     gzip: Option<bool>,
     typescript: Option<bool>,
     scss: Option<bool>,
@@ -456,6 +463,7 @@ fn parse_block(block: &Value) -> Res<PkgConfig> {
             }
             "packages" => cfg.packages = string_array(val, "web_modules.packages")?,
             "minify" => cfg.minify = Some(as_bool(val, "web_modules.minify")?),
+            "sourcemap" => cfg.sourcemap = Some(as_bool(val, "web_modules.sourcemap")?),
             "gzip" => cfg.gzip = Some(as_bool(val, "web_modules.gzip")?),
             "typescript" => {
                 cfg.typescript = Some(processor_enabled(val, "web_modules.typescript")?)
@@ -560,7 +568,7 @@ async fn main() -> Res {
             // Config from a `web_modules` block in ./package.json, layered under the CLI/env args.
             let (cfg, pkg_path) = load_pkg_config()?;
             let resolved = compiler.resolve_with(&cfg);
-            let (minify, gzip) = (resolved.minify, resolved.gzip);
+            let (minify, sourcemap, gzip) = (resolved.minify, resolved.sourcemap, resolved.gzip);
             let output = web_modules::build::Output::new(minify, gzip);
             let mut processors = resolved.into_processors();
             processors.reject = compiler.reject()?;
@@ -595,11 +603,12 @@ async fn main() -> Res {
                 output,
             })?;
             println!(
-                "built {} root(s) → {} ({} package spec(s), mount {mount}{}{})",
+                "built {} root(s) → {} ({} package spec(s), mount {mount}{}{}{})",
                 roots.len(),
                 out.display(),
                 specs.len(),
                 if minify { ", minified" } else { "" },
+                if sourcemap { ", sourcemaps" } else { "" },
                 if gzip { ", gzipped" } else { "" },
             );
         }
@@ -855,6 +864,46 @@ mod tests {
     }
 
     #[test]
+    fn sourcemap_reaches_the_processors_from_build_and_dev() {
+        assert!(!resolve_build(&[]).sourcemap, "off by default");
+        assert!(!resolve_build(&["--sourcemap", "--no-sourcemap"]).sourcemap);
+        let resolved = resolve_build(&["--sourcemap"]);
+        assert!(resolved.sourcemap);
+        assert!(
+            resolved.into_processors().sourcemap,
+            "the flag lands on the Processors both subcommands consume"
+        );
+
+        let cli = Cli::try_parse_from(["web-modules", "dev", "web", "--sourcemap"]).unwrap();
+        match cli.command {
+            Command::Dev { compiler, .. } => {
+                assert!(
+                    compiler
+                        .resolve_with(&PkgConfig::default())
+                        .into_processors()
+                        .sourcemap
+                );
+            }
+            _ => panic!("expected Dev"),
+        }
+
+        // The package.json block sits under the flags: it enables alone, `--no-sourcemap` beats it.
+        let block = PkgConfig {
+            sourcemap: Some(true),
+            ..PkgConfig::default()
+        };
+        let from_block = |extra: &[&str]| {
+            let argv: Vec<&str> = [&["web-modules", "build", "--out", "out"][..], extra].concat();
+            match Cli::try_parse_from(argv).unwrap().command {
+                Command::Build { compiler, .. } => compiler.resolve_with(&block).sourcemap,
+                _ => panic!("expected Build"),
+            }
+        };
+        assert!(from_block(&[]), "block enables");
+        assert!(!from_block(&["--no-sourcemap"]), "flag beats block");
+    }
+
+    #[test]
     fn symlinks_flag_reaches_the_processors_from_build_and_dev() {
         use web_modules::SymlinkMode;
         assert_eq!(
@@ -966,7 +1015,7 @@ mod tests {
             r#"{ "web_modules": {
                 "roots": ["web", "shared"], "out": "dist", "mount": "/m",
                 "html": "<x>", "template": "shell.html.tera", "packages": ["lit@^3"],
-                "minify": true, "gzip": false,
+                "minify": true, "sourcemap": true, "gzip": false,
                 "typescript": true,
                 "scss": { "loadPaths": ["styles"] },
                 "tera": false
@@ -981,6 +1030,7 @@ mod tests {
         assert_eq!(cfg.template, Some(PathBuf::from("shell.html.tera")));
         assert_eq!(cfg.packages, ["lit@^3"]);
         assert_eq!(cfg.minify, Some(true));
+        assert_eq!(cfg.sourcemap, Some(true));
         assert_eq!(cfg.gzip, Some(false));
         assert_eq!(cfg.typescript, Some(true)); // bool form enables
         assert_eq!(cfg.scss, Some(true));

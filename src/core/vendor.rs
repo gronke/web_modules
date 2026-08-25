@@ -674,10 +674,16 @@ pub fn keep_browser_assets(rel: &str) -> Option<String> {
     if is_legal_notice(rel) {
         return Some(rel.to_string());
     }
+    // A shipped source-map sidecar travels with the asset it describes — only for the
+    // asset kinds kept above, so a `.d.ts.map` never outlives its dropped `.d.ts`.
+    // (A kept map's `sources` may still name dropped `src/` paths; browsers tolerate that.)
     (rel.ends_with(".js")
         || rel.ends_with(".mjs")
         || rel.ends_with(".css")
-        || rel.ends_with(".scss"))
+        || rel.ends_with(".scss")
+        || rel.ends_with(".js.map")
+        || rel.ends_with(".mjs.map")
+        || rel.ends_with(".css.map"))
     .then(|| rel.to_string())
 }
 
@@ -875,11 +881,12 @@ fn compile_source_tree(pkg_dir: &Path, package: &str) -> Result<()> {
             Some(_) => {
                 let source =
                     fs::read_to_string(&entry).map_err(|e| Error::Vendor(e.to_string()))?;
-                let output =
-                    crate::processors::typescript::compile_str_capturing(&source, &entry, &options)
-                        .map_err(|e| {
-                            Error::Vendor(format!("{package}: compiling {}: {e}", rel.display()))
-                        })?;
+                let output = crate::processors::typescript::compile_str_capturing(
+                    &source, &entry, &options, None,
+                )
+                .map_err(|e| {
+                    Error::Vendor(format!("{package}: compiling {}: {e}", rel.display()))
+                })?;
                 // Read off the emitted AST, so what is followed is what the output imports.
                 for import in &output.imports {
                     // The source it names is compiled and then removed, so an emitted
@@ -1803,6 +1810,15 @@ mod tests {
             keep_browser_assets("scss/bootstrap.scss").as_deref(),
             Some("scss/bootstrap.scss")
         );
+        // A shipped source-map sidecar travels with the asset it describes; one under
+        // a dropped source dir goes with that dir, and a declaration map goes with
+        // the `.d.ts` the filter never kept.
+        assert_eq!(
+            keep_browser_assets("dist/foo.js.map").as_deref(),
+            Some("dist/foo.js.map")
+        );
+        assert!(keep_browser_assets("src/foo.js.map").is_none());
+        assert!(keep_browser_assets("decorators.d.ts.map").is_none());
         assert!(keep_browser_assets("src/index.ts").is_none());
         assert!(keep_browser_assets("development/dev.js").is_none());
         assert!(keep_browser_assets("README.md").is_none());

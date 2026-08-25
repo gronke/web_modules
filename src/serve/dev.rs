@@ -531,8 +531,11 @@ fn compile_cached(state: &DevState, src: &Path, kind: Kind) -> Result<Vec<u8>, S
     let out = match kind {
         Kind::Ts => {
             let source = std::fs::read_to_string(src).map_err(|e| e.to_string())?;
+            // With `sourcemap` on, the string API appends the map inline as a `data:`
+            // URL — one response, no extra route, and the mtime cache stays coherent.
             let options = crate::typescript::TranspileOptions {
                 decorators: state.config.ts_decorators,
+                source_map: state.config.sourcemap,
                 ..Default::default()
             };
             crate::typescript::compile_str_with(&source, src, &options)
@@ -704,6 +707,35 @@ mod tests {
         let state = state(vec![Mount::root(root)]);
         let (bytes, _) = resolve(&state, "app.js").unwrap().unwrap().bytes();
         assert_eq!(bytes, b"literal();", "the literal file wins");
+    }
+
+    #[test]
+    fn dev_inlines_source_map_when_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("app.ts"), "export const compiled: number = 1;").unwrap();
+
+        let config = DevConfig {
+            sourcemap: true,
+            ..DevConfig::default()
+        };
+        let mapped = state_with(vec![Mount::root(root.clone())], config);
+        let (bytes, _) = resolve(&mapped, "app.js").unwrap().unwrap().bytes();
+        let body = String::from_utf8(bytes).unwrap();
+        assert!(
+            body.contains("//# sourceMappingURL=data:application/json;charset=utf-8;base64,"),
+            "one response carries code and map; got:\n{body}"
+        );
+
+        let plain = state(vec![Mount::root(root)]);
+        let (bytes, _) = resolve(&plain, "app.js").unwrap().unwrap().bytes();
+        assert!(
+            !String::from_utf8(bytes)
+                .unwrap()
+                .contains("sourceMappingURL"),
+            "off by default"
+        );
     }
 
     #[test]

@@ -57,6 +57,15 @@ macro_rules! source_builder_methods {
                 self
             }
 
+            /// Emit source maps for compiled JavaScript (default off). `build` writes
+            /// a `<file>.map` sidecar beside each compiled file; `dev` serves the map
+            /// inline as a `data:` URL. Sources ship inside the map, so it works
+            /// although `.ts` files are excluded from output and serving.
+            pub fn sourcemap(mut self, on: bool) -> Self {
+                self.processors.sourcemap = on;
+                self
+            }
+
             /// Decorator lowering for the TypeScript transform (default
             /// [`Decorators::Lit`](crate::Decorators::Lit)).
             pub fn decorators(mut self, decorators: crate::Decorators) -> Self {

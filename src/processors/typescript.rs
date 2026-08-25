@@ -12,7 +12,7 @@
 //! [oxc]: https://oxc.rs
 
 use std::fs::{create_dir_all, read_to_string, write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use oxc_allocator::Allocator;
 use oxc_codegen::{Codegen, CodegenOptions};
@@ -53,6 +53,14 @@ pub struct TranspileOptions {
     /// For minifying JS the compiler didn't produce (vendored), use
     /// [`crate::minify::minify_str`] on the file's content.
     pub minify: bool,
+    /// Emit a source map (an *output* option like `minify`), from the same single
+    /// compile pass. The sources ship inside the map (`sourcesContent`), so it works
+    /// although the `.ts` files themselves are not published. Where the map lands
+    /// follows the API shape: the string API ([`compile_str_with`]) appends it inline
+    /// as a `data:` URL comment, while everything that writes files — the build
+    /// pipeline, [`compile_directory_with`] — writes a `<file>.map` sidecar and links
+    /// it by file name. Defaults to `false`.
+    pub source_map: bool,
 }
 
 impl TranspileOptions {
@@ -68,6 +76,7 @@ impl TranspileOptions {
             class_fields: ClassFields::Define,
             rewrite_import_extensions: false,
             minify: false,
+            source_map: false,
         }
     }
 }
@@ -114,6 +123,19 @@ crate::cli_config::feature_args!(
     TypescriptConfig
 );
 
+// Sourcemaps have no flags of their own beyond the on/off toggle (off by default, so
+// embedded dists stay lean): `build` writes `<file>.map` sidecars, `dev` serves maps
+// inline as `data:` URLs. (`--sourcemap` / `--no-sourcemap`.)
+#[cfg(feature = "cli")]
+crate::cli_config::feature_args!(
+    SourcemapArgs,
+    sourcemap,
+    "sourcemap",
+    no_sourcemap,
+    "no-sourcemap",
+    crate::cli_config::NoConfig
+);
+
 /// Build oxc transform options from our [`TranspileOptions`]. Decorator lowering and
 /// class-field semantics are set independently: the default pairing — legacy decorators
 /// with fields *assigned* rather than *defined* — is the Lit preset.
@@ -140,9 +162,17 @@ pub fn compile_str(source: &str, path: &Path) -> Result<String> {
     compile_str_with(source, path, &TranspileOptions::default())
 }
 
-/// Like [`compile_str`], but with explicit [`TranspileOptions`].
+/// Like [`compile_str`], but with explicit [`TranspileOptions`]. With
+/// [`TranspileOptions::source_map`] set, the map is appended inline as a `data:` URL
+/// comment — a returned string has no place for a sidecar; the build pipeline and
+/// [`compile_directory_with`] write a `<file>.map` sidecar instead.
 pub fn compile_str_with(source: &str, path: &Path, options: &TranspileOptions) -> Result<String> {
-    Ok(compile_str_capturing(source, path, options)?.code)
+    let out = compile_str_capturing(source, path, options, None)?;
+    let mut code = out.code;
+    if let Some(map) = out.map {
+        append_source_map_comment(&mut code, &map.data_url);
+    }
+    Ok(code)
 }
 
 /// The emitted JS plus the module specifiers it references.
@@ -157,14 +187,75 @@ pub(crate) struct TranspileOutput {
     /// elimination removed is not reported). Captured here, at transform time, so the
     /// build never re-parses or text-scans the output to rediscover them.
     pub imports: Vec<ModuleImport>,
+    /// The source map, when [`TranspileOptions::source_map`] asked for one.
+    pub map: Option<SourceMapArtifact>,
+}
+
+/// A serialized source map, in both shapes an emitter needs: `json` for a `<file>.map`
+/// sidecar, `data_url` for inlining (the dev server, the string API). Both are captured
+/// from the one codegen pass, because the map object does not outlive the compile's
+/// allocator.
+#[derive(Debug, Clone)]
+pub(crate) struct SourceMapArtifact {
+    pub json: String,
+    pub data_url: String,
+}
+
+/// The one place [`CodegenOptions`] derive from output policy, so every JS-emitting
+/// pass in the crate prints under the same rules — whitespace stripping and the map's
+/// source label today; whatever output policy comes next joins here.
+pub(crate) fn codegen_options(minify: bool, source_map_path: Option<PathBuf>) -> CodegenOptions {
+    CodegenOptions {
+        minify,
+        source_map_path,
+        ..CodegenOptions::default()
+    }
+}
+
+/// Append a `sourceMappingURL` footer to emitted JS, on its own final line.
+pub(crate) fn append_source_map_comment(code: &mut String, url: &str) {
+    if !code.ends_with('\n') {
+        code.push('\n');
+    }
+    code.push_str("//# sourceMappingURL=");
+    code.push_str(url);
+    code.push('\n');
+}
+
+/// Write emitted JS to `dest`; with a map, link it by bare file name (`app.js` →
+/// `app.js.map`, a same-directory relative URL that survives any mount or subpath)
+/// and write the sidecar beside it.
+pub(crate) fn write_js_output(
+    dest: &Path,
+    mut code: String,
+    map_json: Option<String>,
+) -> Result<()> {
+    let Some(map_json) = map_json else {
+        write(dest, code)?;
+        return Ok(());
+    };
+    let name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| Error::TypeScript(format!("{}: no usable file name", dest.display())))?;
+    append_source_map_comment(&mut code, &format!("{name}.map"));
+    write(dest, code)?;
+    let mut map_path = dest.as_os_str().to_owned();
+    map_path.push(".map");
+    write(PathBuf::from(map_path), map_json)?;
+    Ok(())
 }
 
 /// Like [`compile_str_with`], but also returns the module specifiers the emitted code
-/// imports (see [`TranspileOutput`]).
+/// imports (see [`TranspileOutput`]) and, when asked, the raw source map. `map_label`
+/// names the map's source (pass the root-relative path); diagnostics keep using `path`,
+/// so error messages stay clickable while absolute build paths never leak into a
+/// published map. `None` falls back to `path`.
 pub(crate) fn compile_str_capturing(
     source: &str,
     path: &Path,
     options: &TranspileOptions,
+    map_label: Option<&Path>,
 ) -> Result<TranspileOutput> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_default();
@@ -203,34 +294,39 @@ pub(crate) fn compile_str_capturing(
     }
 
     // Minify as an output option. With `minify`, compress + mangle in the same pass
-    // (no re-parse); otherwise codegen still strips whitespace.
-    let code = if !options.minify {
-        Codegen::new().build(&program).code
+    // (no re-parse); otherwise codegen still strips whitespace. A requested source map
+    // is emitted from this same single pass, so it never needs composing with another.
+    let map_source = options
+        .source_map
+        .then(|| map_label.unwrap_or(path).to_path_buf());
+    let ret = if !options.minify {
+        Codegen::new()
+            .with_options(codegen_options(false, map_source))
+            .build(&program)
     } else {
         #[cfg(feature = "minify")]
         {
             let ret = oxc_minifier::Minifier::new(oxc_minifier::MinifierOptions::default())
                 .minify(&allocator, &mut program);
             Codegen::new()
-                .with_options(CodegenOptions {
-                    minify: true,
-                    ..CodegenOptions::default()
-                })
+                .with_options(codegen_options(true, map_source))
                 .with_scoping(ret.scoping)
                 .build(&program)
-                .code
         }
         #[cfg(not(feature = "minify"))]
         {
             Codegen::new()
-                .with_options(CodegenOptions {
-                    minify: true,
-                    ..CodegenOptions::default()
-                })
+                .with_options(codegen_options(true, map_source))
                 .build(&program)
-                .code
         }
     };
+    let code = ret.code;
+    // Both serializations are captured here: the map borrows the compile's allocator
+    // and cannot leave this function.
+    let map = ret.map.map(|map| SourceMapArtifact {
+        json: map.to_json_string(),
+        data_url: map.to_data_url(),
+    });
 
     // Capture the imports — static `import` / `export … from`, the helpers the transform
     // injected, and dynamic `import()` — from the final AST, after any minification has
@@ -241,7 +337,7 @@ pub(crate) fn compile_str_capturing(
     crate::module_graph::static_from_program(&program, &mut imports);
     crate::module_graph::dynamic_from_program(&program, &mut imports);
 
-    Ok(TranspileOutput { code, imports })
+    Ok(TranspileOutput { code, imports, map })
 }
 
 /// Compile every `.ts`/`.tsx`/`.mts` under `src_dir` (skipping `.d.ts`
@@ -277,8 +373,8 @@ pub fn compile_directory_with(
             create_dir_all(parent)?;
         }
         let source = read_to_string(path)?;
-        let js = compile_str_with(&source, path, options)?;
-        write(&out, js)?;
+        let compiled = compile_str_capturing(&source, path, options, Some(rel))?;
+        write_js_output(&out, compiled.code, compiled.map.map(|m| m.json))?;
         count += 1;
     }
     Ok(count)
@@ -339,12 +435,12 @@ impl crate::build::steps::Step for TypeScriptStep {
         &self,
         _cx: &crate::build::steps::EmitCx<'_>,
         src: &Path,
-        _rel: &Path,
+        rel: &Path,
         dest: &Path,
     ) -> Result<crate::build::steps::Emitted> {
         let source = read_to_string(src)?;
-        let compiled = compile_str_capturing(&source, src, &self.options)?;
-        write(dest, compiled.code)?;
+        let compiled = compile_str_capturing(&source, src, &self.options, Some(rel))?;
+        write_js_output(dest, compiled.code, compiled.map.map(|m| m.json))?;
         Ok(crate::build::steps::Emitted {
             imports: Some(compiled.imports),
         })
@@ -481,6 +577,58 @@ mod tests {
 
     #[cfg(feature = "minify")]
     #[test]
+    fn source_map_is_inlined_through_the_string_api() {
+        let src = "export const x: number = 1;\n";
+        let opts = TranspileOptions {
+            source_map: true,
+            ..TranspileOptions::default()
+        };
+        let code = compile_str_with(src, Path::new("x.ts"), &opts).unwrap();
+        assert!(
+            code.contains("//# sourceMappingURL=data:application/json;charset=utf-8;base64,"),
+            "a returned string has no place for a sidecar, so the map inlines; got:\n{code}"
+        );
+        let plain = compile_str(src, Path::new("x.ts")).unwrap();
+        assert!(!plain.contains("sourceMappingURL"), "off by default");
+    }
+
+    #[test]
+    fn source_map_labels_sources_and_embeds_content() {
+        let src = "export const answer: number = 6 * 7;\n";
+        let opts = TranspileOptions {
+            source_map: true,
+            ..TranspileOptions::default()
+        };
+        // Diagnostics keep the (absolute) source path; the map takes the root-relative
+        // label, so machine paths never leak into a published map.
+        let out = compile_str_capturing(
+            src,
+            Path::new("/abs/build/app.ts"),
+            &opts,
+            Some(Path::new("app.ts")),
+        )
+        .unwrap();
+        let map = out.map.expect("map requested");
+        let json: serde_json::Value = serde_json::from_str(&map.json).unwrap();
+        assert_eq!(json["sources"], serde_json::json!(["app.ts"]));
+        assert!(
+            json["sourcesContent"][0]
+                .as_str()
+                .unwrap()
+                .contains("6 * 7"),
+            "the TS source ships inside the map; got {json}"
+        );
+        assert!(!json["mappings"].as_str().unwrap().is_empty());
+        assert!(map
+            .data_url
+            .starts_with("data:application/json;charset=utf-8;base64,"));
+
+        let off =
+            compile_str_capturing(src, Path::new("app.ts"), &Default::default(), None).unwrap();
+        assert!(off.map.is_none(), "no map unless asked");
+    }
+
+    #[test]
     fn captured_imports_match_the_minified_output() {
         // Dead-code elimination removes the unreachable dynamic import, so the
         // captured set must not report it — the graph describes the code that ships.
@@ -488,7 +636,7 @@ mod tests {
         let src = "if (false) { import(\"gone-package\"); }\nexport const value = 1;";
         let path = Path::new("m.ts");
 
-        let plain = compile_str_capturing(src, path, &TranspileOptions::default()).unwrap();
+        let plain = compile_str_capturing(src, path, &TranspileOptions::default(), None).unwrap();
         assert!(
             plain.imports.iter().any(|i| i.specifier == "gone-package"),
             "unminified output keeps the branch; got {:?}",
@@ -502,6 +650,7 @@ mod tests {
                 minify: true,
                 ..TranspileOptions::default()
             },
+            None,
         )
         .unwrap();
         assert!(
@@ -535,6 +684,7 @@ mod tests {
                 minify: true,
                 ..TranspileOptions::default()
             },
+            None,
         )
         .unwrap();
         let specs: Vec<&str> = out.imports.iter().map(|i| i.specifier.as_str()).collect();

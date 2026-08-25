@@ -21,7 +21,9 @@ pub fn minify_str(source: &str, path: &Path) -> Result<String> {
         RewriteOptions {
             minify: true,
             source_map: false,
+            comments: crate::Comments::Keep,
         },
+        None,
     )?
     .code)
 }

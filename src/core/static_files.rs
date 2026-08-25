@@ -59,7 +59,7 @@ pub(crate) struct StaticStep {
     reject: crate::reject::Reject,
     /// Set by the build pipeline when output rewriting is on; [`copy_static`] and the
     /// dev server's claim checks leave it `None` (byte-copy, the default).
-    #[cfg(feature = "minify")]
+    #[cfg(feature = "typescript")]
     pub(crate) rewrite_js: Option<crate::typescript::RewriteOptions>,
 }
 
@@ -81,7 +81,7 @@ impl StaticStep {
     pub(crate) fn new(reject: crate::reject::Reject) -> Self {
         Self {
             reject,
-            #[cfg(feature = "minify")]
+            #[cfg(feature = "typescript")]
             rewrite_js: None,
         }
     }
@@ -138,12 +138,26 @@ impl crate::build::steps::Step for StaticStep {
         // that is not UTF-8 text falls back to the byte-copy below (with its usual
         // warning); one that does not parse is a build error, since the rewrite has
         // no bytes to ship for it.
-        #[cfg(feature = "minify")]
+        #[cfg(feature = "typescript")]
         if let Some(rewrite) = self.rewrite_js {
             if is_emitted_js(ext) {
                 if let Ok(source) = std::fs::read_to_string(src) {
-                    let out = crate::typescript::rewrite_js_capturing(&source, src, rel, rewrite)?;
-                    crate::typescript::write_js_output(dest, out.code, out.map.map(|m| m.json))?;
+                    let legal_file = (rewrite.comments == crate::Comments::Collect)
+                        .then(|| crate::typescript::legal_file_name(dest))
+                        .flatten();
+                    let out = crate::typescript::rewrite_js_capturing(
+                        &source,
+                        src,
+                        rel,
+                        rewrite,
+                        legal_file.as_deref(),
+                    )?;
+                    crate::typescript::write_js_output(
+                        dest,
+                        out.code,
+                        out.map.map(|m| m.json),
+                        out.legal,
+                    )?;
                     return Ok(crate::build::steps::Emitted {
                         imports: Some(out.imports),
                     });

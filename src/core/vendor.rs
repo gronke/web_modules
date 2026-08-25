@@ -882,7 +882,7 @@ fn compile_source_tree(pkg_dir: &Path, package: &str) -> Result<()> {
                 let source =
                     fs::read_to_string(&entry).map_err(|e| Error::Vendor(e.to_string()))?;
                 let output = crate::processors::typescript::compile_str_capturing(
-                    &source, &entry, &options, None,
+                    &source, &entry, &options, None, None,
                 )
                 .map_err(|e| {
                     Error::Vendor(format!("{package}: compiling {}: {e}", rel.display()))

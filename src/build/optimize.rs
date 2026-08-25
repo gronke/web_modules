@@ -44,7 +44,10 @@ pub(crate) fn rewrite_vendor_tree(dir: &Path, options: RewriteOptions) -> Result
             ));
             continue;
         };
-        let out = match rewrite_js_capturing(&source, path, rel, options) {
+        let legal_file = (options.comments == crate::Comments::Collect)
+            .then(|| crate::typescript::legal_file_name(path))
+            .flatten();
+        let out = match rewrite_js_capturing(&source, path, rel, options, legal_file.as_deref()) {
             Ok(out) => out,
             Err(e) => {
                 build_warning(&format!(
@@ -54,7 +57,7 @@ pub(crate) fn rewrite_vendor_tree(dir: &Path, options: RewriteOptions) -> Result
                 continue;
             }
         };
-        write_rewritten(path, out.code, out.map.map(|m| m.json))?;
+        write_rewritten(path, out.code, out.map.map(|m| m.json), out.legal)?;
         count += 1;
     }
     Ok(count)
@@ -64,12 +67,22 @@ pub(crate) fn rewrite_vendor_tree(dir: &Path, options: RewriteOptions) -> Result
 /// `web_modules/` as hardlinks into the previous output, so nothing may write
 /// through an existing directory entry: stale sidecars are unlinked (safe — the
 /// retired tree keeps its own link), the code is written to a sibling and renamed
-/// over (the `gzip_file` discipline), and a fresh map is a new file.
-fn write_rewritten(path: &Path, mut code: String, map: Option<String>) -> Result<()> {
+/// over (the `gzip_file` discipline), and fresh sidecars are new files.
+fn write_rewritten(
+    path: &Path,
+    mut code: String,
+    map: Option<String>,
+    legal: Option<String>,
+) -> Result<()> {
     remove_if_present(&sibling(path, ".gz"))?;
     let map_path = sibling(path, ".map");
     remove_if_present(&map_path)?;
+    let legal_path = sibling(path, ".LEGAL.txt");
+    remove_if_present(&legal_path)?;
 
+    if let Some(text) = legal {
+        std::fs::write(&legal_path, text)?;
+    }
     if let Some(json) = map {
         let name = path
             .file_name()
@@ -106,6 +119,7 @@ mod tests {
     const MINIFY: RewriteOptions = RewriteOptions {
         minify: true,
         source_map: false,
+        comments: crate::Comments::Keep,
     };
 
     #[test]
@@ -165,6 +179,29 @@ mod tests {
     }
 
     #[test]
+    fn collect_writes_vendored_legal_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let js = dir.path().join("lib.js");
+        std::fs::write(&js, "/*! (c) vendor */\nexport const x = 1;\n").unwrap();
+        std::fs::write(dir.path().join("lib.js.LEGAL.txt"), "stale").unwrap();
+
+        rewrite_vendor_tree(
+            dir.path(),
+            RewriteOptions {
+                minify: true,
+                source_map: false,
+                comments: crate::Comments::Collect,
+            },
+        )
+        .unwrap();
+        let legal = std::fs::read_to_string(dir.path().join("lib.js.LEGAL.txt")).unwrap();
+        assert!(legal.contains("(c) vendor"), "fresh sidecar; got {legal:?}");
+        assert!(std::fs::read_to_string(&js)
+            .unwrap()
+            .contains("lib.js.LEGAL.txt"));
+    }
+
+    #[test]
     fn stale_sidecars_are_unlinked_and_a_fresh_map_written() {
         let dir = tempfile::tempdir().unwrap();
         let js = dir.path().join("lib.js");
@@ -177,6 +214,7 @@ mod tests {
             RewriteOptions {
                 minify: true,
                 source_map: true,
+                comments: crate::Comments::Keep,
             },
         )
         .unwrap();

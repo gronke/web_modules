@@ -55,10 +55,12 @@ pub(crate) use core::npm_link;
 /// vendor/import-map core and the build/serve toolchain.
 mod processors;
 
+#[cfg(feature = "cli")]
+pub use processors::CommentsArg;
 /// The decorator-lowering mode and class-field semantics (`web_modules::Decorators`,
 /// `web_modules::ClassFields`), always available so the build
 /// [`Processors`](build::Processors) set can carry it regardless of which processors are compiled.
-pub use processors::{ClassFields, Decorators};
+pub use processors::{ClassFields, Comments, Decorators};
 
 #[cfg(feature = "dts")]
 pub use processors::dts;

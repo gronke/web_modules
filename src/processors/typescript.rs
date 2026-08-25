@@ -28,7 +28,7 @@ use crate::{Error, Result};
 /// Decorator handling for the transform. Defined in the always-compiled [`processors`](super)
 /// module so the build `Processors` set can carry it without the `typescript` feature; re-exported
 /// here as `web_modules::typescript::Decorators` for the transform that consumes it.
-pub use super::{ClassFields, Decorators};
+pub use super::{ClassFields, Comments, Decorators};
 
 /// Knobs for [`compile_str_with`] / [`compile_directory_with`]. `Default` is the
 /// Lit preset, so the zero-config [`compile_str`] / [`compile_directory`] keep the
@@ -61,6 +61,11 @@ pub struct TranspileOptions {
     /// pipeline, [`compile_directory_with`] — writes a `<file>.map` sidecar and links
     /// it by file name. Defaults to `false`.
     pub source_map: bool,
+    /// Comment policy for the emitted code (an *output* option; see
+    /// [`Comments`]). Defaults to [`Comments::Keep`]. Through the string API a
+    /// [`Comments::Collect`] falls back to keeping legal comments inline — a returned
+    /// string has no place for the sidecar.
+    pub comments: Comments,
 }
 
 impl TranspileOptions {
@@ -77,6 +82,7 @@ impl TranspileOptions {
             rewrite_import_extensions: false,
             minify: false,
             source_map: false,
+            comments: Comments::Keep,
         }
     }
 }
@@ -140,27 +146,30 @@ crate::cli_config::feature_args!(
 /// a Tera-rendered one, a vendored file: the same single parse→codegen pass the
 /// TypeScript step compiles through, minus the transform. Derived from the build's
 /// output policy by [`Output::js_rewrite`](crate::build::Output).
-#[cfg(feature = "minify")]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RewriteOptions {
-    /// Compress + mangle via `oxc_minifier`, then whitespace-free codegen.
+    /// Compress + mangle via `oxc_minifier` (whitespace-only stripping without the
+    /// `minify` feature), then minified codegen.
     pub minify: bool,
     /// Emit a source map for the rewritten file; its immediate input is the source.
     pub source_map: bool,
+    /// Comment policy for the rewritten code.
+    pub comments: Comments,
 }
 
 /// Rewrite plain JavaScript through one parse→\[minify\]→codegen pass, capturing the
 /// imports from the final AST like [`compile_str_capturing`] does (dead-code
-/// elimination may drop one) and a source map when asked. The oxc `Transformer`
-/// never runs here: the Lit preset's class-field assumptions must not change the
-/// semantics of hand-written JS. `map_label` names the map's source; `path` informs
-/// the source type and diagnostics.
-#[cfg(feature = "minify")]
+/// elimination may drop one), a source map, and any collected legal comments. The
+/// oxc `Transformer` never runs here: the Lit preset's class-field assumptions must
+/// not change the semantics of hand-written JS. `map_label` names the map's source;
+/// `path` informs the source type and diagnostics; `legal_file` names the sidecar a
+/// [`Comments::Collect`] caller will write.
 pub(crate) fn rewrite_js_capturing(
     source: &str,
     path: &Path,
     map_label: &Path,
     options: RewriteOptions,
+    legal_file: Option<&str>,
 ) -> Result<TranspileOutput> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_default();
@@ -172,19 +181,44 @@ pub(crate) fn rewrite_js_capturing(
             &parsed.diagnostics[..],
         )));
     }
+    #[allow(unused_mut)]
     let mut program = parsed.program;
 
     let map_source = options.source_map.then(|| map_label.to_path_buf());
     let ret = if options.minify {
-        let minified = oxc_minifier::Minifier::new(oxc_minifier::MinifierOptions::default())
-            .minify(&allocator, &mut program);
-        Codegen::new()
-            .with_options(codegen_options(true, map_source))
-            .with_scoping(minified.scoping)
-            .build(&program)
+        #[cfg(feature = "minify")]
+        {
+            let minified = oxc_minifier::Minifier::new(oxc_minifier::MinifierOptions::default())
+                .minify(&allocator, &mut program);
+            Codegen::new()
+                .with_options(codegen_options(
+                    true,
+                    map_source,
+                    options.comments,
+                    legal_file,
+                ))
+                .with_scoping(minified.scoping)
+                .build(&program)
+        }
+        #[cfg(not(feature = "minify"))]
+        {
+            Codegen::new()
+                .with_options(codegen_options(
+                    true,
+                    map_source,
+                    options.comments,
+                    legal_file,
+                ))
+                .build(&program)
+        }
     } else {
         Codegen::new()
-            .with_options(codegen_options(false, map_source))
+            .with_options(codegen_options(
+                false,
+                map_source,
+                options.comments,
+                legal_file,
+            ))
             .build(&program)
     };
     let code = ret.code;
@@ -192,12 +226,18 @@ pub(crate) fn rewrite_js_capturing(
         json: map.to_json_string(),
         data_url: map.to_data_url(),
     });
+    let legal = collect_legal(&ret.legal_comments, source);
 
     let mut imports = Vec::new();
     crate::module_graph::static_from_program(&program, &mut imports);
     crate::module_graph::dynamic_from_program(&program, &mut imports);
 
-    Ok(TranspileOutput { code, imports, map })
+    Ok(TranspileOutput {
+        code,
+        imports,
+        map,
+        legal,
+    })
 }
 
 /// Build oxc transform options from our [`TranspileOptions`]. Decorator lowering and
@@ -231,7 +271,7 @@ pub fn compile_str(source: &str, path: &Path) -> Result<String> {
 /// comment — a returned string has no place for a sidecar; the build pipeline and
 /// [`compile_directory_with`] write a `<file>.map` sidecar instead.
 pub fn compile_str_with(source: &str, path: &Path, options: &TranspileOptions) -> Result<String> {
-    let out = compile_str_capturing(source, path, options, None)?;
+    let out = compile_str_capturing(source, path, options, None, None)?;
     let mut code = out.code;
     if let Some(map) = out.map {
         append_source_map_comment(&mut code, &map.data_url);
@@ -253,6 +293,10 @@ pub(crate) struct TranspileOutput {
     pub imports: Vec<ModuleImport>,
     /// The source map, when [`TranspileOptions::source_map`] asked for one.
     pub map: Option<SourceMapArtifact>,
+    /// The collected legal comments (verbatim, oxc-deduplicated, blank-line joined) a
+    /// [`Comments::Collect`] emitter writes as the `<output>.LEGAL.txt` sidecar.
+    /// `None` when nothing was collected — an empty set writes no sidecar.
+    pub legal: Option<String>,
 }
 
 /// A serialized source map, in both shapes an emitter needs: `json` for a `<file>.map`
@@ -266,11 +310,41 @@ pub(crate) struct SourceMapArtifact {
 }
 
 /// The one place [`CodegenOptions`] derive from output policy, so every JS-emitting
-/// pass in the crate prints under the same rules — whitespace stripping and the map's
-/// source label today; whatever output policy comes next joins here.
-pub(crate) fn codegen_options(minify: bool, source_map_path: Option<PathBuf>) -> CodegenOptions {
+/// pass in the crate prints under the same rules: whitespace stripping, the comment
+/// policy, and the map's source label. `legal_file` names the `<output>.LEGAL.txt`
+/// sidecar a [`Comments::Collect`] emitter will write; a caller with no place for a
+/// sidecar passes `None` and legal comments stay inline.
+pub(crate) fn codegen_options(
+    minify: bool,
+    source_map_path: Option<PathBuf>,
+    comments: Comments,
+    legal_file: Option<&str>,
+) -> CodegenOptions {
+    use oxc_codegen::{CommentOptions, LegalComment};
+    // `Strip` deliberately deviates from oxc's own minify preset, which drops legal
+    // comments: license text must ship with the code, inline or collected.
+    let comments = match comments {
+        Comments::Keep => CommentOptions::default(),
+        Comments::Strip => CommentOptions {
+            normal: false,
+            jsdoc: false,
+            annotation: false,
+            legal: LegalComment::Inline,
+        },
+        Comments::Collect => CommentOptions {
+            normal: false,
+            jsdoc: false,
+            annotation: false,
+            legal: match legal_file {
+                Some(name) => LegalComment::Linked(name.to_string()),
+                None => LegalComment::Inline,
+            },
+        },
+        Comments::None => CommentOptions::disabled(),
+    };
     CodegenOptions {
         minify,
+        comments,
         source_map_path,
         ..CodegenOptions::default()
     }
@@ -286,14 +360,29 @@ pub(crate) fn append_source_map_comment(code: &mut String, url: &str) {
     code.push('\n');
 }
 
-/// Write emitted JS to `dest`; with a map, link it by bare file name (`app.js` →
-/// `app.js.map`, a same-directory relative URL that survives any mount or subpath)
-/// and write the sidecar beside it.
+/// The `<output>.LEGAL.txt` sidecar name for an output path — the one string the
+/// codegen's pointer comment and the writer must agree on.
+pub(crate) fn legal_file_name(dest: &Path) -> Option<String> {
+    dest.file_name()
+        .and_then(|n| n.to_str())
+        .map(|name| format!("{name}.LEGAL.txt"))
+}
+
+/// Write emitted JS to `dest`, plus its sidecars: with a map, link it by bare file
+/// name (`app.js` → `app.js.map`, a same-directory relative URL that survives any
+/// mount or subpath) and write the JSON beside it; with collected legal comments,
+/// write `<dest>.LEGAL.txt`.
 pub(crate) fn write_js_output(
     dest: &Path,
     mut code: String,
     map_json: Option<String>,
+    legal: Option<String>,
 ) -> Result<()> {
+    if let Some(text) = legal {
+        let mut legal_path = dest.as_os_str().to_owned();
+        legal_path.push(".LEGAL.txt");
+        write(PathBuf::from(legal_path), text)?;
+    }
     let Some(map_json) = map_json else {
         write(dest, code)?;
         return Ok(());
@@ -311,15 +400,18 @@ pub(crate) fn write_js_output(
 }
 
 /// Like [`compile_str_with`], but also returns the module specifiers the emitted code
-/// imports (see [`TranspileOutput`]) and, when asked, the raw source map. `map_label`
-/// names the map's source (pass the root-relative path); diagnostics keep using `path`,
-/// so error messages stay clickable while absolute build paths never leak into a
-/// published map. `None` falls back to `path`.
+/// imports (see [`TranspileOutput`]), the raw source map, and any collected legal
+/// comments. `map_label` names the map's source (pass the root-relative path);
+/// diagnostics keep using `path`, so error messages stay clickable while absolute
+/// build paths never leak into a published map (`None` falls back to `path`).
+/// `legal_file` is the `<output>.LEGAL.txt` sidecar name a [`Comments::Collect`]
+/// caller will write; `None` keeps legal comments inline.
 pub(crate) fn compile_str_capturing(
     source: &str,
     path: &Path,
     options: &TranspileOptions,
     map_label: Option<&Path>,
+    legal_file: Option<&str>,
 ) -> Result<TranspileOutput> {
     let allocator = Allocator::default();
     let source_type = SourceType::from_path(path).unwrap_or_default();
@@ -365,7 +457,12 @@ pub(crate) fn compile_str_capturing(
         .then(|| map_label.unwrap_or(path).to_path_buf());
     let ret = if !options.minify {
         Codegen::new()
-            .with_options(codegen_options(false, map_source))
+            .with_options(codegen_options(
+                false,
+                map_source,
+                options.comments,
+                legal_file,
+            ))
             .build(&program)
     } else {
         #[cfg(feature = "minify")]
@@ -373,24 +470,35 @@ pub(crate) fn compile_str_capturing(
             let ret = oxc_minifier::Minifier::new(oxc_minifier::MinifierOptions::default())
                 .minify(&allocator, &mut program);
             Codegen::new()
-                .with_options(codegen_options(true, map_source))
+                .with_options(codegen_options(
+                    true,
+                    map_source,
+                    options.comments,
+                    legal_file,
+                ))
                 .with_scoping(ret.scoping)
                 .build(&program)
         }
         #[cfg(not(feature = "minify"))]
         {
             Codegen::new()
-                .with_options(codegen_options(true, map_source))
+                .with_options(codegen_options(
+                    true,
+                    map_source,
+                    options.comments,
+                    legal_file,
+                ))
                 .build(&program)
         }
     };
     let code = ret.code;
     // Both serializations are captured here: the map borrows the compile's allocator
-    // and cannot leave this function.
+    // and cannot leave this function. Same for the collected legal comments.
     let map = ret.map.map(|map| SourceMapArtifact {
         json: map.to_json_string(),
         data_url: map.to_data_url(),
     });
+    let legal = collect_legal(&ret.legal_comments, source);
 
     // Capture the imports — static `import` / `export … from`, the helpers the transform
     // injected, and dynamic `import()` — from the final AST, after any minification has
@@ -401,7 +509,28 @@ pub(crate) fn compile_str_capturing(
     crate::module_graph::static_from_program(&program, &mut imports);
     crate::module_graph::dynamic_from_program(&program, &mut imports);
 
-    Ok(TranspileOutput { code, imports, map })
+    Ok(TranspileOutput {
+        code,
+        imports,
+        map,
+        legal,
+    })
+}
+
+/// The `<output>.LEGAL.txt` sidecar body: the collected legal comments verbatim
+/// (oxc returns them deduplicated), blank-line separated. `None` for an empty set —
+/// no sidecar is written for a file without legal comments.
+fn collect_legal(comments: &[oxc_ast::Comment], source: &str) -> Option<String> {
+    if comments.is_empty() {
+        return None;
+    }
+    Some(
+        comments
+            .iter()
+            .map(|comment| comment.span.source_text(source))
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    )
 }
 
 /// Compile every `.ts`/`.tsx`/`.mts` under `src_dir` (skipping `.d.ts`
@@ -437,8 +566,17 @@ pub fn compile_directory_with(
             create_dir_all(parent)?;
         }
         let source = read_to_string(path)?;
-        let compiled = compile_str_capturing(&source, path, options, Some(rel))?;
-        write_js_output(&out, compiled.code, compiled.map.map(|m| m.json))?;
+        let legal_file = (options.comments == Comments::Collect)
+            .then(|| legal_file_name(&out))
+            .flatten();
+        let compiled =
+            compile_str_capturing(&source, path, options, Some(rel), legal_file.as_deref())?;
+        write_js_output(
+            &out,
+            compiled.code,
+            compiled.map.map(|m| m.json),
+            compiled.legal,
+        )?;
         count += 1;
     }
     Ok(count)
@@ -503,8 +641,22 @@ impl crate::build::steps::Step for TypeScriptStep {
         dest: &Path,
     ) -> Result<crate::build::steps::Emitted> {
         let source = read_to_string(src)?;
-        let compiled = compile_str_capturing(&source, src, &self.options, Some(rel))?;
-        write_js_output(dest, compiled.code, compiled.map.map(|m| m.json))?;
+        let legal_file = (self.options.comments == Comments::Collect)
+            .then(|| legal_file_name(dest))
+            .flatten();
+        let compiled = compile_str_capturing(
+            &source,
+            src,
+            &self.options,
+            Some(rel),
+            legal_file.as_deref(),
+        )?;
+        write_js_output(
+            dest,
+            compiled.code,
+            compiled.map.map(|m| m.json),
+            compiled.legal,
+        )?;
         Ok(crate::build::steps::Emitted {
             imports: Some(compiled.imports),
         })
@@ -641,6 +793,71 @@ mod tests {
 
     #[cfg(feature = "minify")]
     #[test]
+    fn comment_policy_matrix() {
+        let src = "/*! (c) 2026 example */\n// normal note\n/** jsdoc */\nexport const x = 1;\n";
+        let compile = |comments: Comments| {
+            compile_str_capturing(
+                src,
+                Path::new("x.ts"),
+                &TranspileOptions {
+                    comments,
+                    ..TranspileOptions::default()
+                },
+                None,
+                None,
+            )
+            .unwrap()
+        };
+
+        let keep = compile(Comments::Keep);
+        assert!(keep.code.contains("(c) 2026") && keep.code.contains("normal note"));
+        assert!(keep.legal.is_none());
+
+        let strip = compile(Comments::Strip);
+        assert!(
+            strip.code.contains("(c) 2026"),
+            "legal inline; got {}",
+            strip.code
+        );
+        assert!(!strip.code.contains("normal note") && !strip.code.contains("jsdoc"));
+
+        // Collect without a sidecar name (the string API) keeps legal inline.
+        let collect = compile(Comments::Collect);
+        assert!(collect.code.contains("(c) 2026"), "got {}", collect.code);
+
+        let none = compile(Comments::None);
+        assert!(!none.code.contains("(c) 2026"), "got {}", none.code);
+    }
+
+    #[test]
+    fn collect_extracts_deduplicated_legal_comments() {
+        let src = "/*! (c) duplicated */\nexport const x = 1;\n/*! (c) duplicated */\nexport const y = 2;\n";
+        let out = compile_str_capturing(
+            src,
+            Path::new("x.ts"),
+            &TranspileOptions {
+                comments: Comments::Collect,
+                ..TranspileOptions::default()
+            },
+            None,
+            Some("x.js.LEGAL.txt"),
+        )
+        .unwrap();
+        assert!(
+            out.code.contains("x.js.LEGAL.txt"),
+            "the pointer comment names the sidecar; got {}",
+            out.code
+        );
+        assert!(!out.code.contains("(c) duplicated"), "moved out");
+        let legal = out.legal.expect("collected");
+        assert_eq!(
+            legal.matches("(c) duplicated").count(),
+            1,
+            "deduplicated; got {legal:?}"
+        );
+    }
+
+    #[test]
     fn source_map_is_inlined_through_the_string_api() {
         let src = "export const x: number = 1;\n";
         let opts = TranspileOptions {
@@ -670,6 +887,7 @@ mod tests {
             Path::new("/abs/build/app.ts"),
             &opts,
             Some(Path::new("app.ts")),
+            None,
         )
         .unwrap();
         let map = out.map.expect("map requested");
@@ -687,8 +905,8 @@ mod tests {
             .data_url
             .starts_with("data:application/json;charset=utf-8;base64,"));
 
-        let off =
-            compile_str_capturing(src, Path::new("app.ts"), &Default::default(), None).unwrap();
+        let off = compile_str_capturing(src, Path::new("app.ts"), &Default::default(), None, None)
+            .unwrap();
         assert!(off.map.is_none(), "no map unless asked");
     }
 
@@ -700,7 +918,8 @@ mod tests {
         let src = "if (false) { import(\"gone-package\"); }\nexport const value = 1;";
         let path = Path::new("m.ts");
 
-        let plain = compile_str_capturing(src, path, &TranspileOptions::default(), None).unwrap();
+        let plain =
+            compile_str_capturing(src, path, &TranspileOptions::default(), None, None).unwrap();
         assert!(
             plain.imports.iter().any(|i| i.specifier == "gone-package"),
             "unminified output keeps the branch; got {:?}",
@@ -714,6 +933,7 @@ mod tests {
                 minify: true,
                 ..TranspileOptions::default()
             },
+            None,
             None,
         )
         .unwrap();
@@ -748,6 +968,7 @@ mod tests {
                 minify: true,
                 ..TranspileOptions::default()
             },
+            None,
             None,
         )
         .unwrap();

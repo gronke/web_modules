@@ -152,8 +152,13 @@ pub struct Output {
     pub gzip: bool,
     /// With `minify`: also minify the vendored `web_modules/` tree and `npm://`
     /// assets (default on). Off keeps npm content byte-identical to what the
-    /// packages shipped; without `minify` this has no effect.
+    /// packages shipped — the comment policy included; without an active rewrite
+    /// (`minify` or a non-default `comments`) this has no effect.
     pub minify_web_modules: bool,
+    /// Comment policy for emitted JS (see [`crate::Comments`]). `None` — the default —
+    /// resolves via [`effective_comments`](Self::effective_comments): `Strip` under
+    /// `minify`, `Keep` otherwise.
+    pub comments: Option<crate::Comments>,
 }
 
 impl Default for Output {
@@ -162,6 +167,7 @@ impl Default for Output {
             minify: false,
             gzip: false,
             minify_web_modules: true,
+            comments: None,
         }
     }
 }
@@ -193,20 +199,43 @@ impl Output {
         self
     }
 
-    /// The rewrite policy for already-emitted first-party JS (copied, Tera-rendered):
-    /// `Some` when minification is on. The vendored tree follows
-    /// [`vendor_rewrite`](Self::vendor_rewrite) instead.
-    #[cfg(feature = "minify")]
-    pub(crate) fn js_rewrite(&self, source_map: bool) -> Option<crate::typescript::RewriteOptions> {
-        self.minify.then_some(crate::typescript::RewriteOptions {
-            minify: true,
-            source_map,
+    /// Set the comment policy explicitly (see [`crate::Comments`]); unset, `minify`
+    /// implies `Strip`. Chainable, like the builders.
+    pub fn comments(mut self, comments: crate::Comments) -> Self {
+        self.comments = Some(comments);
+        self
+    }
+
+    /// The effective comment policy: an explicit choice wins; otherwise minification
+    /// implies [`Strip`](crate::Comments::Strip) — minified output drops comments,
+    /// but legal ones stay inline, deliberately not oxc's own preset, which drops
+    /// those too — and plain output keeps everything.
+    pub fn effective_comments(&self) -> crate::Comments {
+        self.comments.unwrap_or(if self.minify {
+            crate::Comments::Strip
+        } else {
+            crate::Comments::Keep
         })
+    }
+
+    /// The rewrite policy for already-emitted first-party JS (copied, Tera-rendered):
+    /// `Some` when minification or a non-default comment policy is on. The vendored
+    /// tree follows [`vendor_rewrite`](Self::vendor_rewrite) instead.
+    #[cfg(feature = "typescript")]
+    pub(crate) fn js_rewrite(&self, source_map: bool) -> Option<crate::typescript::RewriteOptions> {
+        let comments = self.effective_comments();
+        (self.minify || comments != crate::Comments::Keep).then_some(
+            crate::typescript::RewriteOptions {
+                minify: self.minify,
+                source_map,
+                comments,
+            },
+        )
     }
 
     /// The rewrite policy for vendored npm content (`web_modules/`, `npm://` assets):
     /// [`js_rewrite`](Self::js_rewrite) gated by the vendor knob.
-    #[cfg(feature = "minify")]
+    #[cfg(feature = "typescript")]
     pub(crate) fn vendor_rewrite(
         &self,
         source_map: bool,
@@ -273,12 +302,27 @@ const OUT_MARKER: &str = ".web-modules-out";
 /// tree beyond extraction. Empty means pristine — the shape of every pre-profile
 /// output, so old markers compare correctly.
 fn vendor_profile(processors: &Processors, output: &Output) -> String {
-    let mut tokens = Vec::new();
+    let mut tokens: Vec<String> = Vec::new();
     if processors.sourcemap {
-        tokens.push("sourcemaps");
+        tokens.push("sourcemaps".into());
     }
-    if output.minify && output.minify_web_modules {
-        tokens.push("minify");
+    let effective = output.effective_comments();
+    let vendor_rewrites =
+        output.minify_web_modules && (output.minify || effective != crate::Comments::Keep);
+    if vendor_rewrites {
+        if output.minify {
+            tokens.push("minify".into());
+        }
+        match effective {
+            crate::Comments::Keep => {}
+            crate::Comments::Strip => tokens.push("comments=strip".into()),
+            crate::Comments::Collect => tokens.push("comments=collect".into()),
+            crate::Comments::None => tokens.push("comments=none".into()),
+            // `Comments` is non_exhaustive within the crate too — a new mode must
+            // choose its token here, so the seed gate keeps seeing it.
+            #[allow(unreachable_patterns)]
+            _ => tokens.push("comments=other".into()),
+        }
     }
     if tokens.is_empty() {
         String::new()
@@ -426,6 +470,7 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
         minify: opts.output.minify,
         decorators: opts.processors.ts_decorators,
         source_map: opts.processors.sourcemap,
+        comments: opts.output.effective_comments(),
         ..Default::default()
     };
 
@@ -448,7 +493,7 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
         steps::StepConfig {
             #[cfg(feature = "typescript")]
             transpile,
-            #[cfg(feature = "minify")]
+            #[cfg(feature = "typescript")]
             rewrite_js: opts.output.js_rewrite(opts.processors.sourcemap),
             #[cfg(feature = "scss")]
             scss_load_paths,
@@ -584,9 +629,9 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     // The targets that emit a generated `<target>.map` sidecar under `--sourcemap`
     // (and, with gzip, that sidecar's `.gz`): compiled `.js` always; with minify's
     // whole-tree rewrite, every emitted `.js`/`.mjs`, whichever step wins it.
-    #[cfg(feature = "minify")]
+    #[cfg(feature = "typescript")]
     let rewrite_active = opts.output.js_rewrite(opts.processors.sourcemap).is_some();
-    #[cfg(not(feature = "minify"))]
+    #[cfg(not(feature = "typescript"))]
     let rewrite_active = false;
     let map_bearing: std::collections::BTreeSet<&Path> = winners
         .iter()
@@ -604,6 +649,15 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
             && target.extension().and_then(|e| e.to_str()) == Some("map")
             && map_bearing.contains(target.with_extension("").as_path())
     };
+    // Same story for `<target>.LEGAL.txt` under the collect policy: every rewritten
+    // JS may emit one, so a source claiming that path would corrupt it.
+    let legal_emitting = |target: &Path| -> bool {
+        opts.output.effective_comments() == crate::Comments::Collect
+            && target.to_str().is_some_and(|s| {
+                s.strip_suffix(".LEGAL.txt")
+                    .is_some_and(|inner| map_bearing.contains(Path::new(inner)))
+            })
+    };
     let violations: Vec<String> = winners
         .iter()
         .filter_map(|winner| {
@@ -618,6 +672,14 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
                 Some(format!(
                     "the generated source map of {}",
                     out_rel.with_extension("").display()
+                ))
+            } else if legal_emitting(out_rel) {
+                Some(format!(
+                    "the collected legal comments of {}",
+                    out_rel
+                        .to_str()
+                        .and_then(|s| s.strip_suffix(".LEGAL.txt"))
+                        .unwrap_or_default()
                 ))
             } else if cfg!(feature = "compress")
                 && opts.output.gzip
@@ -689,7 +751,7 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
 
     // npm content — `npm://` assets here, the vendored tree after pruning below —
     // follows the vendor knob for output rewriting.
-    #[cfg(feature = "minify")]
+    #[cfg(feature = "typescript")]
     let vendor_rewrite = opts.output.vendor_rewrite(opts.processors.sourcemap);
 
     // Emit every `npm://` asset symlink: resolve it into node_modules and write the
@@ -736,7 +798,7 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
             // With the vendor knob on, a JS asset goes through the shared rewrite
             // pass; anything else — and anything unreadable or unparseable, said
             // aloud — copies byte-for-byte, like the vendored tree's pass.
-            #[cfg(feature = "minify")]
+            #[cfg(feature = "typescript")]
             if let Some(rewrite) = vendor_rewrite {
                 let ext = out_rel.extension().and_then(|x| x.to_str()).unwrap_or("");
                 if crate::module_graph::is_emitted_js(ext) {
@@ -745,6 +807,7 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
                             &dest,
                             out.code,
                             out.map.map(|m| m.json),
+                            out.legal,
                         )?;
                         continue;
                     }
@@ -772,9 +835,9 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     };
     vendor::prune(&stage.join("web_modules"), opts.specs, extra_vendored)?;
 
-    // The vendored tree minifies through the same one-pass rewrite as everything
-    // else — after the prune, so no rewrite is spent on a package about to vanish.
-    #[cfg(feature = "minify")]
+    // The vendored tree rewrites through the same one pass as everything else —
+    // after the prune, so no rewrite is spent on a package about to vanish.
+    #[cfg(feature = "typescript")]
     if let Some(rewrite) = vendor_rewrite {
         super::optimize::rewrite_vendor_tree(&stage.join("web_modules"), rewrite)?;
     }
@@ -876,7 +939,7 @@ fn emit_winner(
 /// Rewrite one `npm://` JS asset for emission, or `None` — aloud — when the shipped
 /// bytes cannot be read or parsed, in which case the caller copies them as they are
 /// (npm content must not brick the build; the same resilience as the vendored tree).
-#[cfg(feature = "minify")]
+#[cfg(feature = "typescript")]
 fn rewrite_npm_asset(
     source: &Path,
     out_rel: &Path,
@@ -889,7 +952,16 @@ fn rewrite_npm_asset(
         ));
         return Ok(None);
     };
-    match crate::typescript::rewrite_js_capturing(&text, out_rel, out_rel, rewrite) {
+    let legal_file = (rewrite.comments == crate::Comments::Collect)
+        .then(|| crate::typescript::legal_file_name(out_rel))
+        .flatten();
+    match crate::typescript::rewrite_js_capturing(
+        &text,
+        out_rel,
+        out_rel,
+        rewrite,
+        legal_file.as_deref(),
+    ) {
         Ok(out) => Ok(Some(out)),
         Err(e) => {
             crate::static_files::build_warning(&format!(
@@ -953,14 +1025,47 @@ mod tests {
         p.sourcemap = true;
         assert_eq!(vendor_profile(&p, &o), "vendor-profile: sourcemaps");
         o.minify = true;
-        assert_eq!(vendor_profile(&p, &o), "vendor-profile: sourcemaps,minify");
+        assert_eq!(
+            vendor_profile(&p, &o),
+            "vendor-profile: sourcemaps,minify,comments=strip",
+            "minify implies the strip policy"
+        );
         p.sourcemap = false;
-        assert_eq!(vendor_profile(&p, &o), "vendor-profile: minify");
+        o = o.comments(crate::Comments::Keep);
+        assert_eq!(
+            vendor_profile(&p, &o),
+            "vendor-profile: minify",
+            "an explicit keep leaves only the minify shaping"
+        );
+        o = o.comments(crate::Comments::Collect);
+        o.minify = false;
+        assert_eq!(
+            vendor_profile(&p, &o),
+            "vendor-profile: comments=collect",
+            "a comment policy alone shapes the tree"
+        );
         o = o.minify_web_modules(false);
         assert_eq!(
             vendor_profile(&p, &o),
             "",
-            "minify without the vendor knob leaves the tree pristine"
+            "the vendor knob keeps the tree pristine"
+        );
+    }
+
+    #[test]
+    fn effective_comments_resolution() {
+        let mut o = Output::default();
+        assert_eq!(o.effective_comments(), crate::Comments::Keep);
+        o.minify = true;
+        assert_eq!(
+            o.effective_comments(),
+            crate::Comments::Strip,
+            "minify implies strip"
+        );
+        assert_eq!(
+            o.comments(crate::Comments::Keep).effective_comments(),
+            crate::Comments::Keep,
+            "an explicit choice wins"
         );
     }
 
@@ -1017,7 +1122,10 @@ mod tests {
         {
             o.output = Output::new(true, false);
             build(&o).unwrap();
-            assert_eq!(marker_profile(&out), "vendor-profile: sourcemaps,minify");
+            assert_eq!(
+                marker_profile(&out),
+                "vendor-profile: sourcemaps,minify,comments=strip"
+            );
             // lit publishes pre-minified files, so a size check cannot prove the
             // rewrite — the fresh map can: ours labels the vendored file itself as
             // the source, where lit's shipped maps name its `src/*.ts` files.
@@ -1306,6 +1414,96 @@ mod tests {
         o.processors.sourcemap = true;
         build(&o).unwrap();
         assert_eq!(std::fs::read_to_string(out.join("b.js.map")).unwrap(), "{}");
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn minify_strips_comments_but_keeps_legal_inline() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("app.ts"),
+            "/*! (c) 2026 example */\n// internal note\nexport const x: number = 1;\n",
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.output = Output::new(true, false);
+        build(&o).unwrap();
+        let js = std::fs::read_to_string(out.join("app.js")).unwrap();
+        assert!(js.contains("(c) 2026"), "legal stays inline; got {js}");
+        assert!(
+            !js.contains("internal note"),
+            "normal comment gone; got {js}"
+        );
+
+        // An explicit keep wins over the implication.
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.output = Output::new(true, false).comments(crate::Comments::Keep);
+        build(&o).unwrap();
+        let js = std::fs::read_to_string(out.join("app.js")).unwrap();
+        assert!(js.contains("internal note"), "explicit keep wins; got {js}");
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn collect_writes_legal_sidecars_and_reserves_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("app.ts"),
+            "/*! (c) compiled */\nexport const x: number = 1;\n",
+        )
+        .unwrap();
+        std::fs::write(src.join("b.js"), "/*! (c) copied */\nexport const y = 2;\n").unwrap();
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.output = Output::default().comments(crate::Comments::Collect);
+        build(&o).unwrap();
+
+        let app = std::fs::read_to_string(out.join("app.js")).unwrap();
+        assert!(!app.contains("(c) compiled"), "moved out; got {app}");
+        assert!(
+            app.contains("app.js.LEGAL.txt"),
+            "pointer comment; got {app}"
+        );
+        assert!(std::fs::read_to_string(out.join("app.js.LEGAL.txt"))
+            .unwrap()
+            .contains("(c) compiled"));
+        // A copied module routes through the rewrite even without minify.
+        assert!(std::fs::read_to_string(out.join("b.js.LEGAL.txt"))
+            .unwrap()
+            .contains("(c) copied"));
+
+        // The sidecar path is reserved while collect is on.
+        std::fs::write(src.join("app.js.LEGAL.txt"), "mine").unwrap();
+        let err = build(&o).unwrap_err().to_string();
+        assert!(
+            err.contains("reserved") && err.contains("legal"),
+            "got {err}"
+        );
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn comments_none_drops_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("app.ts"),
+            "/*! (c) legal */\nexport const x: number = 1;\n",
+        )
+        .unwrap();
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.output = Output::default().comments(crate::Comments::None);
+        build(&o).unwrap();
+        let js = std::fs::read_to_string(out.join("app.js")).unwrap();
+        assert!(!js.contains("legal"), "everything dropped; got {js}");
+        assert!(!out.join("app.js.LEGAL.txt").exists(), "and none collected");
     }
 
     #[cfg(feature = "typescript")]

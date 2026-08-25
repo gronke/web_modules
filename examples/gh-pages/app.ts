@@ -1,3 +1,7 @@
+/*!
+ * web_modules GitHub Pages demo
+ * @license MIT
+ */
 import { LitElement, html } from 'lit';
 
 // A tiny, self-contained Lit component — decorator-free (`static properties`), so only `lit` is

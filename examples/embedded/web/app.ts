@@ -1,7 +1,11 @@
-// Plain Web Component, no imports — so the bake stays offline; compiled & minified into app.js (build.rs).
+/*!
+ * embedded example: a plain Web Component, no imports, so the bake stays offline.
+ * @license MIT
+ */
+// Compiled into app.js by build.rs under `Comments::Collect`: a normal comment like this
+// one is stripped by minification, while the legal banner above moves into the
+// app.js.LEGAL.txt sidecar, a pointer comment left in its place.
 class ClickCounter extends HTMLElement {
-  // This inline comment is dropped by minification; the one-line banner above is kept
-  // (oxc preserves a leading banner comment, the way a license header would survive).
   private count = 0; // initialised, so the Lit-preset class-field transform keeps it
 
   connectedCallback(): void {

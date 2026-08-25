@@ -1,6 +1,7 @@
 //! Bakes the frontend at build time into `$OUT_DIR/dist`, **optimized for shipping
-//! inside the binary**: TypeScript → minified JS, SCSS → compressed CSS, plus a `.gz`
-//! sidecar for every servable asset. `main.rs` embeds the result with `include_dir!`.
+//! inside the binary**: TypeScript → minified JS with a linked `.map` (sources embedded),
+//! the legal banner collected into `app.js.LEGAL.txt`, SCSS → compressed CSS, plus a
+//! `.gz` sidecar for every servable asset. `main.rs` embeds the result with `include_dir!`.
 //!
 //! Unlike the other examples this one vendors **nothing** (no npm dependencies), so the
 //! bake runs entirely offline — the point here is the *output* pipeline (minify + gzip +
@@ -8,7 +9,8 @@
 
 use std::path::PathBuf;
 
-use web_modules::build::{build, BuildOptions, Output};
+use web_modules::build::{build, BuildOptions, Output, Processors};
+use web_modules::Comments;
 
 const HTML: &str = r#"<!doctype html>
 <html lang="en">
@@ -32,6 +34,10 @@ fn main() {
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("dist");
     let web = manifest.join("web");
 
+    // Ship the source map beside the minified app.js: an embedded dist stays debuggable.
+    let mut processors = Processors::default();
+    processors.sourcemap = true;
+
     build(&BuildOptions {
         specs: &[], // no npm dependencies → the build never touches the network
         roots: std::slice::from_ref(&web),
@@ -39,10 +45,11 @@ fn main() {
         mount: "/web_modules",
         html: HTML,
         template: None,
-        processors: Default::default(),
-        // The whole point of this example: minify the emitted JS and write `.gz`
-        // sidecars, so what ends up embedded is production-sized.
-        output: Output::optimized(),
+        processors,
+        // The whole point of this example, the output-policy set: minify the emitted
+        // JS, write `.gz` sidecars, and collect the legal banner into `app.js.LEGAL.txt`,
+        // so what ends up embedded is production-sized yet license-compliant.
+        output: Output::optimized().comments(Comments::Collect),
     })
     .expect("build embedded frontend");
 }

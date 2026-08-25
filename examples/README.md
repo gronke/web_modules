@@ -1,8 +1,7 @@
 # Examples
 
-Runnable demos of the [`web-modules`](..) toolchain — each is a small app you can
-`cargo run` and open in the browser. They double as integration tests (driven by
-[`tests/examples.rs`](../tests/examples.rs)).
+Runnable demos of the [`web-modules`](..) toolchain: most are small apps you can `cargo run` and open in the browser; two pure-frontend demos (`bundle`, `gh-pages`) are built by the `web-modules` CLI instead.
+They double as integration tests (driven by [`tests/examples.rs`](../tests/examples.rs)).
 
 | Example | Demonstrates |
 |---------|--------------|
@@ -15,6 +14,8 @@ Runnable demos of the [`web-modules`](..) toolchain — each is a small app you 
 | [`react-umd`](react-umd) | classic React, buildless — `Extract::File` vendors React 18's prebuilt **UMD** build, loaded as a `<script>` global; the app is `React.createElement` (no JSX), transformed on the fly |
 | [`esptool-git`](esptool-git) | build an **external dependency from source** — esptool-js, which publishes only TypeScript, fetched by git reference and compiled by the pipeline; the page reads an ESP32's chip info over Web Serial |
 | [`react-esm`](react-esm) | React 19 from npm (**CommonJS**) folded into one browser ES module via the opt-in `bundle` feature (rolldown); a zustand store proves a single shared React instance |
+| [`bundle`](bundle) | fold the built tree per entry point with the pipeline's **`bundle` stage**: `app.js` keeps its URL with lit inlined, a dynamic import lands in content-hashed `chunks/`, no import map ships; every knob comes from the `web_modules` block in `package.json` |
+| [`gh-pages`](gh-pages) | the live GitHub Pages demo, buildless with an import map, built by `web-modules build` and deployed by the repo's own composite action ([`pages.yml`](../.github/workflows/pages.yml)) |
 
 ## Running
 
@@ -27,6 +28,12 @@ cargo run -p lit-element     # also: d3 · bootstrap-scss · compose · embedded
 Then open the printed URL (default `http://127.0.0.1:8080/`). The live examples
 recompile a `.ts`/`.scss` on reload; `embedded` instead serves assets baked into the
 binary. (Note the `bootstrap` directory's crate is `bootstrap-scss`.)
+
+`bundle` and `gh-pages` are **pure frontend** (no crate to run); the CLI builds them:
+
+```sh
+cd examples/bundle && cargo run --features "full bundle" --bin web-modules -- build
+```
 
 `tauri` is **standalone** — excluded from the workspace (its `src-tauri` crate is its own
 workspace root and pulls in webkit2gtk), and driven from its own manifest via `cargo tauri

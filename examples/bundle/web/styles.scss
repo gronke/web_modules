@@ -1,0 +1,75 @@
+// Compiled to /styles.css by `web-modules build` (grass) before the bundle stage folds the
+// JS; stylesheets pass through bundling untouched.
+$accent: #e8590c;
+$ink: #1a1a2e;
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  overflow-x: hidden;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: linear-gradient(135deg, lighten($accent, 42%), #ffffff 70%);
+  color: $ink;
+}
+
+bundle-card .card {
+  max-width: 34rem;
+  margin: 1.5rem;
+  padding: 2.5rem;
+  text-align: center;
+
+  h1 {
+    margin: 0 0 0.75rem;
+    color: $accent;
+    letter-spacing: 0.02em;
+  }
+
+  .lede {
+    opacity: 0.82;
+    line-height: 1.6;
+  }
+
+  code {
+    padding: 0.1em 0.35em;
+    border-radius: 0.3em;
+    background: rgba($accent, 0.12);
+    color: darken($accent, 10%);
+  }
+
+  button {
+    margin-top: 1.75rem;
+    padding: 0.6rem 1.5rem;
+    border: 0;
+    border-radius: 0.5rem;
+    background: $accent;
+    color: #fff;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.15s ease;
+
+    &:hover {
+      background: darken($accent, 8%);
+    }
+  }
+}
+
+// Sprinkled by lazy.js (the on-demand chunk) on every celebration; each piece picks its
+// own --hue.
+.confetti {
+  position: fixed;
+  top: -2rem;
+  width: 0.5rem;
+  height: 0.8rem;
+  border-radius: 0.15rem;
+  background: hsl(var(--hue), 85%, 55%);
+  pointer-events: none;
+  animation: fall 1.7s ease-in forwards;
+}
+
+@keyframes fall {
+  to {
+    transform: translateY(105vh) rotate(360deg);
+  }
+}

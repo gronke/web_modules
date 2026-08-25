@@ -14,7 +14,7 @@ use include_dir::{include_dir, Dir};
 use web_modules::{serve, Frontend};
 
 // Baked by build.rs into `$OUT_DIR/dist` and embedded here: index.html, app.js(.gz),
-// styles.css(.gz), and the (empty) web_modules/ tree.
+// app.js.map(.gz), app.js.LEGAL.txt, styles.css(.gz), and the (empty) web_modules/ tree.
 static DIST: Dir = include_dir!("$OUT_DIR/dist");
 
 #[tokio::main]

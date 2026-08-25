@@ -200,6 +200,7 @@ The [`examples/`](examples/) tree is full of runnable demos; `cargo run` and ope
 - [**lit-element**](examples/lit-element) - a Lit 3 component themed with Bootstrap 5, baked at build time, served by axum.
 - [**d3**](examples/d3) - a bar chart with D3, a non-Lit npm dependency vendored and served as-is.
 - [**react-esm**](examples/react-esm) - React from npm bundled into one browser ES module, entirely in Rust (the `bundle` feature).
+- [**bundle**](examples/bundle) - the buildless sources folded per entry by `--bundle`: content-hashed `chunks/`, no import map shipped, configured entirely from `package.json`.
 - [**embedded**](examples/embedded) - the whole frontend baked into the binary; no filesystem, no network.
 - [**tauri**](examples/tauri) - a Tauri v2 desktop app, frontend live-served (and release-baked) by web_modules.
 

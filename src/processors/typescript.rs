@@ -136,6 +136,70 @@ crate::cli_config::feature_args!(
     crate::cli_config::NoConfig
 );
 
+/// How already-emitted JavaScript is rewritten at emit time — a copied `.js`/`.mjs`,
+/// a Tera-rendered one, a vendored file: the same single parse→codegen pass the
+/// TypeScript step compiles through, minus the transform. Derived from the build's
+/// output policy by [`Output::js_rewrite`](crate::build::Output).
+#[cfg(feature = "minify")]
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RewriteOptions {
+    /// Compress + mangle via `oxc_minifier`, then whitespace-free codegen.
+    pub minify: bool,
+    /// Emit a source map for the rewritten file; its immediate input is the source.
+    pub source_map: bool,
+}
+
+/// Rewrite plain JavaScript through one parse→\[minify\]→codegen pass, capturing the
+/// imports from the final AST like [`compile_str_capturing`] does (dead-code
+/// elimination may drop one) and a source map when asked. The oxc `Transformer`
+/// never runs here: the Lit preset's class-field assumptions must not change the
+/// semantics of hand-written JS. `map_label` names the map's source; `path` informs
+/// the source type and diagnostics.
+#[cfg(feature = "minify")]
+pub(crate) fn rewrite_js_capturing(
+    source: &str,
+    path: &Path,
+    map_label: &Path,
+    options: RewriteOptions,
+) -> Result<TranspileOutput> {
+    let allocator = Allocator::default();
+    let source_type = SourceType::from_path(path).unwrap_or_default();
+    let parsed = Parser::new(&allocator, source, source_type).parse();
+    if parsed.diagnostics.has_errors() {
+        return Err(Error::Minify(render_errors(
+            "parse",
+            path,
+            &parsed.diagnostics[..],
+        )));
+    }
+    let mut program = parsed.program;
+
+    let map_source = options.source_map.then(|| map_label.to_path_buf());
+    let ret = if options.minify {
+        let minified = oxc_minifier::Minifier::new(oxc_minifier::MinifierOptions::default())
+            .minify(&allocator, &mut program);
+        Codegen::new()
+            .with_options(codegen_options(true, map_source))
+            .with_scoping(minified.scoping)
+            .build(&program)
+    } else {
+        Codegen::new()
+            .with_options(codegen_options(false, map_source))
+            .build(&program)
+    };
+    let code = ret.code;
+    let map = ret.map.map(|map| SourceMapArtifact {
+        json: map.to_json_string(),
+        data_url: map.to_data_url(),
+    });
+
+    let mut imports = Vec::new();
+    crate::module_graph::static_from_program(&program, &mut imports);
+    crate::module_graph::dynamic_from_program(&program, &mut imports);
+
+    Ok(TranspileOutput { code, imports, map })
+}
+
 /// Build oxc transform options from our [`TranspileOptions`]. Decorator lowering and
 /// class-field semantics are set independently: the default pairing — legacy decorators
 /// with fields *assigned* rather than *defined* — is the Lit preset.

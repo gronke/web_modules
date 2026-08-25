@@ -52,9 +52,15 @@ pub fn copy_static(src: &Path, out: &Path, reject: &crate::reject::Reject) -> Re
 /// file or a `_` partial (the preflight drops reject-listed targets centrally, and
 /// reports them), and copies it byte-for-byte. A copied `.js`/`.mjs` is read for the
 /// module graph on the way — the record marks the WRITE, independent of whether the
-/// bytes are readable as a module.
+/// bytes are readable as a module. With a rewrite policy set, a `.js`/`.mjs` is
+/// instead emitted through the shared oxc pass (minified, optionally mapped) — the
+/// claims, and so the URL space, never change.
 pub(crate) struct StaticStep {
     reject: crate::reject::Reject,
+    /// Set by the build pipeline when output rewriting is on; [`copy_static`] and the
+    /// dev server's claim checks leave it `None` (byte-copy, the default).
+    #[cfg(feature = "minify")]
+    pub(crate) rewrite_js: Option<crate::typescript::RewriteOptions>,
 }
 
 /// The shape of a static-copy candidate: not a `_` partial, not a processor source.
@@ -73,7 +79,11 @@ fn static_candidate(rel: &Path) -> Option<()> {
 
 impl StaticStep {
     pub(crate) fn new(reject: crate::reject::Reject) -> Self {
-        Self { reject }
+        Self {
+            reject,
+            #[cfg(feature = "minify")]
+            rewrite_js: None,
+        }
     }
 
     /// The standalone [`copy_static`] claim rule: [`static_candidate`] plus the reject
@@ -123,6 +133,23 @@ impl crate::build::steps::Step for StaticStep {
         dest: &Path,
     ) -> Result<crate::build::steps::Emitted> {
         let ext = rel.extension().and_then(|x| x.to_str()).unwrap_or("");
+        // Output rewriting routes a copied module through the shared oxc pass — one
+        // parse, minified codegen, optional map, imports off the final AST. A file
+        // that is not UTF-8 text falls back to the byte-copy below (with its usual
+        // warning); one that does not parse is a build error, since the rewrite has
+        // no bytes to ship for it.
+        #[cfg(feature = "minify")]
+        if let Some(rewrite) = self.rewrite_js {
+            if is_emitted_js(ext) {
+                if let Ok(source) = std::fs::read_to_string(src) {
+                    let out = crate::typescript::rewrite_js_capturing(&source, src, rel, rewrite)?;
+                    crate::typescript::write_js_output(dest, out.code, out.map.map(|m| m.json))?;
+                    return Ok(crate::build::steps::Emitted {
+                        imports: Some(out.imports),
+                    });
+                }
+            }
+        }
         let imports = if !is_emitted_js(ext) {
             None
         } else {

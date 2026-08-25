@@ -61,7 +61,9 @@ Options:
   -V, --version  Print version
 ```
 
-`build` is the **static counterpart of `dev`** — same source roots and processors, emitted to `--out` instead of served — and it vendors npm only when you pass `--package`/`--manifest`; `vendor` just fetches dependencies into `web_modules/`. Each compiler processor (typescript, scss, tera, minify, gzip) has a `--<name>` / `--no-<name>` toggle, and `--no-default-features` turns the default-on set (typescript, scss, tera) off so you re-enable them individually. Run `web-modules <command> --help` for flags.
+`build` is the **static counterpart of `dev`** — same source roots and processors, emitted to `--out` instead of served — and it vendors npm only when you pass `--package`/`--manifest`; `vendor` just fetches dependencies into `web_modules/`. Each compiler processor (typescript, scss, tera, minify, sourcemap, gzip) has a `--<name>` / `--no-<name>` toggle, and `--no-default-features` turns the default-on set (typescript, scss, tera) off so you re-enable them individually. Run `web-modules <command> --help` for flags.
+
+`--sourcemap` (off by default, so an embedded dist stays lean) emits a source map for every compiled TypeScript file, with the sources embedded (`sourcesContent`) since `.ts` files never ship: `build` writes a `<file>.map` sidecar linked by file name, `dev` serves the map inline as a `data:` URL. Vendored packages' own shipped `.map` files follow the same toggle, and flipping it re-vendors instead of reusing the differently-shaped cache. SCSS is not covered — grass emits no source maps.
 
 A dependency may be a registry range, an https `.tgz`, or a git reference (`github:owner/repo#ref`); name it under `web_modules.sourceDependencies` and its TypeScript is compiled into the layout its own `tsconfig.json` declares.
 Pin a git dependency to a commit rather than a branch: a commit is cached by name and costs no network once vendored, while a branch is re-downloaded every run so that moving it is noticed.
@@ -77,7 +79,7 @@ JavaScript rendered from a template joins the module graph and is validated like
 
 When two sources claim one output path — `index.html` next to `index.html.tera`, `app.js` next to `app.ts`, `style.css` next to `style.scss`, or the same relative path in two roots — `build` fails before writing anything and lists every conflict; `dev` warns on the console instead.
 `--skip-duplicates` opts into precedence: the earlier root wins, and within a root a Tera template beats a literal file beats a transformed sibling — the same rule in `build` and `dev`.
-Generated outputs are reserved regardless: a source claiming `importmap.json`, a path under `web_modules/`, or (with `--gzip`) the `.gz` sidecar of an emitted file fails the build even under `--skip-duplicates`.
+Generated outputs are reserved regardless: a source claiming `importmap.json`, a path under `web_modules/`, (with `--sourcemap`) the `.map` sidecar of a compiled file, or (with `--gzip`) the `.gz` sidecar of an emitted file fails the build even under `--skip-duplicates`.
 
 ### Output directory
 

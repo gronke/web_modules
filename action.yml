@@ -75,6 +75,10 @@ inputs:
     description: Minify the emitted JS (true/false).
     required: false
     default: "false"
+  sourcemap:
+    description: Emit source maps for compiled JS (true/false).
+    required: false
+    default: "false"
   gzip:
     description: Write .gz sidecars next to assets (true/false). The released binary includes the `compress` feature, so this works.
     required: false
@@ -258,6 +262,7 @@ runs:
         INPUT_OUT: ${{ inputs.out }}
         INPUT_MOUNT: ${{ inputs.mount }}
         INPUT_MINIFY: ${{ inputs.minify }}
+        INPUT_SOURCEMAP: ${{ inputs.sourcemap }}
         INPUT_GZIP: ${{ inputs.gzip }}
         INPUT_PACKAGES: ${{ inputs.packages }}
         INPUT_MANIFEST: ${{ inputs.manifest }}
@@ -294,6 +299,7 @@ runs:
         # Booleans → presence flags. `--minify` / `--gzip` are CLI-only now; the released binary
         # carries the `compress` feature, so `--gzip` works.
         case "$INPUT_MINIFY" in 1 | true | yes | on) args+=(--minify) ;; esac
+        case "$INPUT_SOURCEMAP" in 1 | true | yes | on) args+=(--sourcemap) ;; esac
         case "$INPUT_GZIP" in 1 | true | yes | on) args+=(--gzip) ;; esac
         # Each package spec becomes a repeatable `--package`.
         if [ -n "$INPUT_PACKAGES" ]; then

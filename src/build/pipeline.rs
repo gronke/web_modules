@@ -111,6 +111,14 @@ pub struct Processors {
     /// failing; the dev server stops warning about the conflicts it would otherwise
     /// report. A source-tree policy like `reject`, shared by `build` and `dev`.
     pub skip_duplicates: bool,
+    /// Emit source maps for compiled JavaScript (default off, so an embedded dist
+    /// stays lean). `build` writes a `<file>.map` sidecar beside each compiled file
+    /// and links it by file name; `dev` serves the map inline as a `data:` URL.
+    /// Sources ship inside the map (`sourcesContent`), so it works although `.ts`
+    /// files are excluded from output and serving. A compile-emission policy shared
+    /// by `build` and `dev`, like the rest of this struct; inert without the
+    /// `typescript` feature. SCSS is not covered — grass emits no source maps.
+    pub sourcemap: bool,
 }
 
 impl Default for Processors {
@@ -124,6 +132,7 @@ impl Default for Processors {
             reject: crate::reject::Reject::all(),
             symlinks: crate::SymlinkMode::default(),
             skip_duplicates: false,
+            sourcemap: false,
         }
     }
 }
@@ -158,8 +167,9 @@ impl Output {
 }
 
 /// Servable extensions the gzip pass writes `.gz` sidecars for — also the set the
-/// sidecar reservation guards, so the two can never disagree.
-const GZIP_EXTS: [&str; 5] = ["js", "css", "html", "json", "svg"];
+/// sidecar reservation guards, so the two can never disagree. `map` covers the
+/// source-map sidecars `--sourcemap` writes (large JSON, well worth compressing).
+const GZIP_EXTS: [&str; 6] = ["js", "css", "html", "json", "svg", "map"];
 
 /// Emit a `cargo:rerun-if-changed` line for a walked source path — the shared
 /// [`cargo_rerun_if_changed`](crate::static_files::cargo_rerun_if_changed), which is a no-op
@@ -202,8 +212,54 @@ pub fn build(opts: &BuildOptions<'_>) -> Result<()> {
 }
 
 /// The marker each build writes into its output root — how [`build`] recognizes a
-/// directory it may replace. Content: the crate version that produced it.
+/// directory it may replace. Content: the crate version that produced it, plus a
+/// `vendor-profile:` line when the vendored tree was shaped beyond plain extraction
+/// (today: shipped `.map` sidecars kept by the sourcemap toggle) — the line seeding
+/// compares so a differently-shaped tree re-vendors instead of posing as a cache.
 const OUT_MARKER: &str = ".web-modules-out";
+
+/// The vendor-profile line for the output marker: how this build shapes the vendored
+/// tree beyond extraction. Empty means pristine — the shape of every pre-profile
+/// output, so old markers compare correctly.
+fn vendor_profile(processors: &Processors) -> String {
+    if processors.sourcemap {
+        "vendor-profile: sourcemaps".to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// The previous output's vendor-profile line; empty for an absent, unreadable, or
+/// pre-profile marker (all of which mean a pristine vendored tree).
+fn marker_profile(out: &Path) -> String {
+    let Ok(content) = std::fs::read_to_string(out.join(OUT_MARKER)) else {
+        return String::new();
+    };
+    content
+        .lines()
+        .find(|line| line.starts_with("vendor-profile:"))
+        .map(str::to_string)
+        .unwrap_or_default()
+}
+
+/// Delete every `.map` sidecar under the vendored tree — the sweep behind the
+/// sourcemap toggle, since extraction keeps a package's shipped maps unconditionally.
+fn remove_vendor_maps(dir: &Path) -> Result<()> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    for entry in walkdir::WalkDir::new(dir)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        if entry.file_type().is_file()
+            && entry.path().extension().and_then(|e| e.to_str()) == Some("map")
+        {
+            std::fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
 
 /// The one vendored package that comes from the pipeline itself rather than
 /// `BuildOptions::specs`: the oxc transform-helper runtime.
@@ -296,10 +352,13 @@ fn seed_vendor_cache(previous: &Path, stage: &Path) -> Result<()> {
 fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<()> {
     // Marks the output as replaceable by the next build; written first so even an
     // interrupted stage is recognizable.
-    std::fs::write(
-        stage.join(OUT_MARKER),
-        concat!(env!("CARGO_PKG_VERSION"), "\n"),
-    )?;
+    let profile = vendor_profile(&opts.processors);
+    let mut marker = concat!(env!("CARGO_PKG_VERSION"), "\n").to_string();
+    if !profile.is_empty() {
+        marker.push_str(&profile);
+        marker.push('\n');
+    }
+    std::fs::write(stage.join(OUT_MARKER), marker)?;
 
     // TypeScript transform options — only when the `typescript` processor is compiled in. Without
     // it, `build` doesn't touch `.ts` files at all: they're skipped like any source file (never
@@ -308,6 +367,7 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     let transpile = crate::typescript::TranspileOptions {
         minify: opts.output.minify,
         decorators: opts.processors.ts_decorators,
+        source_map: opts.processors.sourcemap,
         ..Default::default()
     };
 
@@ -461,6 +521,21 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     // the deliberate exception, modelled the other way around: it is synthesised only
     // when no source claims that target, so a source page always wins.
     let winners = report.winners();
+    // The `.js` targets the TypeScript transform emits — with `--sourcemap`, each also
+    // produces a generated `<target>.map` sidecar (and, with gzip, that sidecar's `.gz`).
+    let transform_js: std::collections::BTreeSet<&Path> = winners
+        .iter()
+        .filter(|winner| {
+            winner.rank == steps::Rank::Transform
+                && winner.out_rel.extension().and_then(|e| e.to_str()) == Some("js")
+        })
+        .map(|winner| winner.out_rel.as_path())
+        .collect();
+    let map_emitting = |target: &Path| -> bool {
+        opts.processors.sourcemap
+            && target.extension().and_then(|e| e.to_str()) == Some("map")
+            && transform_js.contains(target.with_extension("").as_path())
+    };
     let violations: Vec<String> = winners
         .iter()
         .filter_map(|winner| {
@@ -471,6 +546,11 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
                 Some("the output marker".to_string())
             } else if out_rel.starts_with("web_modules") {
                 Some("the vendored modules directory (web_modules/)".to_string())
+            } else if map_emitting(out_rel) {
+                Some(format!(
+                    "the generated source map of {}",
+                    out_rel.with_extension("").display()
+                ))
             } else if cfg!(feature = "compress")
                 && opts.output.gzip
                 && out_rel.extension().and_then(|e| e.to_str()) == Some("gz")
@@ -482,7 +562,8 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
                     .is_some_and(|e| GZIP_EXTS.contains(&e));
                 let written = report.claims_target(&inner)
                     || inner == Path::new("importmap.json")
-                    || inner == Path::new("index.html");
+                    || inner == Path::new("index.html")
+                    || map_emitting(&inner);
                 (eligible && written).then(|| format!("the gzip sidecar of {}", inner.display()))
             } else {
                 None
@@ -507,7 +588,14 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
 
     // Warm the vendor cache from the previous output before vendoring resolves
     // against it; packages this build no longer requests are pruned again below.
-    seed_vendor_cache(&previous.join("web_modules"), &stage.join("web_modules"))?;
+    // Seeding requires the same vendor profile: a tree swept of its shipped `.map`
+    // sidecars cannot resurrect them, so it must not pose as a pristine extract for
+    // a build that wants them. A mismatch re-vendors — it only happens on a toggle.
+    if marker_profile(previous) == profile {
+        seed_vendor_cache(&previous.join("web_modules"), &stage.join("web_modules"))?;
+    } else if previous.join("web_modules").is_dir() {
+        eprintln!("web-modules: vendor cache not reused - the vendor profile changed");
+    }
 
     // Vendor only when there are packages to vendor. A non-vendored source tree (no
     // specs and no `--manifest`) just compiles statically — the same thing the dev
@@ -593,6 +681,14 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
         &[]
     };
     vendor::prune(&stage.join("web_modules"), opts.specs, extra_vendored)?;
+
+    // Shipped `.map` sidecars follow the sourcemap toggle: without it they are swept,
+    // so a lean build stays lean (in the gh-pages demo they outweigh the assets they
+    // describe). The vendor profile above keeps a swept tree from seeding a build
+    // that wants the maps back.
+    if !opts.processors.sourcemap {
+        remove_vendor_maps(&stage.join("web_modules"))?;
+    }
 
     // Emit the import map as a standalone artifact too, so test harnesses (and
     // es-module-shims / an external `<script type="importmap" src>`) can consume it.
@@ -725,6 +821,64 @@ mod tests {
     }
 
     #[test]
+    fn vendor_profile_follows_the_sourcemap_toggle() {
+        let mut p = Processors::default();
+        assert_eq!(vendor_profile(&p), "", "pristine by default");
+        p.sourcemap = true;
+        assert_eq!(vendor_profile(&p), "vendor-profile: sourcemaps");
+    }
+
+    #[test]
+    fn marker_profile_reads_previous_outputs() {
+        let dir = tempfile::tempdir().unwrap();
+        // An absent marker and a bare pre-profile marker both read as pristine.
+        assert_eq!(marker_profile(dir.path()), "");
+        std::fs::write(dir.path().join(OUT_MARKER), "0.7.0\n").unwrap();
+        assert_eq!(marker_profile(dir.path()), "");
+        std::fs::write(
+            dir.path().join(OUT_MARKER),
+            "0.8.0\nvendor-profile: sourcemaps\n",
+        )
+        .unwrap();
+        assert_eq!(marker_profile(dir.path()), "vendor-profile: sourcemaps");
+    }
+
+    #[test]
+    #[ignore = "network: downloads lit from the npm registry"]
+    fn shipped_vendor_maps_follow_the_sourcemap_toggle() {
+        // lit publishes `.js.map` sidecars, so the toggle is observable end to end:
+        // off sweeps them, flipping the toggle re-vendors instead of reusing the
+        // differently-shaped seed, and a same-profile rebuild reuses it.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.js"), "import { html } from \"lit\";\nhtml;\n").unwrap();
+        let out = dir.path().join("out");
+        let specs = [PackageSpec::npm("lit", "^3")];
+        let vendored_maps = |out: &Path| {
+            walkdir::WalkDir::new(out.join("web_modules"))
+                .into_iter()
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("map"))
+                .count()
+        };
+
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.specs = &specs;
+        build(&o).unwrap();
+        assert_eq!(vendored_maps(&out), 0, "off by default: swept");
+        assert_eq!(marker_profile(&out), "");
+
+        o.processors.sourcemap = true;
+        build(&o).unwrap();
+        assert!(vendored_maps(&out) > 0, "the toggle re-vendors, maps ship");
+        assert_eq!(marker_profile(&out), "vendor-profile: sourcemaps");
+
+        build(&o).unwrap();
+        assert!(vendored_maps(&out) > 0, "a same-profile rebuild keeps them");
+    }
+
+    #[test]
     #[ignore = "network: downloads @oxc-project/runtime from the npm registry"]
     fn vendor_transform_runtime_resolves_the_decorator_helper() {
         let dir = tempfile::tempdir().unwrap();
@@ -799,6 +953,103 @@ mod tests {
         assert!(!out.join("app.js").exists(), "the stale module is gone");
         assert!(!out.join("app.js.gz").exists(), "its sidecar too");
         assert!(out.join("b.txt").exists(), "the fresh file shipped");
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn build_writes_linked_source_map_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.ts"), "export const x: number = 1;\n").unwrap();
+        std::fs::write(src.join("b.js"), "export const copied = true;\n").unwrap();
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors.sourcemap = true;
+        build(&o).unwrap();
+
+        let js = std::fs::read_to_string(out.join("app.js")).unwrap();
+        assert!(
+            js.ends_with("//# sourceMappingURL=app.js.map\n"),
+            "linked by bare file name, so any mount/subpath works; got:\n{js}"
+        );
+        let map = std::fs::read_to_string(out.join("app.js.map")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&map).unwrap();
+        assert_eq!(
+            json["sources"],
+            serde_json::json!(["app.ts"]),
+            "root-relative label, no machine paths"
+        );
+        // A byte-copied file is its own source: no map.
+        assert!(!out.join("b.js.map").exists());
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn sourcemap_off_emits_no_map_files() {
+        // The embedded-dist contract: without the flag, zero `.map` files anywhere.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.ts"), "export const x: number = 1;\n").unwrap();
+        let out = dir.path().join("out");
+        build(&opts(std::slice::from_ref(&src), &out)).unwrap();
+        let maps: Vec<PathBuf> = walkdir::WalkDir::new(&out)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("map"))
+            .map(|e| e.path().to_path_buf())
+            .collect();
+        assert!(maps.is_empty(), "no maps unless asked: {maps:?}");
+    }
+
+    #[cfg(all(feature = "typescript", feature = "compress"))]
+    #[test]
+    fn source_map_sidecar_is_gzipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        // Enough repeated content that the sidecar's gzip actually lands (a `.gz` is
+        // only written when it comes out smaller).
+        let ts: String = (0..60)
+            .map(|i| format!("export const value_{i}: number = {i} * 1000;\n"))
+            .collect();
+        std::fs::write(src.join("app.ts"), ts).unwrap();
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors.sourcemap = true;
+        o.output = Output::new(false, true);
+        build(&o).unwrap();
+        assert!(out.join("app.js.map").exists());
+        assert!(
+            out.join("app.js.map.gz").exists(),
+            "the map sidecar is gzip-eligible"
+        );
+    }
+
+    #[cfg(feature = "typescript")]
+    #[test]
+    fn source_map_target_is_reserved() {
+        // A source shipping `app.js.map` beside `app.ts` would collide with the
+        // generated map — refused up front, like the gzip sidecars.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("web");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("app.ts"), "export const x: number = 1;\n").unwrap();
+        std::fs::write(src.join("app.js.map"), "{}").unwrap();
+        let out = dir.path().join("out");
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors.sourcemap = true;
+        let err = build(&o).unwrap_err().to_string();
+        assert!(
+            err.contains("reserved") && err.contains("source map") && err.contains("app.js.map"),
+            "got {err}"
+        );
+        // Without the flag the literal `.map` ships untouched — the user owns it.
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors.sourcemap = false;
+        build(&o).unwrap();
+        assert!(out.join("app.js.map").exists());
     }
 
     #[test]

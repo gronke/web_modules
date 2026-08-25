@@ -114,9 +114,15 @@ jobs:
             --manifest examples/gh-pages/package.json \
             --template examples/gh-pages/index.html.tera \
             --mount /web_modules \
-            --minify
+            --minify \
+            --sourcemap
           test -f "$out/index.html" && test -f "$out/app.js" && test -f "$out/styles.css"
           test -d "$out/web_modules"
+          # The sourcemap flag writes a linked sidecar beside each compiled file and
+          # keeps the vendored packages' own shipped maps.
+          test -f "$out/app.js.map"
+          grep -q 'sourceMappingURL=app.js.map' "$out/app.js"
+          find "$out/web_modules" -name '*.map' | grep -q .
           grep -q '<script type="importmap">' "$out/index.html"
           # The config manifest and the raw sources must never reach the output.
           test ! -e "$out/package.json"

@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use oxc_allocator::Allocator;
-use oxc_codegen::{Codegen, CodegenOptions};
+use oxc_codegen::Codegen;
 use oxc_minifier::{Minifier, MinifierOptions};
 use oxc_parser::Parser;
 use oxc_span::SourceType;
@@ -41,10 +41,7 @@ pub fn minify_str(source: &str, path: &Path) -> Result<String> {
     let ret = Minifier::new(MinifierOptions::default()).minify(&allocator, &mut program);
 
     let code = Codegen::new()
-        .with_options(CodegenOptions {
-            minify: true,
-            ..CodegenOptions::default()
-        })
+        .with_options(crate::typescript::codegen_options(true, None))
         .with_scoping(ret.scoping)
         .build(&program)
         .code;

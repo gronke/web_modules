@@ -5,6 +5,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 Per-release notes are also published on each [GitHub Release](https://github.com/gronke/web_modules/releases) (sourced from the annotated tag) and on [crates.io](https://crates.io/crates/web_modules).
 
+## [Unreleased]
+
+### Added
+
+- `--sourcemap` emits source maps for compiled TypeScript, in `build` and `dev` alike (package.json key `sourcemap`; builders `Build::sourcemap` / `Dev::sourcemap`).
+  `build` writes a `<file>.map` sidecar beside each compiled file and links it by file name; `dev` appends the map inline as a `data:` URL, so no extra route or cache entry exists.
+  Sources ship inside the map (`sourcesContent`), so it works although `.ts` files are excluded from the output; with `--gzip` the sidecar is compressed too, and its path is reserved like the other generated files.
+  Off by default, so an embedded dist (`include_dir!`) stays lean.
+  SCSS is not covered — grass emits no source maps.
+- With `--sourcemap`, vendoring also keeps a package's shipped `.js.map`/`.css.map` sidecars beside the assets they describe; the asset filter always dropped them, forcing consumers who wanted them into a custom extract filter.
+  Without the flag they are swept — in the gh-pages demo they outweigh the assets they describe — and the choice is recorded as a `vendor-profile:` line in the output marker, so a rebuild with the toggle flipped re-vendors instead of reusing the differently-shaped cache.
+
 ## [0.7.0] - 2026-08-21
 
 The crate gains a tarball dependency source (below); the rest of this release carries the release pipeline and the maintainer documentation.

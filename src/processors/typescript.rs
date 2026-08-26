@@ -142,12 +142,14 @@ crate::cli_config::feature_args!(
     crate::cli_config::NoConfig
 );
 
-/// How already-emitted JavaScript is rewritten at emit time — a copied `.js`/`.mjs`,
-/// a Tera-rendered one, a vendored file: the same single parse→codegen pass the
-/// TypeScript step compiles through, minus the transform. Derived from the build's
-/// output policy by [`Output::js_rewrite`](crate::build::Output).
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct RewriteOptions {
+/// How already-emitted JavaScript is rewritten: the same single
+/// parse→codegen pass the TypeScript step compiles through, minus the
+/// transform. The build derives it from the output policy via
+/// [`Output::js_rewrite`](crate::build::Output); consumers use it through
+/// [`rewrite_str`].
+#[derive(Clone, Copy, Debug, Default)]
+#[non_exhaustive]
+pub struct RewriteOptions {
     /// Compress + mangle via `oxc_minifier` (whitespace-only stripping without the
     /// `minify` feature), then minified codegen.
     pub minify: bool,
@@ -272,6 +274,21 @@ pub fn compile_str(source: &str, path: &Path) -> Result<String> {
 /// [`compile_directory_with`] write a `<file>.map` sidecar instead.
 pub fn compile_str_with(source: &str, path: &Path, options: &TranspileOptions) -> Result<String> {
     let out = compile_str_capturing(source, path, options, None, None)?;
+    let mut code = out.code;
+    if let Some(map) = out.map {
+        append_source_map_comment(&mut code, &map.data_url);
+    }
+    Ok(code)
+}
+
+/// Rewrite plain JavaScript under a [`RewriteOptions`] policy, without the
+/// oxc `Transformer` (unlike [`compile_str_with`], whose Lit-preset
+/// transform may alter hand-written JS semantics). A requested source map is
+/// appended inline as a `data:` URL; [`Comments::Collect`] keeps legal
+/// comments inline. `path` informs source type and diagnostics; it is not
+/// read from disk.
+pub fn rewrite_str(source: &str, path: &Path, options: RewriteOptions) -> Result<String> {
+    let out = rewrite_js_capturing(source, path, path, options, None)?;
     let mut code = out.code;
     if let Some(map) = out.map {
         append_source_map_comment(&mut code, &map.data_url);
@@ -677,6 +694,63 @@ fn render_errors<E: std::fmt::Debug>(stage: &str, path: &Path, errors: &[E]) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rewrite_str_strips_comments_but_keeps_legal_inline() {
+        let src = "// build header\n/*! (c) legal */\nexport const answer = 40 + 2;\n";
+        let options = RewriteOptions {
+            minify: true,
+            source_map: false,
+            comments: Comments::Strip,
+        };
+        let js = rewrite_str(src, Path::new("gen.js"), options).unwrap();
+        assert!(!js.contains("build header"), "normal comment stripped");
+        assert!(js.contains("legal"), "legal comment stays inline");
+        assert!(!js.contains("sourceMappingURL"), "no map unless asked");
+    }
+
+    #[test]
+    fn rewrite_str_never_runs_the_transformer() {
+        // The Lit-preset transform would rewrite the static class field.
+        let src = "export class A { static properties = { x: {} }; #secret = 1; }\n";
+        let js = rewrite_str(src, Path::new("plain.js"), RewriteOptions::default()).unwrap();
+        assert!(
+            js.contains("static properties = "),
+            "class field survives untransformed; got:\n{js}"
+        );
+        assert!(js.contains("#secret"), "private field survives; got:\n{js}");
+    }
+
+    #[test]
+    fn rewrite_str_minify_and_inline_map_are_one_pass() {
+        let src = "export const value = 1 + 1;\n";
+        let options = RewriteOptions {
+            minify: true,
+            source_map: true,
+            comments: Comments::Strip,
+        };
+        let js = rewrite_str(src, Path::new("gen.js"), options).unwrap();
+
+        // The wrapper must append exactly the capturing pass's data: URL.
+        let captured =
+            rewrite_js_capturing(src, Path::new("gen.js"), Path::new("gen.js"), options, None)
+                .unwrap();
+        let map = captured.map.expect("map requested");
+        assert!(
+            js.ends_with(&format!("//# sourceMappingURL={}\n", map.data_url))
+                || js.ends_with(&format!("//# sourceMappingURL={}", map.data_url)),
+            "inline footer carries the capturing pass's data: URL"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&map.json).unwrap();
+        assert_eq!(
+            parsed["sources"][0], "gen.js",
+            "the map points at the input"
+        );
+        assert_eq!(
+            parsed["sourcesContent"][0], src,
+            "sources ship inside the map"
+        );
+    }
 
     #[test]
     fn strips_types_keeps_used_bare_imports() {

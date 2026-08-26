@@ -19,6 +19,8 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Added
 
+- `typescript::rewrite_str` and a public `RewriteOptions`: apply an output policy (minify, comments, inline source map) to plain JavaScript through the transformer-free rewrite pass the build already uses internally.
+  Consumers no longer route generated or copied JS through `compile_str_with`, whose Lit-preset transform may alter hand-written semantics.
 - `examples/bundle`: a pure-frontend demo of `--bundle`, configured from the `web_modules` block in `package.json`.
 - The `embedded` example bakes source maps and collects legal comments; the gh-pages CI dogfood covers `--comments collect` and `--no-minify-web-modules`.
 - `--bundle` and `--bundle-entry <path>` (package.json `"bundle": {"entries": [...]}`, builder `Build::bundle` / `Build::bundle_entry`, action inputs `bundle`/`bundle-entries`) fold the built tree per entry point, inside the atomic build.

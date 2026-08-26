@@ -1074,7 +1074,7 @@ fn bundle_stage(
     // Orphan guard: with the import map gone, a surviving module whose bare imports
     // the map used to resolve is broken in the shipped tree — a worker script or a
     // second page's module needs its own entry, so its imports inline too.
-    let emitted: std::collections::BTreeSet<PathBuf> = out.emitted.iter().cloned().collect();
+    let emitted: std::collections::BTreeSet<PathBuf> = out.emitted_js.iter().cloned().collect();
     let unresolved = graph.unresolved(&crate::importmap::Importmap::new());
     let orphaned: Vec<String> = unresolved
         .iter()

@@ -126,6 +126,50 @@ fn run_split(root: &Path, out: &Path) -> BTreeMap<String, String> {
 }
 
 #[test]
+fn emitted_report_is_typed_by_kind() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("web");
+    write_fixture(&root);
+    let out = tmp.path().join("out");
+    let entries = [PathBuf::from("elements/app/a.js")];
+    let map = importmap();
+    let report = bundle_split(&SplitBundleOptions {
+        entries: &entries,
+        root: &root,
+        out_dir: &out,
+        importmap: Some(&map),
+        external: &["lit".into(), "web_modules/".into()],
+        chunk_filenames: "chunks/[name]-[hash].js",
+        minify: false,
+        sourcemap: true,
+        comments: web_modules::Comments::Keep,
+    })
+    .unwrap();
+
+    assert!(!report.emitted_js.is_empty());
+    assert!(
+        !report.emitted_maps.is_empty(),
+        "sourcemap: true emits maps"
+    );
+    assert!(report
+        .emitted_js
+        .iter()
+        .all(|p| !p.to_string_lossy().ends_with(".map")));
+    assert!(report
+        .emitted_maps
+        .iter()
+        .all(|p| p.to_string_lossy().ends_with(".map")));
+    let mut union: Vec<_> = report
+        .emitted_js
+        .iter()
+        .chain(&report.emitted_maps)
+        .cloned()
+        .collect();
+    union.sort();
+    assert_eq!(union, report.emitted, "emitted stays the union");
+}
+
+#[test]
 fn entries_keep_their_urls_and_share_chunks() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().join("dist");

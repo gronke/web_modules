@@ -209,10 +209,16 @@ pub struct SplitBundleOutput {
     /// External modules never appear. Callers that bundle a served tree in place can prune
     /// exactly these files (minus the entries) — nothing else — from the original layout.
     pub bundled_modules: Vec<PathBuf>,
-    /// `out_dir`-relative paths of everything rolldown wrote: entry facades, shared
-    /// chunks, and (with [`sourcemap`](SplitBundleOptions::sourcemap)) their `.map`
-    /// sidecars. What an in-place caller must exempt from its own post-processing.
+    /// `out_dir`-relative paths of everything rolldown wrote: the union of
+    /// [`emitted_js`](Self::emitted_js) and [`emitted_maps`](Self::emitted_maps).
+    /// Callers that read file contents want the typed lists — a `.map`'s
+    /// `sourcesContent` embeds module sources and poisons text scans.
     pub emitted: Vec<PathBuf>,
+    /// `out_dir`-relative paths of the emitted JS: entry facades and shared chunks.
+    pub emitted_js: Vec<PathBuf>,
+    /// `out_dir`-relative paths of the emitted `.map` sidecars (empty without
+    /// [`sourcemap`](SplitBundleOptions::sourcemap)).
+    pub emitted_maps: Vec<PathBuf>,
 }
 
 /// Feature-specific `--bundle-*` flags, paired with the `--bundle` / `--no-bundle`
@@ -474,14 +480,22 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
     // Report which source files got folded (chunk module ids are absolute filesystem
     // paths for file modules; externals never join a chunk) and everything written.
     let mut bundled_modules = Vec::new();
-    let mut emitted = Vec::new();
+    let mut emitted_js = Vec::new();
+    let mut emitted_maps = Vec::new();
+    let mut classify = |filename: String| {
+        if filename.ends_with(".map") {
+            emitted_maps.push(PathBuf::from(filename));
+        } else {
+            emitted_js.push(PathBuf::from(filename));
+        }
+    };
     for asset in &output.assets {
         match asset {
             rolldown_common::Output::Chunk(chunk) => {
-                emitted.push(PathBuf::from(chunk.filename.to_string()));
+                classify(chunk.filename.to_string());
                 if let Some(map) = &chunk.map {
                     let _ = map; // rolldown writes `<filename>.map` beside the chunk.
-                    emitted.push(PathBuf::from(format!("{}.map", chunk.filename)));
+                    classify(format!("{}.map", chunk.filename));
                 }
                 for id in &chunk.module_ids {
                     let path = PathBuf::from(id.to_string());
@@ -491,16 +505,22 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
                 }
             }
             rolldown_common::Output::Asset(asset) => {
-                emitted.push(PathBuf::from(asset.filename.to_string()));
+                classify(asset.filename.to_string());
             }
         }
     }
     bundled_modules.sort();
     bundled_modules.dedup();
+    emitted_js.sort();
+    emitted_js.dedup();
+    emitted_maps.sort();
+    emitted_maps.dedup();
+    let mut emitted: Vec<PathBuf> = emitted_js.iter().chain(&emitted_maps).cloned().collect();
     emitted.sort();
-    emitted.dedup();
     Ok(SplitBundleOutput {
         bundled_modules,
         emitted,
+        emitted_js,
+        emitted_maps,
     })
 }

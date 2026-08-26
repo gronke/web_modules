@@ -119,6 +119,9 @@ pub struct PackageSpec {
     /// Compile the package's TypeScript after extraction, so what lands in the
     /// vendor tree is what a browser loads. Set by [`PackageSpec::as_source`].
     compile: bool,
+    /// Names the keep-filter's shape in the extraction cache key. Set by
+    /// [`PackageSpec::keep_tagged`].
+    extract_tag: Option<String>,
 }
 
 impl PackageSpec {
@@ -136,6 +139,7 @@ impl PackageSpec {
             extract: Extract::BrowserAssets,
             imports: Imports::Auto,
             compile: false,
+            extract_tag: None,
         }
     }
 
@@ -157,6 +161,7 @@ impl PackageSpec {
             extract: Extract::BrowserAssets,
             imports: Imports::None,
             compile: false,
+            extract_tag: None,
         }
     }
 
@@ -177,6 +182,7 @@ impl PackageSpec {
             extract: Extract::BrowserAssets,
             imports: Imports::Auto,
             compile: false,
+            extract_tag: None,
         }
     }
 
@@ -212,9 +218,21 @@ impl PackageSpec {
     }
 
     /// Shorthand for `.extract(Extract::Filter(keep))`.
+    ///
+    /// A `fn` pointer has no stable identity, so a tagless filter reuses a
+    /// cached tree even after the filter's shape changed; use
+    /// [`keep_tagged`](Self::keep_tagged) to make a filter change re-extract.
     pub fn keep(mut self, keep: fn(&str) -> Option<String>) -> Self {
         self.extract = Extract::Filter(keep);
         self
+    }
+
+    /// Like [`keep`](Self::keep), with a tag naming the filter's shape in the
+    /// extraction cache key. Changing the tag re-extracts the package; a tree
+    /// cached without a tag re-extracts once on adoption.
+    pub fn keep_tagged(mut self, tag: impl Into<String>, keep: fn(&str) -> Option<String>) -> Self {
+        self.extract_tag = Some(tag.into());
+        self.keep(keep)
     }
 
     /// Take the package's **sources** and compile them, for a package that publishes
@@ -1161,6 +1179,15 @@ fn compiled_key(key: String, compile: bool) -> String {
     }
 }
 
+/// Fold the keep-filter tag into the cache key, like [`compiled_key`] folds
+/// the compile schema.
+fn tagged_key(key: String, extract_tag: Option<&str>) -> String {
+    match extract_tag {
+        Some(tag) => format!("{key}+keep:{tag}"),
+        None => key,
+    }
+}
+
 /// Whether a git reference is a commit id, and so cannot move.
 ///
 /// A branch or tag can be repointed at any time, which is what makes keying a cache on
@@ -1258,7 +1285,8 @@ fn vendor_inner(
 
         // A known key can settle freshness without the network. A mutable reference
         // cannot, so it always fetches and then compares the archive's contents.
-        let keyed = |key: String| compiled_key(key, spec.compile);
+        let keyed =
+            |key: String| tagged_key(compiled_key(key, spec.compile), spec.extract_tag.as_deref());
         let cache_key = cache_key.map(keyed);
         let fresh = |key: &Option<String>| {
             key.as_deref()
@@ -1923,6 +1951,54 @@ mod tests {
             !is_up_to_date(&marker, "5.3.8", &dest, &Extract::Full),
             "a missing destination must invalidate the cache even when the marker matches",
         );
+    }
+
+    #[test]
+    fn keep_tag_joins_the_cache_key() {
+        fn only_js(rel: &str) -> Option<String> {
+            rel.ends_with(".js").then(|| rel.to_string())
+        }
+        let tagless = PackageSpec::npm("lit", "^3").keep(only_js);
+        let tagged = PackageSpec::npm("lit", "^3").keep_tagged("js", only_js);
+        assert_eq!(
+            tagged_key("3.1.0".into(), tagless.extract_tag.as_deref()),
+            "3.1.0"
+        );
+        assert_eq!(
+            tagged_key("3.1.0".into(), tagged.extract_tag.as_deref()),
+            "3.1.0+keep:js"
+        );
+    }
+
+    #[test]
+    fn keep_tag_change_invalidates_the_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let marker = tmp.path().join(".lit.version");
+        let dest = tmp.path().join("lit");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("index.js"), "export {};").unwrap();
+
+        let extract = Extract::BrowserAssets;
+        cache::write_marker(&marker, &tagged_key("3.1.0".into(), Some("js+maps"))).unwrap();
+        assert!(is_up_to_date(
+            &marker,
+            &tagged_key("3.1.0".into(), Some("js+maps")),
+            &dest,
+            &extract
+        ));
+        // A different tag re-extracts; so does dropping or adopting one.
+        assert!(!is_up_to_date(
+            &marker,
+            &tagged_key("3.1.0".into(), Some("js")),
+            &dest,
+            &extract
+        ));
+        assert!(!is_up_to_date(
+            &marker,
+            &tagged_key("3.1.0".into(), None),
+            &dest,
+            &extract
+        ));
     }
 
     #[test]

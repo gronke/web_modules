@@ -21,6 +21,8 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 - `typescript::rewrite_str` and a public `RewriteOptions`: apply an output policy (minify, comments, inline source map) to plain JavaScript through the transformer-free rewrite pass the build already uses internally.
   Consumers no longer route generated or copied JS through `compile_str_with`, whose Lit-preset transform may alter hand-written semantics.
+- `PackageSpec::keep_tagged`: a keep-filter with a tag that joins the extraction cache key.
+  A `fn` pointer has no stable identity, so a tagless filter reuses a cached tree even after the filter's shape changed; the tag makes a filter change re-extract, and a tree cached without one re-extracts once on adoption.
 - `examples/bundle`: a pure-frontend demo of `--bundle`, configured from the `web_modules` block in `package.json`.
 - The `embedded` example bakes source maps and collects legal comments; the gh-pages CI dogfood covers `--comments collect` and `--no-minify-web-modules`.
 - `--bundle` and `--bundle-entry <path>` (package.json `"bundle": {"entries": [...]}`, builder `Build::bundle` / `Build::bundle_entry`, action inputs `bundle`/`bundle-entries`) fold the built tree per entry point, inside the atomic build.

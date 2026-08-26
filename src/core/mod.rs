@@ -8,6 +8,7 @@
 //! source) and the build/serve toolchain (which delivers the result): everything here
 //! vendors and composes the inputs.
 
+pub mod env;
 pub mod importmap;
 pub mod module_graph;
 pub mod mount;

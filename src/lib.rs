@@ -42,7 +42,7 @@ pub use error::{Error, Result};
 mod core;
 pub use core::mount::Mount;
 pub use core::symlinks::SymlinkMode;
-pub use core::{importmap, mount, reject, static_files, symlinks, tsconfig, vendor, walk};
+pub use core::{env, importmap, mount, reject, static_files, symlinks, tsconfig, vendor, walk};
 // Crate-internal for now: the graph's overwrite/ownership semantics are still
 // settling, so it is not part of the public API yet.
 pub(crate) use core::module_graph;

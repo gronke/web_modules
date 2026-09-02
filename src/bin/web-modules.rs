@@ -169,6 +169,9 @@ struct CompilerConfig {
     #[cfg(feature = "compress")]
     #[command(flatten)]
     gzip: web_modules::compress::GzipArgs,
+    #[cfg(feature = "dts")]
+    #[command(flatten)]
+    dts: web_modules::dts::DtsArgs,
     /// Reject preset selection — a comma list with `all` / `none` and `!name`, e.g. `all`
     /// (default), `all,!config`, `source,hidden,secrets`. Keeps matching paths out of output / serving.
     #[arg(long = "reject-preset", default_value = "all", value_name = "PRESETS")]
@@ -226,6 +229,7 @@ struct ResolvedCompiler {
     symlinks: web_modules::SymlinkMode,
     skip_duplicates: bool,
     external: Vec<String>,
+    dts: bool,
 }
 
 impl CompilerConfig {
@@ -280,6 +284,10 @@ impl CompilerConfig {
                 v.extend(cfg.external.iter().cloned());
                 v
             },
+            #[cfg(feature = "dts")]
+            dts: self.dts.enabled_with(cfg.dts, false, nd),
+            #[cfg(not(feature = "dts"))]
+            dts: false,
         }
     }
 
@@ -311,6 +319,7 @@ impl ResolvedCompiler {
         p.bundle = self.bundle;
         p.bundle_entries = self.bundle_entries;
         p.external = self.external;
+        p.dts = self.dts;
         p
     }
 }
@@ -417,6 +426,7 @@ struct PkgConfig {
     tera: Option<bool>,
     scss_load_paths: Vec<PathBuf>,
     external: Vec<String>,
+    dts: Option<bool>,
 }
 
 /// Load the `web_modules` config block from `package.json` in the current directory.
@@ -567,6 +577,7 @@ fn parse_block(block: &Value) -> Res<PkgConfig> {
             }
             "tera" => cfg.tera = Some(processor_enabled(val, "web_modules.tera")?),
             "external" => cfg.external = string_array(val, "web_modules.external")?,
+            "dts" => cfg.dts = Some(processor_enabled(val, "web_modules.dts")?),
             // Owned elsewhere (vendoring / mount) — read on the package.json content, not here.
             "webDependencies" | "root" => {}
             _ => {}

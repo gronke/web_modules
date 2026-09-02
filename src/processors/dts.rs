@@ -33,6 +33,18 @@ pub fn emit_dts(source: &str, path: &Path) -> Result<String> {
     Ok(Codegen::new().build(&ret.program).code)
 }
 
+// `--dts` / `--no-dts` (off by default): emit a `.d.ts` beside each compiled module.
+// No flags of its own beyond the toggle, so it uses the `NoConfig` placeholder.
+#[cfg(feature = "cli")]
+crate::cli_config::feature_args!(
+    DtsArgs,
+    dts,
+    "dts",
+    no_dts,
+    "no-dts",
+    crate::cli_config::NoConfig
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

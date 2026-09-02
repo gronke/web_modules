@@ -20,6 +20,8 @@ Per-release notes are also published on each [GitHub Release](https://github.com
   Every file goes through one oxc parse→codegen pass: a first-party module that fails to parse is now a build error (it was copied with a warning), and its recorded imports come from the final AST, so an import removed by dead-code elimination no longer counts against the import map.
   Vendored files that fail to parse are left as shipped, aloud.
   The vendor shaping joins the `vendor-profile:` marker line, so a toggled rebuild re-vendors instead of reusing the differently-shaped cache.
+- The `full` feature now includes `bundle` (the rolldown CommonJS→ESM path), so `--features full` builds exactly what the released `web-modules` binary ships, and the action's from-source install matches the download.
+  Library consumers on `full` now compile the rolldown / second-oxc tree; the new `lean` feature is the previous `full` set, and docs.rs and the MSRV check use it.
 
 ### Added
 
@@ -41,7 +43,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - `--bundle` and `--bundle-entry <path>` (package.json `"bundle": {"entries": [...]}`, builder `Build::bundle` / `Build::bundle_entry`, action inputs `bundle`/`bundle-entries`) fold the built tree per entry point, inside the atomic build.
   Each entry keeps its exact URL with its imports inlined, shared and dynamically-imported code lands in content-hashed `chunks/`, and `importmap.json` + `web_modules/` drop out of the output; minify, comments and sourcemap apply through rolldown's own single pass.
   A surviving module whose bare imports relied on the removed import map fails the build by name — a worker script or second page needs its own entry.
-  The released binary now carries the `bundle` feature; `full` still excludes it for library consumers.
+  The released binary now carries the `bundle` feature, and so does `full` (see Changed).
   Bundled builds re-vendor from the network each time, since the vendored tree is consumed rather than cached.
 - `SplitBundleOptions` gained `sourcemap` and `comments` fields and `SplitBundleOutput` gained `emitted` and became `#[non_exhaustive]` — **Breaking** for struct-literal construction of either.
   `tests/bundle_split.rs` now also runs in CI; it never did.

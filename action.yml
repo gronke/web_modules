@@ -157,7 +157,9 @@ runs:
 
         if [ "$FROM_SOURCE" = "true" ]; then
           # Build from the action's own checked-out source ($GITHUB_ACTION_PATH). `--locked` uses the
-          # committed Cargo.lock; `full` = the complete lean toolchain (cli + env + compress + …).
+          # committed Cargo.lock. `full` is the feature set the released binary is built with
+          # (release.yml builds the same), so a from-source install matches the download,
+          # `bundle: true` included.
           if ! command -v cargo >/dev/null 2>&1; then
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
               | sh -s -- -y --profile minimal --default-toolchain stable

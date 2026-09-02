@@ -32,7 +32,7 @@ binary. (Note the `bootstrap` directory's crate is `bootstrap-scss`.)
 `bundle` and `gh-pages` are **pure frontend** (no crate to run); the CLI builds them:
 
 ```sh
-cd examples/bundle && cargo run --features "full bundle" --bin web-modules -- build
+cd examples/bundle && cargo run --features full --bin web-modules -- build
 ```
 
 `tauri` is **standalone** — excluded from the workspace (its `src-tauri` crate is its own

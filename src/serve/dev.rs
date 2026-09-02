@@ -1,6 +1,8 @@
 //! A buildless **dev server**: serve a frontend straight from source, compiling
-//! TypeScript and SCSS on the fly per request (mtime-cached) and live-reloading the
-//! browser when files change.
+//! TypeScript and SCSS on the fly per request (mtime-cached, with a compiled
+//! stylesheet revalidated against every partial it read) and telling the browser what
+//! changed: stylesheets hot-swap in place, everything else reloads the page (see
+//! [`live`](super::live)).
 //!
 //! Sources are [`Mount`]s, each a URL prefix + a source dir; the default is one at
 //! `/`. Resolution is **dir-observation-order-dominant**: most-specific prefix first,
@@ -13,7 +15,7 @@
 //! fallback (a baked `include_dir!` tree) supplies whatever the source dirs don't:
 //! vendored `web_modules/`, a baked `index.html` — and its baked `importmap.json` is
 //! the import map live `.tera` renders receive. The watcher watches every source dir
-//! identically and reloads on any change.
+//! identically; the reload policy is [`ReloadMode`].
 //!
 //! Enable the `dev` feature.
 
@@ -30,8 +32,8 @@ use axum::{
     Router,
 };
 use include_dir::Dir;
-use tower_livereload::LiveReloadLayer;
 
+use super::live::{self, LiveReload, ReloadMode};
 use super::serving::{
     content_type, has_source_extension, has_traversal, is_source_file, relative_under,
     resolve_file, Resolved,
@@ -41,7 +43,17 @@ use crate::build::Processors;
 use crate::builder_shared::source_builder_methods;
 use crate::mount::Mount;
 
-type Cache = Mutex<HashMap<PathBuf, (SystemTime, Vec<u8>)>>;
+/// A compiled target, valid while the entry file and every dependency keep their mtimes.
+struct CacheEntry {
+    mtime: SystemTime,
+    /// The partials a stylesheet pulled in (empty for TS/Tera) with their mtimes at compile
+    /// time; the cache was keyed on the entry alone once, and an edited partial served
+    /// stale CSS until the entry itself was touched.
+    deps: Vec<(PathBuf, SystemTime)>,
+    bytes: Vec<u8>,
+}
+
+type Cache = Mutex<HashMap<PathBuf, CacheEntry>>;
 
 /// Which processors the dev server applies — **unified with the build pipeline's
 /// [`Processors`](crate::build::Processors)**, so `dev` and `build` configure the same set
@@ -52,7 +64,8 @@ type Cache = Mutex<HashMap<PathBuf, (SystemTime, Vec<u8>)>>;
 pub type DevConfig = Processors;
 
 /// Fluent builder for the dev server: compile TS/SCSS on the fly, render `*.tera`, watch
-/// the source roots and live-reload the browser.
+/// the source roots and live-reload the browser (stylesheets hot-swap; the policy for the
+/// rest is [`live_reload`](Self::live_reload)).
 ///
 /// ```no_run
 /// use web_modules::Dev;
@@ -71,6 +84,7 @@ pub type DevConfig = Processors;
 pub struct Dev {
     roots: Vec<PathBuf>,
     processors: Processors,
+    live_reload: ReloadMode,
 }
 
 #[cfg(feature = "builder")]
@@ -83,16 +97,24 @@ impl Dev {
         Self::default()
     }
 
+    /// What the browser does with non-stylesheet changes: [`ReloadMode::Full`] (the
+    /// default) reloads the page, [`ReloadMode::Css`] only hot-swaps stylesheets and logs
+    /// the rest, [`ReloadMode::Off`] serves no live routes at all.
+    pub fn live_reload(mut self, mode: ReloadMode) -> Self {
+        self.live_reload = mode;
+        self
+    }
+
     /// The dev [`Router`] (compile-on-the-fly, watch, live-reload) over the roots, each
     /// mounted at `/` and resolved first-match-wins. Compose it into your own axum app, or
     /// use [`serve`](Self::serve) to bind and run.
     pub fn router(self) -> Router {
-        dev_router_with(self.roots, self.processors)
+        dev_router_with_live(self.roots, self.processors, self.live_reload)
     }
 
     /// Bind `addr` and serve [`router`](Self::router) until the process stops.
     pub async fn serve(self, addr: SocketAddr) -> std::io::Result<()> {
-        serve_with(self.roots, addr, self.processors).await
+        serve_with_live(self.roots, addr, self.processors, self.live_reload).await
     }
 }
 
@@ -108,6 +130,9 @@ struct DevState {
     importmap: Arc<crate::importmap::Importmap>,
     /// Which processors to apply (and how), shared with the bin's `--<name>` toggles.
     config: Arc<DevConfig>,
+    /// The change hub: compiled stylesheets register their partials here, and the watcher
+    /// publishes what an edit means for the browser.
+    live: LiveReload,
 }
 
 enum Kind {
@@ -125,9 +150,20 @@ pub fn dev_router(roots: Vec<PathBuf>) -> Router {
 }
 
 /// Like [`dev_router`], but with an explicit [`DevConfig`] (which processors run, and
-/// how) — the toggle-aware entry the `web-modules dev` command uses.
+/// how).
 pub fn dev_router_with(roots: Vec<PathBuf>, config: DevConfig) -> Router {
-    build_router(roots.into_iter().map(Mount::root).collect(), None, config)
+    dev_router_with_live(roots, config, ReloadMode::default())
+}
+
+/// Like [`dev_router_with`], choosing the live-reload policy as well; the entry the
+/// `web-modules dev` command uses (`--live-reload [css|full]`, `--no-live-reload`).
+pub fn dev_router_with_live(roots: Vec<PathBuf>, config: DevConfig, live: ReloadMode) -> Router {
+    build_router_live(
+        roots.into_iter().map(Mount::root).collect(),
+        None,
+        config,
+        live,
+    )
 }
 
 /// Like [`dev_router`], but unmatched requests fall back to a baked `include_dir!`
@@ -160,14 +196,30 @@ pub(crate) fn build_router(
     fallback: Option<&'static Dir<'static>>,
     config: DevConfig,
 ) -> Router {
+    build_router_live(mounts, fallback, config, ReloadMode::default())
+}
+
+/// [`build_router`] with the live-reload policy: `Off` serves the sources alone; otherwise
+/// the watcher runs, `/_web_modules/live/{events,live.js}` are mounted and every HTML
+/// response gets the client injected before `</body>`.
+pub(crate) fn build_router_live(
+    mounts: Vec<Mount>,
+    fallback: Option<&'static Dir<'static>>,
+    config: DevConfig,
+    mode: ReloadMode,
+) -> Router {
     // The same preflight the build runs, warn-only: a contested target is served by
     // its winner and an escaping symlink is refused per-request, but both are worth
     // a line on the console.
     for warning in preflight_warnings(&mounts, &config) {
         eprintln!("{warning}");
     }
-    let livereload = LiveReloadLayer::new();
-    spawn_watcher(mounts.clone(), livereload.reloader());
+    let live = if mode == ReloadMode::Off {
+        LiveReload::new(&mounts)
+    } else {
+        LiveReload::watch(mounts.clone())
+    }
+    .with_mode(mode);
     let state = DevState {
         mounts: Arc::new(mounts),
         cache: Arc::new(Mutex::new(HashMap::new())),
@@ -175,11 +227,16 @@ pub(crate) fn build_router(
         importmap: Arc::new(fallback_importmap(fallback)),
         fallback,
         config: Arc::new(config),
+        live: live.clone(),
     };
-    Router::new()
-        .fallback(serve_asset)
-        .with_state(state)
-        .layer(livereload)
+    let router = Router::new().fallback(serve_asset).with_state(state);
+    if mode == ReloadMode::Off {
+        return router;
+    }
+    live::inject_script(
+        router.nest(live::DEFAULT_PREFIX, live.router()),
+        live::DEFAULT_PREFIX,
+    )
 }
 
 /// The import map live `.tera` renders receive: the embedded fallback's baked
@@ -298,7 +355,17 @@ pub async fn serve_with(
     addr: SocketAddr,
     config: DevConfig,
 ) -> std::io::Result<()> {
-    let app = dev_router_with(roots, config);
+    serve_with_live(roots, addr, config, ReloadMode::default()).await
+}
+
+/// Like [`serve_with`], choosing the live-reload policy as well.
+pub async fn serve_with_live(
+    roots: Vec<PathBuf>,
+    addr: SocketAddr,
+    config: DevConfig,
+    live: ReloadMode,
+) -> std::io::Result<()> {
+    let app = dev_router_with_live(roots, config, live);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!("web-modules dev server on http://{addr}/  (Ctrl-C to stop)");
     axum::serve(listener, app).await
@@ -423,7 +490,7 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<Served>, String> 
                     .and_then(|n| n.to_str())
                     .is_some_and(|n| n.starts_with('_'));
                 if !is_partial {
-                    let body = compile_cached(state, &src, Kind::Tera)?;
+                    let body = compile_cached(state, &src, Kind::Tera, requested)?;
                     return Ok(Some(Served::Bytes {
                         body,
                         content_type: content_type(&rel),
@@ -473,7 +540,7 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<Served>, String> 
             if let Some(stem) = rel.strip_suffix(".js") {
                 for ext in ["ts", "tsx", "mts"] {
                     if let Some(src) = source_candidate(mount, &format!("{stem}.{ext}"), mode) {
-                        let body = compile_cached(state, &src, Kind::Ts)?;
+                        let body = compile_cached(state, &src, Kind::Ts, requested)?;
                         return Ok(Some(Served::Bytes {
                             body,
                             content_type: "text/javascript; charset=utf-8".into(),
@@ -486,7 +553,7 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<Served>, String> 
         if state.config.scss {
             if let Some(stem) = rel.strip_suffix(".css") {
                 if let Some(src) = source_candidate(mount, &format!("{stem}.scss"), mode) {
-                    let body = compile_cached(state, &src, Kind::Scss)?;
+                    let body = compile_cached(state, &src, Kind::Scss, requested)?;
                     return Ok(Some(Served::Bytes {
                         body,
                         content_type: "text/css; charset=utf-8".into(),
@@ -510,24 +577,38 @@ fn resolve(state: &DevState, requested: &str) -> Result<Option<Served>, String> 
     Ok(None)
 }
 
-/// Compile `src` (TS, SCSS, or Tera), caching by modification time. SCSS `@use`/`@import`
-/// load paths span every mounted dir (plus any `extra_scss_load_paths`); Tera renders
-/// with the `importmap` variable from the embedded fallback's baked map (empty
-/// without one — a pure source tree vendors nothing).
-fn compile_cached(state: &DevState, src: &Path, kind: Kind) -> Result<Vec<u8>, String> {
-    let mtime = std::fs::metadata(src)
-        .and_then(|m| m.modified())
-        .map_err(|e| e.to_string())?;
-    if let Some((cached_mtime, bytes)) = state
+/// Compile `src` (TS, SCSS, or Tera), caching by modification time: the entry's, and
+/// for a stylesheet every partial's it read, so an edited partial recompiles the
+/// stylesheets that include it. SCSS `@use`/`@import` load paths span every mounted dir
+/// (plus any `extra_scss_load_paths`); Tera renders with the `importmap` variable from
+/// the embedded fallback's baked map (empty without one; a pure source tree vendors
+/// nothing). `requested` is the served path (no leading slash): a stylesheet's
+/// dependencies are registered under its URL with the live-reload hub.
+fn compile_cached(
+    state: &DevState,
+    src: &Path,
+    kind: Kind,
+    requested: &str,
+) -> Result<Vec<u8>, String> {
+    let mtime = modified(src).map_err(|e| e.to_string())?;
+    // Copy the entry out and validate its dependencies with the lock released: the stats
+    // are the slow part, and another request may be compiling meanwhile.
+    let cached = state
         .cache
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get(src)
-    {
-        if *cached_mtime == mtime {
-            return Ok(bytes.clone());
+        .filter(|entry| entry.mtime == mtime)
+        .map(|entry| (entry.deps.clone(), entry.bytes.clone()));
+    if let Some((deps, bytes)) = cached {
+        if deps
+            .iter()
+            .all(|(dep, seen)| modified(dep).ok() == Some(*seen))
+        {
+            return Ok(bytes);
         }
     }
+    let mut deps: Vec<(PathBuf, SystemTime)> = Vec::new();
     let out = match kind {
         Kind::Ts => {
             let source = std::fs::read_to_string(src).map_err(|e| e.to_string())?;
@@ -551,9 +632,16 @@ fn compile_cached(state: &DevState, src: &Path, kind: Kind) -> Result<Vec<u8>, S
                     .iter()
                     .map(PathBuf::as_path),
             );
-            crate::scss::compile_file(src, &load_paths)
-                .map_err(|e| e.to_string())?
-                .into_bytes()
+            let (css, read) =
+                crate::scss::compile_file_tracked(src, &load_paths).map_err(|e| e.to_string())?;
+            deps = read
+                .iter()
+                .filter_map(|dep| modified(dep).ok().map(|seen| (dep.clone(), seen)))
+                .collect();
+            state
+                .live
+                .record_dependencies(&format!("/{requested}"), read);
+            css.into_bytes()
         }
         #[cfg(feature = "tera")]
         Kind::Tera => {
@@ -572,39 +660,19 @@ fn compile_cached(state: &DevState, src: &Path, kind: Kind) -> Result<Vec<u8>, S
         .cache
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .insert(src.to_path_buf(), (mtime, out.clone()));
+        .insert(
+            src.to_path_buf(),
+            CacheEntry {
+                mtime,
+                deps,
+                bytes: out.clone(),
+            },
+        );
     Ok(out)
 }
 
-/// Watch each watched mount's dir and trigger a browser reload on any change.
-fn spawn_watcher(mounts: Vec<Mount>, reloader: tower_livereload::Reloader) {
-    std::thread::spawn(move || {
-        use notify::{RecursiveMode, Watcher};
-        let mut watcher =
-            match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
-                if let Ok(event) = res {
-                    if event.kind.is_modify() || event.kind.is_create() || event.kind.is_remove() {
-                        reloader.reload();
-                    }
-                }
-            }) {
-                Ok(w) => w,
-                Err(e) => {
-                    eprintln!("web-modules: file watcher unavailable ({e}); live-reload off");
-                    return;
-                }
-            };
-        for mount in &mounts {
-            if mount.is_watched() {
-                if let Err(e) = watcher.watch(mount.dir(), RecursiveMode::Recursive) {
-                    eprintln!("web-modules: cannot watch {}: {e}", mount.dir().display());
-                }
-            }
-        }
-        loop {
-            std::thread::park();
-        }
-    });
+fn modified(path: &Path) -> std::io::Result<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified())
 }
 
 #[cfg(test)]
@@ -629,6 +697,7 @@ mod tests {
     }
 
     fn state_with(mounts: Vec<Mount>, config: DevConfig) -> DevState {
+        let live = LiveReload::new(&mounts);
         DevState {
             mounts: Arc::new(mounts),
             cache: Arc::new(Mutex::new(HashMap::new())),
@@ -636,7 +705,44 @@ mod tests {
             #[cfg(feature = "tera")]
             importmap: Arc::new(crate::importmap::Importmap::new()),
             config: Arc::new(config),
+            live,
         }
+    }
+
+    #[test]
+    fn an_edited_partial_recompiles_the_stylesheet_that_includes_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("web");
+        std::fs::create_dir_all(&root).unwrap();
+        let t0 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        let t1 = t0 + std::time::Duration::from_secs(60);
+        let stamp = |path: &Path, content: &str, at: SystemTime| {
+            std::fs::write(path, content).unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
+        };
+        stamp(&root.join("_vars.scss"), "$c: blue;", t0);
+        stamp(
+            &root.join("app.scss"),
+            "@use 'vars'; a { color: vars.$c; }",
+            t0,
+        );
+        let state = state(vec![Mount::root(root.clone())]);
+        let (bytes, _) = resolve(&state, "app.css").unwrap().unwrap().bytes();
+        assert!(String::from_utf8(bytes).unwrap().contains("blue"));
+
+        // Only the partial changes; the entry keeps its mtime.
+        stamp(&root.join("_vars.scss"), "$c: red;", t1);
+        let (bytes, _) = resolve(&state, "app.css").unwrap().unwrap().bytes();
+        let css = String::from_utf8(bytes).unwrap();
+        assert!(
+            css.contains("red"),
+            "recompiled after the partial edit: {css}"
+        );
     }
 
     #[test]

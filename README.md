@@ -144,6 +144,16 @@ Dev::new().root("web").serve("127.0.0.1:8080".parse()?).await?;
 
 Both layer over the lower-level `build(&BuildOptions { … })` / `dev::serve_with`, still public for fine-grained use. For the full `build.rs` / runtime API see the **[API docs][docs.rs]**.
 
+### Live reload
+
+The dev server watches every source root and streams what changed to the browser over SSE (`/_web_modules/live/events`); a small client (`/_web_modules/live/live.js`, injected before `</body>` of every served page) hot-swaps a changed stylesheet's `<link>` in place and reloads the page for anything else, since ES modules cannot be hot-replaced.
+Stylesheets compiled by the server record the partials they read, so an edit to `_vars.scss` names exactly the stylesheets that include it (and recompiles them: the mtime cache revalidates every dependency, not just the entry).
+The policy for non-stylesheet changes is the server's: `--live-reload full` (the default) reloads, `--live-reload css` only logs, `--no-live-reload` serves without the watcher, stream and client; `Dev::live_reload(ReloadMode)` is the builder form.
+The stream carries change kinds and served URLs, never filesystem paths.
+
+Hosts that compile or watch on their own plug into the same hub: `LiveReload::watch(mounts)` (or `::new` without a watcher), `record_dependencies(url, paths)` after each compile, `notify(path)` from their own watcher, `router()` / `events_router()` to mount the stream, `script_tag()` / `meta_tag()` for pages they render themselves (the client reads its endpoint from its own `src`, else from `<meta name="web-modules-live">`, so it also works when `import()`ed after a login).
+The client dispatches `web-modules:css-reloaded` on the document after each swap, for code that mirrors document stylesheets elsewhere (constructable sheets adopted by shadow roots, say).
+
 ## GitHub Actions
 
 A composite action builds a deployable `dist/` (vendor + transform + render, with the import map injected) — **no Node on the runner**. It downloads a prebuilt `web-modules` binary for the runner's OS/arch (Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64/arm64), or compiles from this action's source with `from-source: true`. Pin `@v0` to track the latest 0.x, or an exact `@v0.3.1` — which fetches the matching binary (reproducible); the `version` input overrides this. With `build: "false"` the action installs the verified binary onto `PATH` and stops — for jobs whose own scripts drive `web-modules` (`build`, `vendor`, `npm audit`). Publishing stays composed with the official actions.

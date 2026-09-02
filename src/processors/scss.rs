@@ -45,6 +45,10 @@ struct SandboxFs {
     /// the difference between "the import is a typo" and "a load path is missing", kept as
     /// data instead of silence.
     refused: Mutex<Vec<PathBuf>>,
+    /// Every file `grass` read through this sandbox (the entry and each partial it pulled
+    /// in), canonical, in read order: a compile's dependency list, see
+    /// [`compile_file_tracked`].
+    reads: Mutex<Vec<PathBuf>>,
 }
 
 impl SandboxFs {
@@ -54,7 +58,15 @@ impl SandboxFs {
         Self {
             roots: roots.iter().filter_map(|p| p.canonicalize().ok()).collect(),
             refused: Mutex::new(Vec::new()),
+            reads: Mutex::new(Vec::new()),
         }
+    }
+
+    /// The files read so far, each once, in first-read order.
+    fn take_reads(&self) -> Vec<PathBuf> {
+        let mut reads = self.reads.lock().expect("sandbox read log poisoned");
+        let mut seen = std::collections::HashSet::new();
+        reads.drain(..).filter(|p| seen.insert(p.clone())).collect()
     }
 
     /// The real location of `path` if it resolves inside an allowed root, else `None`. A path that
@@ -122,7 +134,13 @@ impl Fs for SandboxFs {
 
     fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
         match self.contained(path) {
-            Some(real) => std::fs::read(real),
+            Some(real) => {
+                self.reads
+                    .lock()
+                    .expect("sandbox read log poisoned")
+                    .push(real.clone());
+                std::fs::read(real)
+            }
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("SCSS import {path:?} escapes the source roots"),
@@ -164,11 +182,21 @@ pub fn compile_str(input: &str, load_paths: &[&Path]) -> Result<String> {
 /// Compile a single `.scss` file to CSS. Imports resolve within `load_paths` and the file's own
 /// directory, and cannot escape them.
 pub fn compile_file(path: &Path, load_paths: &[&Path]) -> Result<String> {
+    compile_file_tracked(path, load_paths).map(|(css, _)| css)
+}
+
+/// [`compile_file`], also returning every file the compile read: the entry and each
+/// `@use`/`@import`ed partial, canonical, in first-read order. A cache keyed on the entry's
+/// mtime alone serves stale CSS after a partial edit; this list is what such a cache (the
+/// dev server's) revalidates, and what maps a partial back to the stylesheets it belongs to.
+pub fn compile_file_tracked(path: &Path, load_paths: &[&Path]) -> Result<(String, Vec<PathBuf>)> {
     let entry = entry_dir(path);
     let mut roots = load_paths.to_vec();
     roots.push(entry.as_path());
     let sandbox = SandboxFs::new(&roots);
-    grass::from_path(path, &options(&sandbox, load_paths)).map_err(|e| scss_error(&sandbox, e))
+    let css = grass::from_path(path, &options(&sandbox, load_paths))
+        .map_err(|e| scss_error(&sandbox, e))?;
+    Ok((css, sandbox.take_reads()))
 }
 
 /// Compile every `.scss` under `src_dir` (skipping `_` partials) into a mirrored
@@ -322,6 +350,30 @@ mod tests {
         assert_eq!(n, 1, "the link contributes nothing");
         assert!(out.join("app.css").exists());
         assert!(!out.join("linked.css").exists());
+    }
+
+    #[test]
+    fn tracked_compile_lists_the_entry_and_its_partials() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let vendor = tmp.path().join("vendor");
+        create_dir_all(&src).unwrap();
+        create_dir_all(&vendor).unwrap();
+        write(vendor.join("_theme.scss"), "$t: green;").unwrap();
+        write(src.join("_vars.scss"), "@use 'theme'; $c: theme.$t;").unwrap();
+        write(src.join("app.scss"), "@use 'vars'; a { color: vars.$c; }").unwrap();
+        let (css, deps) = compile_file_tracked(&src.join("app.scss"), &[vendor.as_path()]).unwrap();
+        assert!(css.contains("color:green"));
+        let names: Vec<_> = deps
+            .iter()
+            .map(|p| p.file_name().unwrap().to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            names,
+            ["app.scss", "_vars.scss", "_theme.scss"],
+            "entry first, then imports, each once"
+        );
+        assert!(deps.iter().all(|p| p.is_absolute()), "canonical paths");
     }
 
     #[test]

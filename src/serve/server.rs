@@ -55,7 +55,7 @@ enum Source {
 struct Root {
     prefix: String,
     source: Source,
-    /// Whether `live()` watches this root. Read only by the dev server, so it's dead in
+    /// Whether `dev()` watches this root. Read only by the dev server, so it's dead in
     /// a lean static build (`axum` without `dev`).
     #[cfg_attr(not(feature = "dev"), allow(dead_code))]
     watch: bool,

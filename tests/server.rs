@@ -3,7 +3,7 @@
 //! `index.html` resolution, 404s, path containment, **source-hiding** (both the static
 //! and live routers), **live-update** on source change, and **gzip sidecar** serving.
 //!
-//! Needs the `live` feature (and thus `axum`); on under `--all-features`.
+//! Needs the `dev` feature (and thus `axum`); on under `--all-features`.
 #![cfg(feature = "dev")]
 
 use std::path::Path;
@@ -254,6 +254,34 @@ async fn live_recompiles_after_a_source_changes() {
     assert!(!css.text().contains("red"));
     let js = fetch(app, "/app.js", None).await;
     assert!(js.text().contains('2'), "js after edit: {}", js.text());
+}
+
+/// The mtime cache used to be keyed on the entry file alone, so editing a partial served
+/// the stale stylesheet until the entry itself was touched.
+#[tokio::test]
+async fn live_recompiles_after_a_partial_changes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let partial = tmp.path().join("_vars.scss");
+    let entry = tmp.path().join("app.scss");
+    let t0 = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+    let t1 = t0 + Duration::from_secs(60);
+    write_at(&partial, "$c: blue;", t0);
+    write_at(&entry, "@use 'vars'; a { color: vars.$c; }", t0);
+    let app = Frontend::dir(tmp.path()).dev();
+
+    assert!(fetch(app.clone(), "/app.css", None)
+        .await
+        .text()
+        .contains("blue"));
+
+    // The partial changes, the entry does not.
+    write_at(&partial, "$c: red;", t1);
+    let css = fetch(app, "/app.css", None).await;
+    assert!(
+        css.text().contains("red"),
+        "css after the partial edit: {}",
+        css.text()
+    );
 }
 
 #[tokio::test]

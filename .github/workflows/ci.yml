@@ -17,9 +17,9 @@ permissions:
   contents: read
 
 jobs:
-  # The Rust pipeline for everything except tauri: fmt · clippy (incl. the bundle feature) · test ·
-  # build + vendor the examples, then publish the three Playwright example binaries as an artifact
-  # for the `e2e` matrix below. No Node here — the e2e suites run off the prebuilt binaries.
+  # The Rust pipeline for everything except tauri: fmt · clippy · test · build + vendor the
+  # examples, then publish the three Playwright example binaries as an artifact for the `e2e`
+  # matrix below. No Node here — the e2e suites run off the prebuilt binaries.
   build:
     name: build
     runs-on: ubuntu-latest
@@ -53,21 +53,21 @@ jobs:
           cache-target: "true"
           lockfiles: "**/Cargo.toml"
 
-      # Format + lint: the whole workspace with `full`, plus the opt-in `bundle` feature
-      # (rolldown), which `full` leaves out.
+      # Format + lint: the whole workspace with `full`, the complete feature set (`bundle`
+      # included).
       - name: Formatting
         run: cargo fmt --all --check
       - name: Clippy (workspace · full)
         run: cargo clippy --workspace --all-targets --features full -- -D warnings
-      - name: Clippy (bundle feature · rolldown)
-        run: cargo clippy --features "bundle npm cli" --all-targets -- -D warnings
 
       # Feature isolation: the bare crate and a few single features must each compile on their
       # own — catches a feature that only builds because another happens to be enabled. `full`
-      # and `bundle` above cover the union; this guards the minimal sets.
+      # above covers the union; this guards the minimal sets. `lean` (`full` without `bundle`)
+      # compiles alone too: docs.rs and the MSRV job build exactly that set.
       - name: Feature-isolation check
         run: |
           cargo check -p web_modules --no-default-features
+          cargo check -p web_modules --no-default-features --features lean
           for f in axum dev minify i18n builder scss tera bundle; do
             cargo check -p web_modules --no-default-features --features "$f"
           done
@@ -77,12 +77,11 @@ jobs:
           cargo check -p web_modules --no-default-features --features "scss builder"
           cargo check -p web_modules --no-default-features --features "dev builder"
 
-      # Tests: the whole workspace incl. the network-gated vendor/assembly tests, plus the
-      # bundle feature's network-gated documentary test (install react + rolldown-bundle).
+      # Tests: the whole workspace with `full`, incl. the network-gated vendor/assembly tests
+      # and the bundle feature's network-gated documentary test (install react + rolldown-bundle);
+      # `full` carries `bundle`, so the one run reaches them all.
       - name: Tests (workspace · incl. network-gated)
         run: cargo test --workspace --features full --tests -- --include-ignored
-      - name: Tests (bundle feature · network)
-        run: cargo test --features "bundle npm cli" --lib --bins --test bundle --test bundle_split --test bundle_build -- --include-ignored
 
       # Doctests (the API examples in `///` docs): `--tests` above excludes the `--doc` target,
       # so run it explicitly. No network-gated doctests, so no `--include-ignored` needed.
@@ -162,14 +161,14 @@ jobs:
 
       # Dogfood the bundle demo: a manifest-driven build; every knob (bundle entries, packages,
       # minify, sourcemap, out) comes from the `web_modules` block in examples/bundle/package.json,
-      # which the CLI reads from its cwd, so the invocation carries no flag but --out. Needs the
-      # opt-in `bundle` feature, which library `full` excludes; the released binary ships with it
-      # (release.yml builds --features "full bundle"), so this mirrors what consumers download.
+      # which the CLI reads from its cwd, so the invocation carries no flag but --out. `--features
+      # full` matches the released binary (release.yml builds the same), so this mirrors what
+      # consumers download.
       - name: Build the bundle demo (dogfood)
         working-directory: examples/bundle
         run: |
           out="$RUNNER_TEMP/bundle-dist"
-          cargo run --features "full bundle" --bin web-modules -- build --out "$out"
+          cargo run --features full --bin web-modules -- build --out "$out"
           # The entry kept its URL; the dynamically-imported module landed in content-hashed chunks/.
           test -f "$out/index.html" && test -f "$out/app.js" && test -f "$out/styles.css"
           find "$out/chunks" -name '*.js' | grep -q .
@@ -380,11 +379,13 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+      # `lean`, not `full`: the declared MSRV tracks oxc, and `bundle`'s rolldown tree declares no
+      # rust-version of its own, so its true MSRV is unknown and must not gate ours.
       - name: Check on the declared MSRV
         uses: gronke/rust-ci/.github/actions/msrv@main
         with:
           package: web_modules
-          features: --features full
+          features: --features lean
 
   # The composite action downloads a prebuilt binary, then runs `web-modules build` with the source
   # dir as a positional ROOT (since 0.4.0). A pre-0.4.0 binary reads that positional as a package spec

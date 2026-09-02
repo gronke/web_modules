@@ -17,10 +17,11 @@ rust-version = "1.95"
 include = ["/src/**/*.rs", "/src/serve/live.js", "/Cargo.toml", "/README.md", "/LICENSE"]
 publish = true
 
-# docs.rs: document the full lean toolchain so the whole API renders. The heavy, opt-in
-# `bundle`/rolldown tree stays out (it's a thin wrapper, described in prose).
+# docs.rs: document the lean toolchain (`lean` is `full` without `bundle`) so the whole API
+# renders. The heavy, opt-in `bundle`/rolldown tree stays out (it's a thin wrapper, described
+# in prose).
 [package.metadata.docs.rs]
-features = ["full"]
+features = ["lean"]
 
 [features]
 # Specialised for building web modules + simple web apps: TypeScript, SCSS and
@@ -86,10 +87,13 @@ tracing = ["dep:tracing"]
 # content as the Location. Default-on so the modes are an opt-in CLI/API choice; strip with
 # `--no-default-features` for a build where a symlink can never become a redirect.
 symlink-move = []
-# Everything in the lean toolchain (incl. `env`, so CI's `--features full` lint/test covers the
-# env-gated CLI arms). The heavy, opt-in `bundle` is intentionally NOT included, so `full` (and
-# `--features full`) builds stay free of the rolldown / second-oxc tree.
-full = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm", "builder", "tracing", "symlink-move"]
+# Everything except the heavy, opt-in `bundle` (incl. `env`, so the env-gated CLI arms are
+# covered wherever `lean` or `full` is linted and tested). Builds stay free of the rolldown /
+# second-oxc tree; docs.rs and the MSRV check use this set.
+lean = ["typescript", "scss", "tera", "minify", "icons", "dts", "i18n", "compress", "axum", "dev", "cli", "env", "npm", "builder", "tracing", "symlink-move"]
+# The complete toolchain: `lean` plus the rolldown `bundle` path. What the released
+# `web-modules` binary, the action's from-source install and CI's lint/test runs build with.
+full = ["lean", "bundle"]
 
 [dependencies]
 # Core — vendoring npm packages + composing import maps + a transitive `node_modules/`

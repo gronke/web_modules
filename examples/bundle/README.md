@@ -5,7 +5,7 @@ The same buildless sources as the other demos, **folded per entry point** by the
 
 ```sh
 cd examples/bundle
-cargo run --features "full bundle" --bin web-modules -- build   # every knob comes from package.json's web_modules block
+cargo run --features full --bin web-modules -- build   # every knob comes from package.json's web_modules block
 python3 -m http.server -d dist
 # open http://localhost:8000/
 ```
@@ -20,7 +20,7 @@ python3 -m http.server -d dist
 
 ## Notes
 
-- The `bundle` feature is opt-in: the released `web-modules` binary carries it, while the library's `full` feature set excludes it (rolldown is heavy); hence `--features "full bundle"` when building from this checkout.
+- Building from this checkout uses `--features full`, the same set the released `web-modules` binary is built with: `bundle` is part of `full` but not of the default features (rolldown is heavy), and `lean` is the rolldown-free aggregate.
 - Bundled builds re-vendor from the network on every run, since the vendored tree is consumed by the bundler rather than kept as a cache.
 - For the buildless counterpart of this page (import map, vendored `web_modules/` tree, Tera template) see [`gh-pages`](../gh-pages).
 

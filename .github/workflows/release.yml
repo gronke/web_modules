@@ -187,10 +187,11 @@ jobs:
         if: ${{ matrix.slug == 'windows-arm64' }}
         uses: gronke/rust-ci/.github/actions/install-toolchain@main
 
-      # The full lean toolchain (only the heavy `bundle`/rolldown is excluded) in release mode,
-      # reproducibly — `--locked` uses the committed Cargo.lock. Native build: host == target.
+      # The released binary is the complete CLI: `full` carries the rolldown `--bundle` path.
+      # Built in release mode and reproducibly; `--locked` uses the committed Cargo.lock.
+      # Native build: host == target.
       - name: Build
-        run: cargo build --release --locked --bin web-modules --features "full bundle"
+        run: cargo build --release --locked --bin web-modules --features full
 
       - name: Package
         shell: bash

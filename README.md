@@ -128,7 +128,7 @@ The live-reload watcher's behavior through links is backend-defined; under `foll
 web_modules = "0.6"   # Rust 1.95+
 ```
 
-`typescript`, `scss` and `tera` are on by default; `full` enables everything except `bundle`.
+`typescript`, `scss` and `tera` are on by default; `full` enables everything (the released binary's set), and `lean` is `full` without the heavy `bundle`/rolldown tree.
 
 The fluent `Build` and `Dev` builders (feature `builder`, on by default) are the promoted entry points — `Build` from a `build.rs` (bake a `dist/`), `Dev` for a live-reload server:
 

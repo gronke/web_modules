@@ -182,6 +182,20 @@ struct CompilerConfig {
     /// sibling). Without it `build` fails on a conflict; `dev` warns, and this silences it.
     #[arg(long = "skip-duplicates")]
     skip_duplicates: bool,
+    /// Bare import specifier(s) to keep intentionally unresolved: a peer dependency a
+    /// library emits (`import … from "lit"`) without vendoring it. Repeatable; a spec
+    /// covers its subpaths (`--external lit` also allows `lit/decorators.js`).
+    #[cfg_attr(
+        feature = "env",
+        arg(
+            long = "external",
+            value_name = "SPEC",
+            env = "WEB_MODULES_EXTERNAL",
+            value_delimiter = ' '
+        )
+    )]
+    #[cfg_attr(not(feature = "env"), arg(long = "external", value_name = "SPEC"))]
+    external: Vec<String>,
     /// What a symlink in a source tree means: `follow` (default; within its own root only),
     /// `follow-unsafe` (everywhere), `redirect` (dev/serve answer 307, build skips), or `move`
     /// (same, 308).
@@ -211,6 +225,7 @@ struct ResolvedCompiler {
     extra_scss_load_paths: Vec<PathBuf>,
     symlinks: web_modules::SymlinkMode,
     skip_duplicates: bool,
+    external: Vec<String>,
 }
 
 impl CompilerConfig {
@@ -259,6 +274,12 @@ impl CompilerConfig {
             },
             symlinks: self.symlinks.into(),
             skip_duplicates: self.skip_duplicates,
+            // Additive: CLI `--external`s first, then the block's `external`.
+            external: {
+                let mut v = self.external.clone();
+                v.extend(cfg.external.iter().cloned());
+                v
+            },
         }
     }
 
@@ -289,6 +310,7 @@ impl ResolvedCompiler {
         p.sourcemap = self.sourcemap;
         p.bundle = self.bundle;
         p.bundle_entries = self.bundle_entries;
+        p.external = self.external;
         p
     }
 }
@@ -394,6 +416,7 @@ struct PkgConfig {
     scss: Option<bool>,
     tera: Option<bool>,
     scss_load_paths: Vec<PathBuf>,
+    external: Vec<String>,
 }
 
 /// Load the `web_modules` config block from `package.json` in the current directory.
@@ -543,6 +566,7 @@ fn parse_block(block: &Value) -> Res<PkgConfig> {
                 }
             }
             "tera" => cfg.tera = Some(processor_enabled(val, "web_modules.tera")?),
+            "external" => cfg.external = string_array(val, "web_modules.external")?,
             // Owned elsewhere (vendoring / mount) — read on the package.json content, not here.
             "webDependencies" | "root" => {}
             _ => {}

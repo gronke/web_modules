@@ -9,6 +9,10 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Changed
 
+- The dev server's live reload hot-swaps stylesheets in place instead of reloading the page, and streams every change over SSE (`/_web_modules/live/events`) to a client of its own (`/_web_modules/live/live.js`); `tower-livereload` is gone.
+  Non-stylesheet changes still reload the page by default; `--live-reload css` (`Dev::live_reload(ReloadMode::Css)`) turns that into a console note, `--no-live-reload` (`ReloadMode::Off`) serves without watcher, stream and client.
+  The `dev` feature now pulls `futures-core` (the `Stream` trait axum's SSE response takes; already compiled in every axum build) and tokio's `sync`.
+
 - **Breaking:** `--minify` now strips comments from emitted JS: normal, JSDoc and annotation comments go, legal comments (`//!`, `/*!`, `@license`, `@preserve`) stay inline — deliberately not oxc's own minify preset, which drops those too.
   Previously every comment survived minification.
   Pass `--comments keep` for the old behavior.
@@ -19,6 +23,10 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Added
 
+- `web_modules::live`: the live-reload hub behind the dev server, for hosts with their own compilers or watchers: `LiveReload::watch(mounts)` / `::new`, `record_dependencies(url, paths)`, `notify(path)`, `publish(change)`, `router()` / `events_router()`, `script_tag()` / `meta_tag()`, `inject_script(router, prefix)`.
+  The stream says what changed as a kind and a served URL, never as a filesystem path; the browser client swaps a changed `<link rel="stylesheet">` without a flash and dispatches `web-modules:css-reloaded`.
+- `scss::compile_file_tracked`: `compile_file` plus the list of files the compile read (the entry and every partial), for caches and dependency maps.
+- `dev::dev_router_with_live` / `dev::serve_with_live`: the `dev_router_with` / `serve_with` pair with the live-reload policy.
 - `typescript::rewrite_str` and a public `RewriteOptions`: apply an output policy (minify, comments, inline source map) to plain JavaScript through the transformer-free rewrite pass the build already uses internally.
   Consumers no longer route generated or copied JS through `compile_str_with`, whose Lit-preset transform may alter hand-written semantics.
 - `PackageSpec::keep_tagged`: a keep-filter with a tag that joins the extraction cache key.
@@ -52,6 +60,8 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 - `vendor` follows the `url()` references in the stylesheets it keeps, so a font or an image that only a stylesheet names is vendored alongside it instead of 404ing in the browser.
   References are read through the CSS tokenizer (`cssparser`), so a `url(` inside a comment or a string never counts as one.
+- The dev server served a stale stylesheet after editing a partial: its cache was keyed on the entry's mtime alone.
+  A compiled stylesheet now revalidates every file it read.
 
 ## [0.7.0] - 2026-08-21
 

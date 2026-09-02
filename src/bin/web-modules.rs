@@ -42,6 +42,20 @@ enum Command {
         /// Address to bind (default 127.0.0.1:8080).
         #[arg(long)]
         addr: Option<SocketAddr>,
+        /// What the browser does with a non-stylesheet change (stylesheets always hot-swap):
+        /// `full` (the default) reloads the page, `css` only logs it. A bare `--live-reload`
+        /// means `css`.
+        #[arg(
+            long,
+            value_name = "MODE",
+            num_args = 0..=1,
+            default_missing_value = "css",
+            conflicts_with = "no_live_reload"
+        )]
+        live_reload: Option<web_modules::ReloadMode>,
+        /// Serve the sources without the live-reload stream, client and file watcher.
+        #[arg(long)]
+        no_live_reload: bool,
         #[command(flatten)]
         compiler: CompilerConfig,
     },
@@ -658,6 +672,8 @@ async fn main() -> Res {
         Command::Dev {
             roots,
             addr,
+            live_reload,
+            no_live_reload,
             compiler,
         } => {
             // Config from a `web_modules` block in ./package.json (flags only — dev never vendors).
@@ -667,7 +683,12 @@ async fn main() -> Res {
             let roots = roots_or_cwd(pick_vec(roots, cfg.roots));
             let addr =
                 addr.unwrap_or_else(|| "127.0.0.1:8080".parse().expect("valid default addr"));
-            web_modules::dev::serve_with(roots, addr, config).await?;
+            let live = if no_live_reload {
+                web_modules::ReloadMode::Off
+            } else {
+                live_reload.unwrap_or_default()
+            };
+            web_modules::dev::serve_with_live(roots, addr, config, live).await?;
         }
         Command::Build {
             roots,

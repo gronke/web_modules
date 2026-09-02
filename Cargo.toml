@@ -14,7 +14,7 @@ edition = "2021"
 rust-version = "1.95"
 # Leading slashes anchor to the crate root — bare patterns (gitignore semantics) match at any
 # depth and would pull in stray files like examples/tauri/README.md.
-include = ["/src/**/*.rs", "/Cargo.toml", "/README.md", "/LICENSE"]
+include = ["/src/**/*.rs", "/src/serve/live.js", "/Cargo.toml", "/README.md", "/LICENSE"]
 publish = true
 
 # docs.rs: document the full lean toolchain so the whole API renders. The heavy, opt-in
@@ -49,9 +49,11 @@ compress = ["dep:flate2"]
 # Embedded serving pulls no compiler, so release binaries stay lean. (Other web
 # servers can be added as parallel features later.)
 axum = ["dep:axum", "dep:tokio", "dep:mime_guess", "dep:include_dir"]
-# Dev server on top of `axum`: compile TS/SCSS on the fly, watch the source tree,
-# live-reload the browser.
-dev = ["axum", "typescript", "scss", "dep:notify", "dep:tower-livereload"]
+# Dev server on top of `axum`: compile TS/SCSS on the fly, watch the source tree, and
+# stream the changes to the browser (stylesheets hot-swap, the rest reloads the page).
+# `futures-core` is the `Stream` trait axum's SSE response takes: the trait crate alone,
+# already compiled in every axum build.
+dev = ["axum", "typescript", "scss", "dep:notify", "dep:futures-core"]
 # The `web-modules` CLI binary (dev / build / vendor / ci / npm). `npm-utils/cli` powers the
 # `npm` passthrough; it stays behind this opt-in feature so the library path never pulls clap.
 # `tera` is pulled in so a plain `--features cli` build renders `.tera` in both `dev` and `build`
@@ -141,10 +143,10 @@ flate2 = { version = "1", optional = true }
 # Axum server integration (embedded serving + dev server) + CLI. Optional; off the
 # build-only path.
 axum = { version = "0.8", optional = true }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"], optional = true }
 include_dir = { version = "0.7", optional = true }
 notify = { version = "8", optional = true }
-tower-livereload = { version = "0.10", optional = true }
+futures-core = { version = "0.3", default-features = false, optional = true }
 mime_guess = { version = "2", optional = true }
 clap = { version = "4", features = ["derive"], optional = true }
 
@@ -169,7 +171,7 @@ tempfile = "3"
 # axum, dev-only, and not part of the published crate's dependencies.
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-tokio = { version = "1", features = ["rt", "macros"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
 # Bake an embedded (`include_dir!`) root in the traversal tests. Needed directly (not via the
 # crate's re-export) because the `include_dir!` macro emits `include_dir::`-qualified paths.
 include_dir = "0.7"

@@ -116,6 +116,10 @@ mod serve;
 
 #[cfg(feature = "dev")]
 pub use serve::dev;
+#[cfg(feature = "dev")]
+pub use serve::live;
+#[cfg(feature = "dev")]
+pub use serve::live::{LiveReload, ReloadMode};
 
 /// The fluent dev-server builder (feature `builder`), at the crate root alongside [`Frontend`].
 #[cfg(all(feature = "builder", feature = "dev"))]

@@ -131,6 +131,12 @@ pub struct Processors {
     /// page's module — needs its own entry, or its bare imports fail the build once
     /// the import map is gone.
     pub bundle_entries: Vec<PathBuf>,
+    /// Bare import specifiers to treat as intentionally unresolved (default empty).
+    /// A library with a **peer** dependency must emit `import … from "lit"` without
+    /// vendoring it: listing `lit` here keeps that specifier (and its subpaths, e.g.
+    /// `lit/decorators.js`) from failing the unresolved-import check, and the emitted
+    /// code stays bare. Build only; the dev server serves the source tree as-is.
+    pub external: Vec<String>,
 }
 
 impl Default for Processors {
@@ -147,6 +153,7 @@ impl Default for Processors {
             sourcemap: false,
             bundle: false,
             bundle_entries: Vec::new(),
+            external: Vec::new(),
         }
     }
 }
@@ -933,7 +940,11 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     // applies to a non-vendored build: importing a bare specifier you didn't vendor
     // is a real error. The generated map is the only validation target: the build
     // never reads a page back, so a hand-authored `index.html` owns its inline map.
-    let unresolved = graph.unresolved(&importmap);
+    let unresolved: Vec<(String, String)> = graph
+        .unresolved(&importmap)
+        .into_iter()
+        .filter(|(_file, spec)| !is_external(&opts.processors.external, spec))
+        .collect();
     if !unresolved.is_empty() {
         let details = unresolved
             .iter()
@@ -942,7 +953,7 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
             .join("\n");
         return Err(Error::Build(format!(
             "web-modules: {} unresolved bare import(s) - add them to the vendored \
-             specs / import map:\n{details}",
+             specs / import map, or mark them --external:\n{details}",
             unresolved.len()
         )));
     }
@@ -975,6 +986,15 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
 /// Emit one preflight winner through its claiming step into `out` (the stage) —
 /// parent directories created, the emitted imports recorded in the module graph
 /// under the output-relative path.
+/// A bare import is intentionally external when it equals a declared spec or is a
+/// subpath of one (`lit` also covers `lit/decorators.js`), so a library can emit a
+/// peer dependency's import without vendoring it.
+fn is_external(external: &[String], spec: &str) -> bool {
+    external
+        .iter()
+        .any(|e| spec == e || spec.starts_with(&format!("{e}/")))
+}
+
 fn emit_winner(
     steps: &[Box<dyn steps::Step>],
     winner: &steps::ClaimRecord,
@@ -2370,6 +2390,41 @@ mod tests {
         assert!(
             matches!(err, Error::Build(_)),
             "an unvendored bare import is a build error; got {err:?}"
+        );
+    }
+
+    #[test]
+    fn external_spec_suppresses_the_unresolved_error() {
+        // A library emits a peer dependency's bare import without vendoring it. Marking
+        // the specifier external keeps the unresolved-import check from failing, and a
+        // subpath (`lit/decorators.js`) is covered by the bare name, so the emitted code
+        // stays bare, which is exactly what a published library wants.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("app.ts"),
+            "import { LitElement } from \"lit\";\n\
+             import { customElement } from \"lit/decorators.js\";\n\
+             export class X extends LitElement {}\n\
+             void customElement;",
+        )
+        .unwrap();
+
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors.external = vec!["lit".to_string()];
+        build(&o).expect("an external specifier and its subpath must not fail the build");
+
+        // Nothing vendored `lit`, so the emitted module keeps the bare imports verbatim.
+        let js = std::fs::read_to_string(out.join("app.js")).unwrap();
+        assert!(
+            js.contains("\"lit\""),
+            "the bare peer import is kept; got:\n{js}"
+        );
+        assert!(
+            js.contains("\"lit/decorators.js\""),
+            "the external subpath import is kept; got:\n{js}"
         );
     }
 

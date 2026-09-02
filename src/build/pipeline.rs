@@ -137,6 +137,11 @@ pub struct Processors {
     /// `lit/decorators.js`) from failing the unresolved-import check, and the emitted
     /// code stays bare. Build only; the dev server serves the source tree as-is.
     pub external: Vec<String>,
+    /// Emit a `.d.ts` beside each compiled TypeScript module (default off; requires the
+    /// `dts` feature). Uses `isolatedDeclarations`: every module boundary must carry an
+    /// explicit type, so a source that omits one fails the build. Declaration emit is
+    /// opt-in by nature. Build only; a bundling build skips it (the modules are inlined).
+    pub dts: bool,
 }
 
 impl Default for Processors {
@@ -154,6 +159,7 @@ impl Default for Processors {
             bundle: false,
             bundle_entries: Vec::new(),
             external: Vec::new(),
+            dts: false,
         }
     }
 }
@@ -791,6 +797,10 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
             continue;
         }
         emit_winner(&steps, winner, opts, stage, &importmap, &mut graph)?;
+        #[cfg(feature = "dts")]
+        if opts.processors.dts && !bundling {
+            emit_dts_sidecar(winner, opts, stage)?;
+        }
     }
 
     // npm content — `npm://` assets here, the vendored tree after pruning below —
@@ -986,6 +996,35 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
 /// Emit one preflight winner through its claiming step into `out` (the stage) —
 /// parent directories created, the emitted imports recorded in the module graph
 /// under the output-relative path.
+/// Emit a `.d.ts` for a compiled TypeScript winner, beside its `.js`. Non-TS sources
+/// and `.d.ts` inputs have nothing to declare and are skipped. `isolatedDeclarations`
+/// requires explicit boundary types, so a source that lacks them errors here.
+#[cfg(feature = "dts")]
+fn emit_dts_sidecar(
+    winner: &steps::ClaimRecord,
+    opts: &BuildOptions<'_>,
+    out: &Path,
+) -> Result<()> {
+    let rel = &winner.rel;
+    let is_ts = matches!(
+        rel.extension().and_then(|e| e.to_str()),
+        Some("ts" | "tsx" | "mts" | "cts")
+    );
+    let is_dts = rel.to_str().is_some_and(|s| s.ends_with(".d.ts"));
+    if !is_ts || is_dts {
+        return Ok(());
+    }
+    let src = opts.roots[winner.root].join(rel);
+    let source = std::fs::read_to_string(&src)?;
+    let dts = crate::dts::emit_dts(&source, &src)?;
+    let dest = out.join(winner.out_rel.with_extension("d.ts"));
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(dest, dts)?;
+    Ok(())
+}
+
 /// A bare import is intentionally external when it equals a declared spec or is a
 /// subpath of one (`lit` also covers `lit/decorators.js`), so a library can emit a
 /// peer dependency's import without vendoring it.
@@ -2425,6 +2464,37 @@ mod tests {
         assert!(
             js.contains("\"lit/decorators.js\""),
             "the external subpath import is kept; got:\n{js}"
+        );
+    }
+
+    #[cfg(feature = "dts")]
+    #[test]
+    fn dts_emits_a_declaration_beside_the_module() {
+        // `--dts` writes a `.d.ts` next to each compiled module via isolatedDeclarations
+        // (explicit boundary types required); the `.js` is emitted as usual.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("math.ts"),
+            "export function add(a: number, b: number): number {\n  return a + b;\n}\n",
+        )
+        .unwrap();
+
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors.dts = true;
+        build(&o).unwrap();
+
+        assert!(
+            out.join("math.js").is_file(),
+            "the compiled module is emitted"
+        );
+        let dts = std::fs::read_to_string(out.join("math.d.ts")).unwrap();
+        assert!(dts.contains("declare function add"), "got: {dts}");
+        assert!(
+            !dts.contains("return a + b"),
+            "implementation stripped; got: {dts}"
         );
     }
 

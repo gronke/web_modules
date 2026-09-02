@@ -142,6 +142,12 @@ pub struct Processors {
     /// explicit type, so a source that omits one fails the build. Declaration emit is
     /// opt-in by nature. Build only; a bundling build skips it (the modules are inlined).
     pub dts: bool,
+    /// Library / no-page mode (default off): skip synthesizing the fallback
+    /// `index.html` and the standalone `importmap.json`. A library emits modules, not a
+    /// deployable page; those two artifacts are page scaffolding a library build only
+    /// deletes afterwards. A source-provided `index.html` is still emitted, and the
+    /// `.web-modules-out` marker is untouched (so a rebuild needs no `rm -rf`).
+    pub library: bool,
 }
 
 impl Default for Processors {
@@ -160,6 +166,7 @@ impl Default for Processors {
             bundle_entries: Vec::new(),
             external: Vec::new(),
             dts: false,
+            library: false,
         }
     }
 }
@@ -912,7 +919,11 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
 
     // Emit the import map as a standalone artifact too, so test harnesses (and
     // es-module-shims / an external `<script type="importmap" src>`) can consume it.
-    importmap.write_to(&stage.join("importmap.json"))?;
+    // A library build has no page to consume it (and, non-vendored, it is empty), so
+    // `--no-page` skips it.
+    if !opts.processors.library {
+        importmap.write_to(&stage.join("importmap.json"))?;
+    }
 
     // Render the Tera winners, with the now-final import map exposed as the
     // `importmap` template variable — the static counterpart of the dev server's
@@ -925,7 +936,7 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     // only when no source claims that target (a literal root `index.html`, or an
     // `index.html.tera` when tera runs) — in effect a synthetic claim at the lowest
     // precedence, keyed off the preflight rather than probing the stage.
-    if !report.claims_target("index.html") {
+    if !opts.processors.library && !report.claims_target("index.html") {
         // A bundled page needs no import map — every bare import is inlined — so the
         // synthesized fallback drops the script tag entirely, in the inline HTML and
         // the `--template` alike.
@@ -2495,6 +2506,63 @@ mod tests {
         assert!(
             !dts.contains("return a + b"),
             "implementation stripped; got: {dts}"
+        );
+    }
+
+    #[test]
+    fn library_mode_skips_page_scaffolding_and_keeps_the_marker() {
+        // `--library` emits modules only: no synthesized fallback index.html, no
+        // standalone importmap.json. The `.web-modules-out` marker stays, so a rebuild
+        // into the same directory needs no `rm -rf`.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("index.ts"), "export const v: number = 1;\n").unwrap();
+
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors.library = true;
+        build(&o).unwrap();
+
+        assert!(out.join("index.js").is_file(), "the module is emitted");
+        assert!(
+            !out.join("index.html").exists(),
+            "no fallback page synthesized"
+        );
+        assert!(
+            !out.join("importmap.json").exists(),
+            "no standalone import map"
+        );
+        assert!(out.join(".web-modules-out").is_file(), "the marker is kept");
+
+        // Second build into the same dir: the marker made it replaceable, no rm -rf.
+        build(&o).unwrap();
+        assert!(out.join("index.js").is_file(), "rebuild succeeds in place");
+    }
+
+    #[test]
+    fn library_mode_still_emits_a_source_index_html() {
+        // `--no-page` skips only the *synthesized* fallback; a real index.html in the
+        // source tree is an ordinary file and is still emitted.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("index.html"), "<!doctype html>REAL").unwrap();
+        std::fs::write(src.join("app.ts"), "export const x: number = 1;\n").unwrap();
+
+        let mut o = opts(std::slice::from_ref(&src), &out);
+        o.processors.library = true;
+        build(&o).unwrap();
+
+        let html = std::fs::read_to_string(out.join("index.html")).unwrap();
+        assert!(
+            html.contains("REAL"),
+            "the source index.html is emitted; got:\n{html}"
+        );
+        assert!(
+            !out.join("importmap.json").exists(),
+            "no standalone import map"
         );
     }
 

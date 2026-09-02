@@ -199,6 +199,11 @@ struct CompilerConfig {
     )]
     #[cfg_attr(not(feature = "env"), arg(long = "external", value_name = "SPEC"))]
     external: Vec<String>,
+    /// Library mode: emit modules without page scaffolding, skipping the fallback
+    /// `index.html` and the standalone `importmap.json`. A source-provided `index.html`
+    /// is still emitted. Pair with `--external`/`--dts` for a no-Node library build.
+    #[arg(long = "library", visible_alias = "no-page")]
+    library: bool,
     /// What a symlink in a source tree means: `follow` (default; within its own root only),
     /// `follow-unsafe` (everywhere), `redirect` (dev/serve answer 307, build skips), or `move`
     /// (same, 308).
@@ -230,6 +235,7 @@ struct ResolvedCompiler {
     skip_duplicates: bool,
     external: Vec<String>,
     dts: bool,
+    library: bool,
 }
 
 impl CompilerConfig {
@@ -288,6 +294,8 @@ impl CompilerConfig {
             dts: self.dts.enabled_with(cfg.dts, false, nd),
             #[cfg(not(feature = "dts"))]
             dts: false,
+            // A plain flag (default off): the CLI `--library`/`--no-page`, else the block.
+            library: self.library || cfg.library.unwrap_or(false),
         }
     }
 
@@ -320,6 +328,7 @@ impl ResolvedCompiler {
         p.bundle_entries = self.bundle_entries;
         p.external = self.external;
         p.dts = self.dts;
+        p.library = self.library;
         p
     }
 }
@@ -427,6 +436,7 @@ struct PkgConfig {
     scss_load_paths: Vec<PathBuf>,
     external: Vec<String>,
     dts: Option<bool>,
+    library: Option<bool>,
 }
 
 /// Load the `web_modules` config block from `package.json` in the current directory.
@@ -578,6 +588,7 @@ fn parse_block(block: &Value) -> Res<PkgConfig> {
             "tera" => cfg.tera = Some(processor_enabled(val, "web_modules.tera")?),
             "external" => cfg.external = string_array(val, "web_modules.external")?,
             "dts" => cfg.dts = Some(processor_enabled(val, "web_modules.dts")?),
+            "library" | "noPage" => cfg.library = Some(as_bool(val, "web_modules.library")?),
             // Owned elsewhere (vendoring / mount) — read on the package.json content, not here.
             "webDependencies" | "root" => {}
             _ => {}

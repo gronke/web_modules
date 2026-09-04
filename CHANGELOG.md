@@ -48,6 +48,11 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - With `--sourcemap`, vendoring also keeps a package's shipped `.js.map`/`.css.map` sidecars beside the assets they describe; the asset filter always dropped them, forcing consumers who wanted them into a custom extract filter.
   Without the flag they are swept — in the gh-pages demo they outweigh the assets they describe — and the choice is recorded as a `vendor-profile:` line in the output marker, so a rebuild with the toggle flipped re-vendors instead of reusing the differently-shaped cache.
 
+### Fixed
+
+- `vendor` follows the `url()` references in the stylesheets it keeps, so a font or an image that only a stylesheet names is vendored alongside it instead of 404ing in the browser.
+  References are read through the CSS tokenizer (`cssparser`), so a `url(` inside a comment or a string never counts as one.
+
 ## [0.7.0] - 2026-08-21
 
 The crate gains a tarball dependency source (below); the rest of this release carries the release pipeline and the maintainer documentation.

@@ -1004,9 +1004,6 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     Ok(())
 }
 
-/// Emit one preflight winner through its claiming step into `out` (the stage) —
-/// parent directories created, the emitted imports recorded in the module graph
-/// under the output-relative path.
 /// Emit a `.d.ts` for a compiled TypeScript winner, beside its `.js`. Non-TS sources
 /// and `.d.ts` inputs have nothing to declare and are skipped. `isolatedDeclarations`
 /// requires explicit boundary types, so a source that lacks them errors here.
@@ -1045,6 +1042,9 @@ fn is_external(external: &[String], spec: &str) -> bool {
         .any(|e| spec == e || spec.starts_with(&format!("{e}/")))
 }
 
+/// Emit one preflight winner through its claiming step into `out` (the stage) —
+/// parent directories created, the emitted imports recorded in the module graph
+/// under the output-relative path.
 fn emit_winner(
     steps: &[Box<dyn steps::Step>],
     winner: &steps::ClaimRecord,

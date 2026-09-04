@@ -1,6 +1,8 @@
 //! Live reload for the dev server: a change hub, fed by a coalescing file watcher or by
 //! the host, an SSE endpoint that streams the changes, and a small browser client that
-//! hot-swaps stylesheets and reloads the page for everything else.
+//! hot-swaps stylesheets and reloads the page for everything else. After each swap the
+//! client dispatches `web-modules:css-reloaded` on the document, for code that mirrors
+//! document stylesheets elsewhere (constructable sheets adopted by shadow roots, say).
 //!
 //! A [`Change`] names what the browser should do: its [`ChangeKind`] and, for anything
 //! served, the URL, never a filesystem path. The stream is reachable by whatever can
@@ -10,6 +12,9 @@
 //! the stylesheets that include it; an unattributed partial edit becomes a "refresh
 //! every stylesheet" change instead. Hosts with their own compilers feed the index with
 //! [`LiveReload::record_dependencies`] and their own watchers with [`LiveReload::notify`].
+//! The watcher's behavior through symlinks is backend-defined; under
+//! [`FollowUnsafe`](crate::SymlinkMode::FollowUnsafe) an edit behind an out-of-tree
+//! link may not trigger a reload.
 //!
 //! The reload policy is the server's ([`ReloadMode`]): `full` reloads the page for
 //! non-CSS changes, `css` only hot-swaps and logs the rest, `off` serves no live routes
@@ -184,6 +189,22 @@ struct Hub {
 
 /// The live-reload hub: publish changes, subscribe to them, serve them as SSE.
 /// Cheap to clone (an `Arc`); the clones share one hub.
+///
+/// A host with its own watcher and compiler wires the hub like this:
+///
+/// ```no_run
+/// # use std::path::{Path, PathBuf};
+/// use web_modules::{LiveReload, Mount};
+///
+/// let live = LiveReload::new(&[Mount::new("/", "web")]);
+/// // After each compile, record what the served stylesheet was read from:
+/// live.record_dependencies("/app.css", [PathBuf::from("web/app.scss"), PathBuf::from("web/_vars.scss")]);
+/// // From your own watcher, publish what an edit means for the browser:
+/// live.notify(Path::new("web/_vars.scss"));
+/// // Serve the SSE stream wherever you serve pages (`router` adds the client):
+/// let events = live.events_router();
+/// # let _ = events;
+/// ```
 #[derive(Clone)]
 pub struct LiveReload(Arc<Hub>);
 

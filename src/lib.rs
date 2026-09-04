@@ -31,6 +31,32 @@
 //! - [`server`] / [`dev`]: serve embedded assets, or compile on the fly with
 //!   file-watching and live-reload.
 //!
+//! # Features
+//!
+//! On by default: `typescript`, `scss`, `tera`, `builder`, `symlink-move`.
+//! Two aggregates cover the rest:
+//!
+//! - `full`: the complete toolchain, `lean` plus the rolldown `bundle` path; what the
+//!   released `web-modules` binary ships.
+//! - `lean`: everything except the heavy, opt-in `bundle` (a second oxc tree); docs.rs
+//!   and the MSRV check build exactly this set.
+//!
+//! The remaining flags:
+//!
+//! - `minify`: JS minification (oxc_minifier). `dts`: `.d.ts` via isolated declarations.
+//! - `i18n`: XLIFF localisation merge. `icons`: favicons and app icons from a PNG.
+//! - `compress`: gzip sidecars for static serving.
+//! - `bundle`: CommonJS to ESM via rolldown (heavy; in `full`, not in `lean`).
+//! - `npm`: re-export `npm-utils` as `web_modules::npm` (resolve, install, ci).
+//! - `axum`: the embedded-assets [`server::Frontend`] router. `dev`: the live-reload
+//!   dev server on top of it.
+//! - `cli`: the `web-modules` binary. `env`: read its configuration from
+//!   `WEB_MODULES_*` variables.
+//! - `tracing`: warn about paths dropped by the reject list.
+//!
+//! The behavior policies (HTML generation, duplicate output paths, the output
+//! directory) are documented with the knobs, e.g. symlink modes on [`SymlinkMode`].
+//!
 //! [oxc]: https://oxc.rs
 
 mod error;

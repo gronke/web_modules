@@ -1420,6 +1420,143 @@ fn prune_level(
     Ok(())
 }
 
+/// Targets of every `url(...)` in a stylesheet, in source order and unresolved.
+///
+/// Read through the CSS tokenizer, where `url(...)` is a token of its own:
+/// comments never tokenize and a `url(` inside a string stays a string, so
+/// neither can be misread as a reference. `url("quoted")` tokenizes as a
+/// function whose argument is the string.
+fn url_targets(css: &str) -> Vec<String> {
+    let mut input = cssparser::ParserInput::new(css);
+    let mut parser = cssparser::Parser::new(&mut input);
+    let mut out = Vec::new();
+    collect_url_tokens(&mut parser, &mut out);
+    out
+}
+
+/// Walk every token, descending into blocks and functions (style bodies,
+/// `@media`, `image-set(...)`), collecting url targets.
+fn collect_url_tokens(parser: &mut cssparser::Parser<'_, '_>, out: &mut Vec<String>) {
+    use cssparser::Token;
+    while let Ok(token) = parser.next().cloned() {
+        match token {
+            Token::UnquotedUrl(target) => out.push(target.to_string()),
+            Token::Function(name) if name.eq_ignore_ascii_case("url") => {
+                let _ = parser.parse_nested_block(|args| {
+                    if let Ok(Token::QuotedString(target)) = args.next() {
+                        out.push(target.to_string());
+                    }
+                    Ok::<(), cssparser::ParseError<'_, ()>>(())
+                });
+            }
+            Token::Function(_)
+            | Token::ParenthesisBlock
+            | Token::SquareBracketBlock
+            | Token::CurlyBracketBlock => {
+                let _ = parser.parse_nested_block(|inner| {
+                    collect_url_tokens(inner, out);
+                    Ok::<(), cssparser::ParseError<'_, ()>>(())
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Where a `url()` target points.
+enum UrlTarget {
+    /// An absolute URL (incl. `data:`) or a protocol-relative host: nothing to
+    /// fetch out of the archive.
+    Remote,
+    /// A bare fragment (or empty target): resolves within the document.
+    Fragment,
+    /// A candidate file inside the package: percent-decoded, query and
+    /// fragment stripped.
+    Local(String),
+}
+
+/// Classify a target: [`url::Url`] decides "has a scheme"; the RFC 3986
+/// delimiters `?`/`#` bound the path of a relative reference, which is then
+/// percent-decoded.
+fn classify_target(target: &str) -> UrlTarget {
+    if target.is_empty() || target.starts_with('#') {
+        return UrlTarget::Fragment;
+    }
+    if target.starts_with("//") || url::Url::parse(target).is_ok() {
+        return UrlTarget::Remote;
+    }
+    let path = target.split(['?', '#']).next().unwrap_or(target);
+    match percent_encoding::percent_decode_str(path).decode_utf8() {
+        Ok(decoded) if !decoded.is_empty() => UrlTarget::Local(decoded.into_owned()),
+        _ => UrlTarget::Fragment,
+    }
+}
+
+/// A local target resolved against the directory of the stylesheet that names
+/// it, as a package-relative path, or `None` if it leaves the package.
+///
+/// Escapes reject rather than clamp: the package is served under its own
+/// mount, so a `../` chain past the package root points outside the mount and
+/// is not this package's file. RFC 3986 normalization would clamp it to the root.
+fn resolve_asset(css_dir: &Path, path: &str) -> Option<String> {
+    let mut parts: Vec<String> = css_dir
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            other => parts.push(other.to_string()),
+        }
+    }
+    let joined = parts.join("/");
+    path_safety::ensure_within(&joined).ok()?;
+    Some(joined)
+}
+
+/// Package-relative paths that the stylesheets already in `dest` reference and that
+/// are not there yet.
+///
+/// [`keep_browser_assets`] selects by extension, so a font or an image is dropped
+/// even when the stylesheet that needs it was kept: the reference lives inside the
+/// CSS, and nothing else here reads CSS. Collected once the stylesheets are on disk
+/// and fetched in another pass over the same archive, the shape the `package.json`
+/// pre-pass already uses.
+fn stylesheet_assets(dest: &Path) -> Vec<String> {
+    let Ok(files) = crate::core::walk::files_within(dest) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for rel in files
+        .iter()
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("css")))
+    {
+        let Ok(css) = fs::read_to_string(dest.join(rel)) else {
+            continue;
+        };
+        let dir = rel.parent().unwrap_or(Path::new(""));
+        for target in url_targets(&css) {
+            let UrlTarget::Local(local) = classify_target(&target) else {
+                continue;
+            };
+            if let Some(path) = resolve_asset(dir, &local) {
+                // Already kept by extension, or already fetched by an earlier pass.
+                if !dest.join(&path).exists() && !out.contains(&path) {
+                    out.push(path);
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 /// Extract `bytes` (an npm `.tar.gz` or a GitHub `.zip`) into `dest` per `extract`.
 /// GitHub archives carry a single top-level `repo-<ref>/` directory, stripped
 /// generically (its exact name depends on the ref).
@@ -1447,6 +1584,15 @@ fn extract_archive(
             Extract::BrowserAssets => {
                 let keep = move |rel: &str| strip_first(rel).and_then(keep_browser_assets);
                 extract::zip(bytes, dest, None, extract::Select::Matching(&keep))?;
+                let assets = stylesheet_assets(dest);
+                if !assets.is_empty() {
+                    let wanted = move |rel: &str| {
+                        strip_first(rel)
+                            .filter(|r| assets.iter().any(|a| a == r))
+                            .map(str::to_string)
+                    };
+                    extract::zip(bytes, dest, None, extract::Select::Matching(&wanted))?;
+                }
             }
             Extract::Full => {
                 let keep = move |rel: &str| strip_first(rel).map(str::to_string);
@@ -1482,6 +1628,15 @@ fn extract_archive(
             let pkg = PackageJson::from_path(&dest.join("package.json")).ok();
             let keep = keep_for(pkg);
             extract::tar_gz(bytes, dest, strip, extract::Select::Matching(&keep))?;
+            // A third pass for what only the stylesheets name: fonts and images are
+            // not kept by extension, and a stylesheet without them is a 404 the
+            // vendored tree looks complete enough to hide.
+            let assets = stylesheet_assets(dest);
+            if !assets.is_empty() {
+                let pairs: Vec<(&str, &str)> =
+                    assets.iter().map(|a| (a.as_str(), a.as_str())).collect();
+                extract::tar_gz(bytes, dest, strip, extract::Select::Files(&pairs))?;
+            }
         }
         Extract::Full => {
             extract::tar_gz(bytes, dest, strip, extract::Select::All)?;
@@ -1825,6 +1980,125 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("plain.js"), "const x = 1;\n").unwrap();
         assert_eq!(write_esm_wrapper(dir.path(), "plain.js"), None);
+    }
+
+    #[test]
+    fn url_targets_reads_quoted_bare_and_spaced_forms() {
+        let css = r#"
+            @font-face { src: url("./a.woff2") format("woff2"), url('./a.woff'); }
+            .b { background: url( ../img/b.png ) no-repeat; }
+            .c { background: URL(c.svg); }
+        "#;
+        // `format("woff2")` is not a `url(` call, so it contributes nothing; the
+        // scan resumes after each target rather than hunting for parentheses.
+        assert_eq!(
+            url_targets(css),
+            vec!["./a.woff2", "./a.woff", "../img/b.png", "c.svg"]
+        );
+    }
+
+    /// Comments never tokenize and strings stay strings, so neither can be
+    /// misread as a reference.
+    #[test]
+    fn url_targets_ignore_comments_and_string_contents() {
+        assert_eq!(
+            url_targets("/* url(fake.png) */ .a { src: url(real.woff2) }"),
+            vec!["real.woff2"]
+        );
+        assert_eq!(
+            url_targets(r#".a::before { content: "url(fake.png)" }"#),
+            Vec::<String>::new()
+        );
+    }
+
+    /// References inside nested constructs are found: blocks, at-rules and
+    /// functions like `image-set(...)`.
+    #[test]
+    fn url_targets_descend_into_blocks_and_functions() {
+        assert_eq!(
+            url_targets("@media (min-width: 1px) { .a { background: image-set(url(a.png) 1x) } }"),
+            vec!["a.png"]
+        );
+    }
+
+    /// EOF closes an unterminated construct (CSS syntax spec); the target is
+    /// what was written, never the rest of the file.
+    #[test]
+    fn url_targets_recover_at_eof() {
+        assert_eq!(url_targets(".a { src: url(\"oops"), vec!["oops"]);
+        assert_eq!(
+            url_targets(".a { src: url(ok) } .b { src: url("),
+            vec!["ok", ""]
+        );
+    }
+
+    #[test]
+    fn only_targets_inside_the_package_are_assets() {
+        assert!(matches!(classify_target("./a.woff2"), UrlTarget::Local(p) if p == "./a.woff2"));
+        assert!(
+            matches!(classify_target("../fonts/a.woff2"), UrlTarget::Local(p) if p == "../fonts/a.woff2")
+        );
+        assert!(
+            matches!(classify_target("a.woff2?v=2#i"), UrlTarget::Local(p) if p == "a.woff2"),
+            "query and fragment bound the path"
+        );
+        assert!(
+            matches!(classify_target("my%20font.woff2"), UrlTarget::Local(p) if p == "my font.woff2"),
+            "percent-escapes decode before path resolution"
+        );
+        assert!(matches!(classify_target(""), UrlTarget::Fragment));
+        assert!(matches!(classify_target("#glyph"), UrlTarget::Fragment));
+        assert!(matches!(
+            classify_target("//cdn.example/a.woff2"),
+            UrlTarget::Remote
+        ));
+        assert!(matches!(
+            classify_target("https://cdn.example/a.woff2"),
+            UrlTarget::Remote
+        ));
+        assert!(matches!(
+            classify_target("data:font/woff2;base64,AA"),
+            UrlTarget::Remote
+        ));
+    }
+
+    #[test]
+    fn assets_resolve_against_the_stylesheet_that_names_them() {
+        let dir = Path::new("iconfont");
+        assert_eq!(
+            resolve_asset(dir, "./material-icons.woff2").as_deref(),
+            Some("iconfont/material-icons.woff2")
+        );
+        assert_eq!(
+            resolve_asset(dir, "../fonts/a.woff2").as_deref(),
+            Some("fonts/a.woff2")
+        );
+        // Out of the package: the browser would fetch outside the mount, so
+        // it is not this package's file (reject, not RFC 3986 root-clamping).
+        assert_eq!(resolve_asset(dir, "../../secret"), None);
+    }
+
+    /// The reported case: a stylesheet is kept by extension and the font it names
+    /// is not, so the vendored tree looks complete and 404s in the browser.
+    #[test]
+    fn stylesheet_assets_finds_a_font_the_extension_filter_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir_all(root.join("iconfont")).unwrap();
+        fs::write(
+            root.join("iconfont/filled.css"),
+            r#"@font-face { src: url("./material-icons.woff2") format("woff2"); }"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            stylesheet_assets(root),
+            vec!["iconfont/material-icons.woff2".to_string()],
+        );
+
+        // Once it is on disk there is nothing left to fetch.
+        fs::write(root.join("iconfont/material-icons.woff2"), b"font").unwrap();
+        assert!(stylesheet_assets(root).is_empty());
     }
 
     #[test]

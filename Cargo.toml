@@ -105,6 +105,14 @@ semver = "1"
 # The WHATWG URL parser — module-specifier classification asks it whether a specifier
 # parses as an absolute URL, the browser's own first resolution step.
 url = "2"
+# Spec-grade CSS tokenizer (Servo) for the vendor `url()` pass: `url()` is a
+# token of its own, so comments and strings can never be misread as references.
+# Core rather than feature-gated: vendoring is the always-on core, and the tree
+# it adds is small (cssparser-macros, dtoa-short, itoa, phf, smallvec).
+cssparser = "0.37"
+# Decode a stylesheet reference's percent-escapes before resolving it as a
+# package path (already in the tree via `url`).
+percent-encoding = "2"
 
 # oxc toolchain (TypeScript transform + minify). Optional; pulled by `typescript`/`minify`.
 oxc_allocator = { version = "0.138", optional = true }

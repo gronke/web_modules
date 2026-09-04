@@ -22,6 +22,8 @@ Per-release notes are also published on each [GitHub Release](https://github.com
   The vendor shaping joins the `vendor-profile:` marker line, so a toggled rebuild re-vendors instead of reusing the differently-shaped cache.
 - The `full` feature now includes `bundle` (the rolldown CommonJS→ESM path), so `--features full` builds exactly what the released `web-modules` binary ships, and the action's from-source install matches the download.
   Library consumers on `full` now compile the rolldown / second-oxc tree; the new `lean` feature is the previous `full` set, and docs.rs and the MSRV check use it.
+- The README is an overview again: the CLI flag reference moved to [docs/CLI.md](docs/CLI.md), the behavior policies (HTML, duplicate outputs, the output directory, symlinks) to [docs/POLICIES.md](docs/POLICIES.md), and the Action reference to [docs/CI_GITHUB_ACTION.md](docs/CI_GITHUB_ACTION.md).
+  The library detail stays on docs.rs instead: the crate docs gained a feature-flags section (the default set, `full` and `lean`), and the live-reload module documents the `web-modules:css-reloaded` event, the symlink caveat and the hub wiring.
 
 ### Added
 

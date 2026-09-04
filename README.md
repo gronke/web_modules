@@ -29,6 +29,7 @@ Each is a Cargo `--features` flag:
 - **bundle** - CommonJS to ESM
 - **npm** - expose the `npm-utils` API as `web_modules::npm` (resolve · install · ci)
 - **axum · dev** - serve the frontend, with a live-reload dev server
+- **cli · env** - the `web-modules` binary, optionally configured from `WEB_MODULES_*` variables
 
 ## CLI
 
@@ -61,65 +62,8 @@ Options:
   -V, --version  Print version
 ```
 
-`build` is the **static counterpart of `dev`** — same source roots and processors, emitted to `--out` instead of served — and it vendors npm only when you pass `--package`/`--manifest`; `vendor` just fetches dependencies into `web_modules/`. Each compiler processor (typescript, scss, tera, minify, sourcemap, gzip, dts) has a `--<name>` / `--no-<name>` toggle, and `--no-default-features` turns the default-on set (typescript, scss, tera) off so you re-enable them individually. Run `web-modules <command> --help` for flags.
-
-`--minify` covers the whole dist tree — compiled TypeScript, copied `.js`/`.mjs`, Tera-rendered JS, `npm://` assets, and the vendored `web_modules/` (opt the npm content out with `--no-minify-web-modules` or `"minify": {"webModules": false}`). Every file is rewritten through one oxc parse→codegen pass; CSS needs no toggle, since grass always emits compressed.
-
-`--comments <keep|strip|collect|none>` sets the comment policy for emitted JS (package.json `"comments": "strip"`); unset, `--minify` implies `strip`. `strip` drops normal/JSDoc/annotation comments but keeps legal comments (`//!`, `/*!`, `@license`, `@preserve`) inline, so license text always ships. `collect` moves them into a `<output>.LEGAL.txt` sidecar beside each file — verbatim, deduplicated, blank-line separated, with a pointer comment left in the code; the format is stable, so compliance tooling may rely on it. `none` drops everything, for tiny embedded targets (the vendored `LICENSE`/`NOTICE` files still ship). CSS needs no policy: grass's compressed output already keeps only `/*!` loud comments. A legal comment (`/*!`, `@license`, `@preserve`) sitting above a type-only declaration that erases (a leading `interface` or `type`) is preserved, where `tsc` drops it with the declaration, so a module's license header survives even when its first statement is types.
-
-`--bundle` (requires the opt-in `bundle` feature; the released binary carries it) folds the built tree per entry point: each entry — `app.js` without `--bundle-entry` — keeps its exact URL with its imports inlined, shared and dynamically-imported code lands in content-hashed `chunks/`, and `importmap.json` + `web_modules/` drop out of the output, so your HTML keeps working unchanged. Minify, comments and sourcemap apply through rolldown's single pass (its maps reference the staged compiled modules, and `collect` degrades to inline legal comments in bundled files). The graph must be analyzable from the entries: a worker script or a second page's module needs its own `--bundle-entry`, and the build fails naming any survivor whose bare imports lost the import map. A source `.tera` page still renders with the real map (before bundling); the inline map it embeds goes unused once every import is inlined. A bundled build re-vendors from the network each time — the vendored tree is consumed, so there is nothing to reuse as a cache.
-
-`--sourcemap` (off by default, so an embedded dist stays lean) emits a source map for every compiled TypeScript file, with the sources embedded (`sourcesContent`) since `.ts` files never ship: `build` writes a `<file>.map` sidecar linked by file name, `dev` serves the map inline as a `data:` URL. Vendored packages' own shipped `.map` files follow the same toggle, and flipping it re-vendors instead of reusing the differently-shaped cache. SCSS is not covered — grass emits no source maps.
-
-A dependency may be a registry range, an https `.tgz`, or a git reference (`github:owner/repo#ref`); name it under `web_modules.sourceDependencies` and its TypeScript is compiled into the layout its own `tsconfig.json` declares.
-Pin a git dependency to a commit rather than a branch: a commit is cached by name and costs no network once vendored, while a branch is re-downloaded every run so that moving it is noticed.
-
-### Library builds
-
-Three flags turn `build` into a library compiler that produces an npm package rather than a deployable site, so a TypeScript element library can build with no Node toolchain.
-
-`--external <spec>` (repeatable, or a `web_modules.external` array) marks a bare import as intentionally unresolved: a library with a **peer** dependency emits `import … from "lit"` without vendoring it, and this keeps that specifier from failing the unresolved-import check while the emitted code stays bare. A bare name covers its subpaths, so `--external lit` also allows `lit/decorators.js`.
-
-`--dts` / `--no-dts` (off by default; or `"dts": true`) emits a `.d.ts` beside each compiled module via oxc's `isolatedDeclarations`. Declarations are produced per file with no type-checking, so every module boundary must carry an explicit type, so a source that omits one fails the build. That is the whole cost of shipping typings without `tsc --emitDeclarationOnly`.
-
-`--library` (alias `--no-page`; or `"library": true` / `"noPage": true`) skips the page scaffolding (the synthesized fallback `index.html` and the standalone `importmap.json`) that a library build would only delete. A source-provided `index.html` is still emitted, and the `.web-modules-out` marker is kept, so a rebuild into the same directory needs no `rm -rf`.
-
-### HTML policy
-
-The build never reads or rewrites your HTML.
-Pages are only generated where you opt in: a `*.tera` template (rendered with the generated import map as the `{{ importmap }}` variable), or the `--html`/`--template` fallback when no source provides an `index.html` at all.
-The generated import map is the contract — available as `importmap.json`, the `{{ importmap }}` Tera variable, and the `{importmap}` placeholder — and it is the only map the unresolved-import check validates against; a hand-authored page owns its own inline map.
-JavaScript rendered from a template joins the module graph and is validated like any other emitted module, with one ordering rule: runtime-helper vendoring is decided before templates render, so an `@oxc-project/runtime` import appearing only in template-rendered JavaScript fails the unresolved-import check instead of vendoring the runtime — put such code in a `.ts`/`.js` source instead.
-
-### Duplicate output paths
-
-When two sources claim one output path — `index.html` next to `index.html.tera`, `app.js` next to `app.ts`, `style.css` next to `style.scss`, or the same relative path in two roots — `build` fails before writing anything and lists every conflict; `dev` warns on the console instead.
-`--skip-duplicates` opts into precedence: the earlier root wins, and within a root a Tera template beats a literal file beats a transformed sibling — the same rule in `build` and `dev`.
-Generated outputs are reserved regardless: a source claiming `importmap.json`, a path under `web_modules/`, (with `--sourcemap`) the `.map` sidecar of a compiled file, or (with `--gzip`) the `.gz` sidecar of an emitted file fails the build even under `--skip-duplicates`.
-
-### Output directory
-
-Each build is staged in a temporary sibling directory and then **atomically replaces** `--out`, so the output always describes exactly the current sources — nothing from a previous build survives, and a failed build leaves the previous output untouched.
-`--out` must therefore be dedicated: absent, empty, or a previous build's output, which the build recognizes by the `.web-modules-out` marker it writes.
-Anything else — the project directory under `--out .`, a directory with your own files — is refused rather than deleted; delete a pre-existing output directory once when upgrading.
-Vendored packages are not re-downloaded on every build: the `web_modules/` cache carries over from the previous output and is re-validated, and packages you no longer request are pruned.
-
-### Symlinks
-
-What a symlink in a source tree means is selectable with `--symlinks` (also `Processors::symlinks`, the builders' `.symlinks(…)`, and `Frontend::symlinks`), consistently across `build`, `dev`, and the static router:
-
-| Mode | build | serving |
-|---|---|---|
-| `follow` (default) | a link resolving outside its own root fails the build | 404 |
-| `follow-unsafe` | every link publishes; a dangling one warns and skips | a dangling one 404s |
-| `redirect` | links are skipped with a warning | `307 Temporary Redirect`, the link content is the `Location` |
-| `move` | links are skipped with a warning | `308 Permanent Redirect`, same rule |
-
-Under `follow` a link works within its own source root and never across roots.
-The two redirect modes are the crate's own special sauce and are compiled behind the default-on `symlink-move` feature — `--no-default-features` yields a build in which a symlink can never become a redirect, while `follow` and `follow-unsafe` are always available.
-The redirect modes answer without ever opening the target — the link content is the `Location`, taken literally (plus the request's remaining components when a directory link is on the way) — which is also why a static build has nothing to emit for a link and skips it.
-In every mode, request-path traversal, the reject list, source-hiding, the SCSS import sandbox, and vendor-extraction hardening are unaffected: a symlink mode never relaxes a security sandbox.
-The live-reload watcher's behavior through links is backend-defined; under `follow-unsafe` an edit behind an out-of-tree link may not trigger a reload.
+Every flag and its `package.json` key: [docs/CLI.md](docs/CLI.md).
+The behavior policies (HTML, duplicate outputs, the output directory, symlinks): [docs/POLICIES.md](docs/POLICIES.md).
 
 ## Library
 
@@ -142,40 +86,14 @@ Build::new().root("web").vendor("lit@^3").out("dist").minify(true).run()?;
 Dev::new().root("web").serve("127.0.0.1:8080".parse()?).await?;
 ```
 
-Both layer over the lower-level `build(&BuildOptions { … })` / `dev::serve_with`, still public for fine-grained use. For the full `build.rs` / runtime API see the **[API docs][docs.rs]**.
-
-### Live reload
-
-The dev server watches every source root and streams what changed to the browser over SSE (`/_web_modules/live/events`); a small client (`/_web_modules/live/live.js`, injected before `</body>` of every served page) hot-swaps a changed stylesheet's `<link>` in place and reloads the page for anything else, since ES modules cannot be hot-replaced.
-Stylesheets compiled by the server record the partials they read, so an edit to `_vars.scss` names exactly the stylesheets that include it (and recompiles them: the mtime cache revalidates every dependency, not just the entry).
-The policy for non-stylesheet changes is the server's: `--live-reload full` (the default) reloads, `--live-reload css` only logs, `--no-live-reload` serves without the watcher, stream and client; `Dev::live_reload(ReloadMode)` is the builder form.
-The stream carries change kinds and served URLs, never filesystem paths.
-
-Hosts that compile or watch on their own plug into the same hub: `LiveReload::watch(mounts)` (or `::new` without a watcher), `record_dependencies(url, paths)` after each compile, `notify(path)` from their own watcher, `router()` / `events_router()` to mount the stream, `script_tag()` / `meta_tag()` for pages they render themselves (the client reads its endpoint from its own `src`, else from `<meta name="web-modules-live">`, so it also works when `import()`ed after a login).
-The client dispatches `web-modules:css-reloaded` on the document after each swap, for code that mirrors document stylesheets elsewhere (constructable sheets adopted by shadow roots, say).
+Both layer over the lower-level `build(&BuildOptions { … })` / `dev::serve_with`, still public for fine-grained use. For the full `build.rs` / runtime API see the **[API docs][docs.rs]**, the feature flags included.
+The behavior policies (HTML, duplicate outputs, the output directory, symlinks): [docs/POLICIES.md](docs/POLICIES.md).
 
 ## GitHub Actions
 
-A composite action builds a deployable `dist/` (vendor + transform + render, with the import map injected) — **no Node on the runner**. It downloads a prebuilt `web-modules` binary for the runner's OS/arch (Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64/arm64), or compiles from this action's source with `from-source: true`. Pin `@v0` to track the latest 0.x, or an exact `@v0.3.1` — which fetches the matching binary (reproducible); the `version` input overrides this. With `build: "false"` the action installs the verified binary onto `PATH` and stops — for jobs whose own scripts drive `web-modules` (`build`, `vendor`, `npm audit`). Publishing stays composed with the official actions.
+A composite action builds a deployable `dist/` (vendor + transform + render, with the import map injected) with no Node on the runner. It downloads a prebuilt `web-modules` binary for the runner's OS/arch (Linux x86_64/arm64, macOS arm64/x86_64, Windows x86_64/arm64), or compiles from this action's source with `from-source: true`.
 
-**Build a dist artifact:**
-
-```yaml
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: gronke/web_modules@v0
-        with:
-          packages: "lit@^3 bootstrap@^5"   # and/or: manifest: web (a dir) or web/package.json
-          template: web/index.html.tera     # or inline `html:`; omit for a minimal default
-          minify: true
-      - uses: actions/upload-artifact@v7
-        with: { name: site, path: dist }
-```
-
-**Deploy to GitHub Pages** — grant the Pages permissions + environment on the job, then build and publish with the standard actions:
+**Deploy to GitHub Pages** (grant the Pages permissions and environment on the job, then build and publish with the standard actions):
 
 ```yaml
 jobs:
@@ -197,21 +115,7 @@ jobs:
         uses: actions/deploy-pages@v5
 ```
 
-**Install the binary only** — when the repo's own scripts run `web-modules` themselves:
-
-```yaml
-jobs:
-  frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: gronke/web_modules@v0
-        with: { build: "false" }        # verified binary on PATH, no build
-      - run: scripts/frontend-build.sh  # your script calls `web-modules build …`
-      - run: web-modules npm audit web
-```
-
-Enable Pages once under *Settings → Pages → Source: GitHub Actions*. A **project** page is served under `/<repo>/`, so pass `mount: /<repo>/web_modules` and keep entry scripts **relative** (`./app.js`); a user/org `*.github.io` page serves at the root (default `mount: /web_modules`). This repo dogfoods the action — [`examples/gh-pages/`](examples/gh-pages) is built and deployed to Pages by [`.github/workflows/pages.yml`](.github/workflows/pages.yml). Run `web-modules build --help` for every flag.
+The dist-artifact and install-only recipes, version pinning and the input reference: [docs/CI_GITHUB_ACTION.md](docs/CI_GITHUB_ACTION.md).
 
 ## Examples
 

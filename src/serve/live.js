@@ -6,8 +6,9 @@
  * `<meta name="web-modules-live" content="<prefix>">`, else the crate default.
  *
  * A `css` change hot-swaps the matching <link rel="stylesheet"> (every stylesheet when
- * the change names none) and dispatches `web-modules:css-reloaded` on the document;
- * everything else reloads the page in `full` mode and only logs in `css` mode. */
+ * the change names none; nothing when it names one this page does not carry) and
+ * dispatches `web-modules:css-reloaded` on the document; everything else reloads the
+ * page in `full` mode and only logs in `css` mode. */
 (() => {
 	const DEFAULT_PREFIX = '/_web_modules/live';
 	const current = typeof document !== 'undefined' ? document.currentScript : null;
@@ -37,24 +38,48 @@
 		}
 	}
 
-	/* Swap the stylesheet(s) for `url`: all of them when the change carries no URL or
-	 * none matches (a partial edit the server could not attribute). The fresh link
-	 * loads next to the old one, which goes only once the new one is in, so nothing
-	 * flashes unstyled. */
+	/* Swap the stylesheet(s) for `url`: the links carrying that path, or every link when
+	 * the change carries no URL (a partial edit the server could not attribute). A named
+	 * URL that no link carries is not on this page: nothing to do. The fresh link loads
+	 * next to the old one, which goes only once the new one is in, so nothing flashes
+	 * unstyled; a swap still in flight for the same link is superseded by the newer
+	 * change, so two changes for one stylesheet never leave two links behind. */
+	const inFlight = new WeakMap(); // original <link> → its replacement still loading
+	const pending = new WeakSet(); // replacements still loading
+
 	function swapStylesheets(url) {
-		const links = [...document.querySelectorAll('link[rel~="stylesheet"][href]')];
+		const links = [...document.querySelectorAll('link[rel~="stylesheet"][href]')]
+			.filter(link => !pending.has(link));
 		const matching = url ? links.filter(link => samePath(link.href, url)) : [];
+		if (url && !matching.length) {
+			log(`${url} changed; no stylesheet on this page links it`);
+			return;
+		}
 		const targets = matching.length ? matching : links;
 		for (const link of targets) {
+			const superseded = inFlight.get(link);
+			if (superseded) {
+				superseded.remove();
+				pending.delete(superseded);
+			}
 			const fresh = link.cloneNode(false);
 			const next = new URL(link.href, location.href);
 			next.searchParams.set('live', String(Date.now()));
 			fresh.href = next.href;
+			pending.add(fresh);
+			inFlight.set(link, fresh);
 			fresh.addEventListener('load', () => {
+				if (inFlight.get(link) !== fresh) return; // a newer change took over
+				inFlight.delete(link);
+				pending.delete(fresh);
 				link.remove();
 				document.dispatchEvent(new CustomEvent('web-modules:css-reloaded', { detail: { url: next.pathname } }));
 			}, { once: true });
-			fresh.addEventListener('error', () => fresh.remove(), { once: true });
+			fresh.addEventListener('error', () => {
+				fresh.remove();
+				pending.delete(fresh);
+				if (inFlight.get(link) === fresh) inFlight.delete(link);
+			}, { once: true });
 			link.parentNode.insertBefore(fresh, link.nextSibling);
 		}
 	}

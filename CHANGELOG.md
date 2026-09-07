@@ -9,6 +9,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Changed
 
+- **Breaking:** `Processors` gained `external`, `dts` and `library`; a struct literal without `..Default::default()` no longer compiles.
 - The dev server's live reload hot-swaps stylesheets in place instead of reloading the page, and streams every change over SSE (`/_web_modules/live/events`) to a client of its own (`/_web_modules/live/live.js`); `tower-livereload` is gone.
   Non-stylesheet changes still reload the page by default; `--live-reload css` (`Dev::live_reload(ReloadMode::Css)`) turns that into a console note, `--no-live-reload` (`ReloadMode::Off`) serves without watcher, stream and client.
   The `dev` feature now pulls `futures-core` (the `Stream` trait axum's SSE response takes; already compiled in every axum build) and tokio's `sync`.
@@ -62,6 +63,9 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Fixed
 
+- A stylesheet that is only reached through another stylesheet's imports — recorded as a dependency, never compiled as an entry — publishes its dependents alone, and an edit outside every mount that the dependency index attributes to stylesheets (a vendored partial on a load path) hot-swaps them instead of also reloading the page.
+  Both cases previously published a URL no `<link>` carried, which the client turned into a refresh of every stylesheet.
+- The live client ignores a named stylesheet that no `<link>` on the page carries (only an unattributed change refreshes every stylesheet) and supersedes a swap still in flight for the same link, so two changes for one stylesheet never leave two `<link>` elements behind.
 - `vendor` follows the `url()` references in the stylesheets it keeps, so a font or an image that only a stylesheet names is vendored alongside it instead of 404ing in the browser.
   References are read through the CSS tokenizer (`cssparser`), so a `url(` inside a comment or a string never counts as one.
 - The dev server served a stale stylesheet after editing a partial: its cache was keyed on the entry's mtime alone.

@@ -12,6 +12,10 @@
 //! the stylesheets that include it; an unattributed partial edit becomes a "refresh
 //! every stylesheet" change instead. Hosts with their own compilers feed the index with
 //! [`LiveReload::record_dependencies`] and their own watchers with [`LiveReload::notify`].
+//! A stylesheet that is only ever reached through another stylesheet's imports — recorded
+//! as a dependency, never compiled as an entry — names its dependents alone, since no
+//! `<link>` carries its own URL; and an edit outside every mount that the index attributes
+//! to stylesheets (a vendored partial on a load path) is a stylesheet change, not a reload.
 //! The watcher's behavior through symlinks is backend-defined; under
 //! [`FollowUnsafe`](crate::SymlinkMode::FollowUnsafe) an edit behind an out-of-tree
 //! link may not trigger a reload.
@@ -174,6 +178,11 @@ impl DependencyIndex {
             .map(|urls| urls.iter().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// Whether `url` was ever recorded as a compiled entry.
+    fn is_entry(&self, url: &str) -> bool {
+        self.by_url.contains_key(url)
+    }
 }
 
 struct Hub {
@@ -324,7 +333,8 @@ impl LiveReload {
 
     /// The changes a set of edited paths means for the browser, deduplicated. Editor
     /// scratch files are ignored; anything under no mount, or of a kind that has no served
-    /// URL, becomes a bare [`Change::reload`] so no path leaks into the stream. A directory
+    /// URL, becomes a bare [`Change::reload`] — unless the dependency index attributes it
+    /// to stylesheets, which then swap alone — so no path leaks into the stream. A directory
     /// stands for the files inside it: a watcher learns of a new directory before it watches
     /// it, so files created in the same instant (a checkout, an unpacked folder) would
     /// otherwise go unnoticed.
@@ -362,21 +372,30 @@ impl LiveReload {
             let canonical = canonical_path(&path);
             let dependents = lock(&self.0.deps).dependents(&canonical);
             let Some(rel) = self.url_for(&canonical) else {
+                // Outside every mount: a recorded partial (a vendored stylesheet on a
+                // load path) is a stylesheet change; anything else can only mean a reload.
+                let attributed = !dependents.is_empty();
                 for url in dependents {
                     push(Change::css(url), &mut changes);
                 }
-                push(Change::reload(), &mut changes);
+                if !attributed {
+                    push(Change::reload(), &mut changes);
+                }
                 continue;
             };
             let ext = extension(&name);
             match ext.as_str() {
                 "scss" => {
+                    let own = swap_extension(&rel, "css");
                     if name.starts_with('_') {
                         if dependents.is_empty() {
                             push(Change::css_all(), &mut changes);
                         }
-                    } else {
-                        push(Change::css(swap_extension(&rel, "css")), &mut changes);
+                    } else if dependents.is_empty() || self.is_entry(&own) {
+                        // A stylesheet reached only through another stylesheet's imports
+                        // (recorded as a dependency, never compiled as an entry) names its
+                        // dependents alone: no `<link>` carries its own URL.
+                        push(Change::css(own), &mut changes);
                     }
                     for url in dependents {
                         push(Change::css(url), &mut changes);
@@ -405,14 +424,24 @@ impl LiveReload {
                 "js" | "mjs" => push(Change::new(ChangeKind::Js, Some(rel)), &mut changes),
                 "html" | "htm" => push(Change::new(ChangeKind::Html, Some(rel)), &mut changes),
                 _ => {
+                    let attributed = !dependents.is_empty();
                     for url in dependents {
                         push(Change::css(url), &mut changes);
                     }
-                    push(Change::reload(), &mut changes);
+                    if !attributed {
+                        push(Change::reload(), &mut changes);
+                    }
                 }
             }
         }
         changes
+    }
+
+    /// Whether `url` was compiled as an entry (recorded via
+    /// [`record_dependencies`](Self::record_dependencies)), as opposed to only read while
+    /// compiling another stylesheet.
+    fn is_entry(&self, url: &str) -> bool {
+        lock(&self.0.deps).is_entry(url)
     }
 
     /// The URL a canonical path is served at, through the most specific mount containing it.
@@ -725,6 +754,33 @@ mod tests {
             one(&live, partial),
             vec![Change::css("/app.css"), Change::css("/modules/x/style.css")]
         );
+    }
+
+    #[test]
+    fn a_stylesheet_reached_only_through_another_names_its_dependents_alone() {
+        let (tmp, live) = tree();
+        let theme = tmp.path().join("web/theme.scss");
+        let app = tmp.path().join("web/app.scss");
+        // Before anything compiled, a plain stylesheet is its own URL…
+        assert_eq!(one(&live, theme.clone()), vec![Change::css("/theme.css")]);
+        // …but once /app.css is known to import it, and nothing ever compiled /theme.css
+        // as an entry, an edit names /app.css alone: no `<link>` carries /theme.css.
+        live.record_dependencies("/app.css", [app.clone(), theme.clone()]);
+        assert_eq!(one(&live, theme), vec![Change::css("/app.css")]);
+        // The entry itself still names its own URL, once.
+        assert_eq!(one(&live, app), vec![Change::css("/app.css")]);
+    }
+
+    #[test]
+    fn an_attributed_edit_outside_every_mount_is_a_stylesheet_change() {
+        let (tmp, live) = tree();
+        let vendored = tmp.path().join("vendor/_variables.scss");
+        std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
+        // Unattributed: no served URL, so only a reload is safe.
+        assert_eq!(one(&live, vendored.clone()), vec![Change::reload()]);
+        // Recorded as a partial of a served stylesheet: swap that one, no reload.
+        live.record_dependencies("/app.css", [vendored.clone()]);
+        assert_eq!(one(&live, vendored), vec![Change::css("/app.css")]);
     }
 
     #[test]

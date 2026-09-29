@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -57,7 +57,7 @@ jobs:
 
   deploy:
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}

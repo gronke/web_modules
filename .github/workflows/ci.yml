@@ -22,7 +22,7 @@ jobs:
   # matrix below. No Node here — the e2e suites run off the prebuilt binaries.
   build:
     name: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -227,7 +227,7 @@ jobs:
   e2e:
     name: e2e · ${{ matrix.example }}
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -305,7 +305,7 @@ jobs:
       ${{ github.event_name == 'workflow_dispatch'
           || (github.event_name == 'pull_request'
               && contains(github.event.pull_request.labels.*.name, 'ci:tauri')) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     defaults:
       run:
         working-directory: examples/tauri
@@ -375,7 +375,7 @@ jobs:
   # declared MSRV can't drift apart. Resolves deps unlocked, matching what a fresh `cargo install` gets.
   msrv:
     name: msrv
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -398,7 +398,7 @@ jobs:
   # a broken release stops at that gate instead of turning every pull request red.
   action-guard:
     name: action min-version guard
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -427,7 +427,7 @@ jobs:
   # and mounts the repo read-only.
   actionlint:
     name: actionlint
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
@@ -441,7 +441,7 @@ jobs:
   # bump over the last release tag, and a **Breaking marker demands the right bump size.
   changelog-check:
     name: changelog coherence
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7

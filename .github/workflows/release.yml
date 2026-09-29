@@ -45,7 +45,7 @@ jobs:
   # the crates.io not-already-published probe via check-release-readiness).
   gate:
     name: gate
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     # A release cut from a `v<version>-rcN` marker is not a release: markers are pipeline
     # internals and never reach the registry. On the push paths the coherence check does the
     # distinguishing instead — a marker's manifest version never matches its tag, while a
@@ -110,7 +110,7 @@ jobs:
     # branch push fires no events), and a dispatch from any other branch derives no
     # version and is ignored.
     if: ${{ github.ref_type == 'branch' && startsWith(github.ref_name, 'release/v') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -142,7 +142,7 @@ jobs:
     name: the draft the binaries attach to
     needs: gate
     if: ${{ github.event_name == 'push' && github.ref_type == 'tag' && !endsWith(github.ref_name, '-sig') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     steps:
       - name: Ensure a draft exists for this tag
         env:
@@ -172,7 +172,7 @@ jobs:
       # extension (Windows only); the trailing comment is the Rust triple built natively there.
       matrix:
         include:
-          - { slug: linux-x86_64, runner: ubuntu-latest } # x86_64-unknown-linux-gnu
+          - { slug: linux-x86_64, runner: "${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}" } # x86_64-unknown-linux-gnu
           - { slug: linux-arm64, runner: ubuntu-24.04-arm } # aarch64-unknown-linux-gnu
           - { slug: macos-arm64, runner: macos-26 } # aarch64-apple-darwin (latest)
           - { slug: macos-x86_64, runner: macos-26-intel } # x86_64-apple-darwin (Intel, latest)
@@ -223,7 +223,7 @@ jobs:
   checksums:
     name: SHA256SUMS
     needs: binaries
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     steps:
       - name: Generate + upload SHA256SUMS
         env:
@@ -252,7 +252,7 @@ jobs:
           && !github.event.release.draft
           && !github.event.release.prerelease
           && !contains(github.event.release.tag_name, '-rc') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     environment: crates-io
     permissions:
       contents: write # the moving major tag
@@ -325,7 +325,7 @@ jobs:
     if: >-
       ${{ github.event_name == 'push' && github.ref_type == 'tag'
           && endsWith(github.ref_name, '-sig') }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     environment: crates-io
     permissions:
       contents: write # the moving major, when the reconcile still owes it

@@ -18,7 +18,7 @@ permissions:
 jobs:
   cut:
     name: cut release branch
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
         with:

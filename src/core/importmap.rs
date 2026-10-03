@@ -17,8 +17,15 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::LazyLock;
+
+use url::Url;
 
 use crate::{Error, Result};
+
+/// Base for the map's URLs, which carry none; a special scheme, so `\` splits like `/`.
+static ADDRESS_BASE: LazyLock<Url> =
+    LazyLock::new(|| Url::parse("http://importmap.invalid/").expect("a valid base URL"));
 
 /// An ES module import map (`{ "imports": { … } }`).
 ///
@@ -82,15 +89,57 @@ impl Importmap {
         self.imports.iter().map(|(k, v)| (k.as_str(), v.as_str()))
     }
 
-    /// Whether `specifier` resolves under this map: an exact key, or a prefix key
-    /// (ending in `/`) that prefixes the specifier, e.g. `"lit/"` resolves
-    /// `lit/decorators.js`.
+    /// Whether [`resolve`](Self::resolve) maps `specifier`.
     pub fn resolves(&self, specifier: &str) -> bool {
-        self.imports.contains_key(specifier)
-            || self
-                .imports
-                .keys()
-                .any(|k| k.ends_with('/') && specifier.starts_with(k.as_str()))
+        self.resolve(specifier).is_some()
+    }
+
+    /// The address `specifier` maps to: its exact key's URL, or the longest `/`-key's URL
+    /// with the rest appended, as written, not normalized.
+    /// `None` where no key matches or the browser refuses the match.
+    ///
+    /// ```
+    /// use web_modules::importmap::Importmap;
+    /// let mut map = Importmap::new();
+    /// map.insert("lit", "/web_modules/lit/index.js")
+    ///    .insert("lit/", "/web_modules/lit/")
+    ///    .insert("lit/directives/", "/vendor/directives/");
+    /// assert_eq!(map.resolve("lit").as_deref(), Some("/web_modules/lit/index.js"));
+    /// assert_eq!(map.resolve("lit/html.js").as_deref(), Some("/web_modules/lit/html.js"));
+    /// assert_eq!(
+    ///     map.resolve("lit/directives/repeat.js").as_deref(),
+    ///     Some("/vendor/directives/repeat.js"),
+    /// );
+    /// assert_eq!(map.resolve("react"), None);
+    /// assert_eq!(map.resolve("lit/../secret.js"), None);
+    /// ```
+    pub fn resolve(&self, specifier: &str) -> Option<String> {
+        let (key, url) = self.entry(specifier)?;
+        let rest = &specifier[key.len()..];
+        // The browser's checks, on the URLs it would parse.
+        let address = ADDRESS_BASE.join(url).ok()?;
+        if key.ends_with('/') && !address.as_str().ends_with('/') {
+            return None;
+        }
+        if !rest.is_empty() {
+            let target = address.join(rest).ok()?;
+            if !target.as_str().starts_with(address.as_str()) {
+                return None;
+            }
+        }
+        Some(format!("{url}{rest}"))
+    }
+
+    /// The exact key, else the longest prefix key.
+    fn entry(&self, specifier: &str) -> Option<(&str, &str)> {
+        if let Some((key, url)) = self.imports.get_key_value(specifier) {
+            return Some((key, url));
+        }
+        self.imports
+            .iter()
+            .filter(|(key, _)| key.ends_with('/') && specifier.starts_with(key.as_str()))
+            .max_by_key(|(key, _)| key.len())
+            .map(|(key, url)| (key.as_str(), url.as_str()))
     }
 
     /// Read an import-map fragment file: a JSON document whose top-level
@@ -211,6 +260,97 @@ mod tests {
         assert!(map.resolves("lit/decorators.js")); // via the prefix key
         assert!(!map.resolves("react"));
         assert!(!map.resolves("@oxc-project/runtime/helpers/decorate"));
+    }
+
+    #[test]
+    fn resolve_maps_exact_and_prefix_keys() {
+        let mut map = Importmap::new();
+        map.insert("lit", "/web_modules/lit/index.js")
+            .insert("lit/", "/web_modules/lit/");
+        // Exact beats prefix.
+        assert_eq!(
+            map.resolve("lit").as_deref(),
+            Some("/web_modules/lit/index.js")
+        );
+        map.insert("pkg/", "/web_modules/pkg/")
+            .insert("pkg/index.js", "/elsewhere.js");
+        assert_eq!(
+            map.resolve("pkg/index.js").as_deref(),
+            Some("/elsewhere.js")
+        );
+        assert_eq!(
+            map.resolve("lit/decorators.js").as_deref(),
+            Some("/web_modules/lit/decorators.js")
+        );
+        assert_eq!(map.resolve("lit/").as_deref(), Some("/web_modules/lit/"));
+        assert_eq!(map.resolve("react"), None);
+        assert!(!map.resolves("react"));
+    }
+
+    #[test]
+    fn resolve_takes_the_longest_prefix() {
+        let mut map = Importmap::new();
+        // `@shell/` sorts first.
+        map.insert("@shell/components/", "/components/")
+            .insert("@shell/", "/shell/");
+        assert_eq!(
+            map.resolve("@shell/components/button.js").as_deref(),
+            Some("/components/button.js")
+        );
+        assert_eq!(
+            map.resolve("@shell/registry.js").as_deref(),
+            Some("/shell/registry.js")
+        );
+    }
+
+    #[test]
+    fn resolve_refuses_what_the_browser_blocks() {
+        let mut map = Importmap::new();
+        map.insert("lit/", "/web_modules/lit/")
+            .insert("bad/", "/vendor/bad")
+            .insert("pkg/", "/pkg/")
+            .insert("pkg/sub/", "/pkg-sub")
+            .insert("cdn/", "https://cdn.example/pkg/")
+            .insert("broken", "http://[::1");
+        // Climbing above the key's URL, however spelled.
+        for specifier in [
+            "lit/../secret.js",
+            "lit/a/../../secret.js",
+            "lit/%2e%2e/secret.js",
+            "lit/..\\secret.js",
+            "lit//etc/passwd",
+            "lit///evil.example/x.js",
+            "lit/https://evil.example/x.js",
+            "cdn/../x.js",
+        ] {
+            assert_eq!(map.resolve(specifier), None, "{specifier}");
+            assert!(!map.resolves(specifier), "{specifier}");
+        }
+        // No fallback to a shorter key.
+        for specifier in ["bad/x.js", "bad/", "pkg/sub/x.js"] {
+            assert_eq!(map.resolve(specifier), None, "{specifier}");
+        }
+        assert_eq!(map.resolve("broken"), None);
+        assert_eq!(
+            map.resolve("lit/a/../b.js").as_deref(),
+            Some("/web_modules/lit/a/../b.js")
+        );
+        assert_eq!(
+            map.resolve("cdn/x.js").as_deref(),
+            Some("https://cdn.example/pkg/x.js")
+        );
+        assert_eq!(map.resolve("pkg/x.js").as_deref(), Some("/pkg/x.js"));
+    }
+
+    #[test]
+    fn a_key_without_trailing_slash_is_no_prefix() {
+        let mut map = Importmap::new();
+        map.insert("lit", "/web_modules/lit/index.js")
+            .insert("@scope/pkg", "/pkg.js");
+        for specifier in ["lit/decorators.js", "lit-html", "@scope/pkg/x.js", "li"] {
+            assert_eq!(map.resolve(specifier), None, "{specifier}");
+            assert!(!map.resolves(specifier), "{specifier}");
+        }
     }
 
     #[test]

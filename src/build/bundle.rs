@@ -264,33 +264,6 @@ fn matches_external(external: &[String], value: &str) -> bool {
     })
 }
 
-/// Resolve `specifier` through import-map pairs exactly like the browser would: exact entry
-/// first, then the longest trailing-`/` prefix entry. Returns the mapped URL.
-fn importmap_resolve(pairs: &[(String, String)], specifier: &str) -> Option<String> {
-    let mut exact = None;
-    let mut best_prefix: Option<(&str, &str)> = None;
-    for (spec, url) in pairs {
-        if spec == specifier {
-            exact = Some(url.clone());
-        } else if let Some(prefix) = spec.strip_suffix('/') {
-            if let Some(rest) = specifier.strip_prefix(prefix) {
-                if rest.starts_with('/')
-                    && best_prefix.is_none_or(|(best, _)| prefix.len() > best.len())
-                {
-                    best_prefix = Some((prefix, url));
-                }
-            }
-        }
-    }
-    if let Some(url) = exact {
-        return Some(url);
-    }
-    best_prefix.map(|(prefix, url)| {
-        let rest = &specifier[prefix.len() + 1..];
-        format!("{}{}", url, rest)
-    })
-}
-
 async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundleOutput> {
     let root = opts
         .root
@@ -334,21 +307,13 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
         })
         .collect::<Vec<_>>()
         .into();
-    let map_pairs: Arc<[(String, String)]> = opts
-        .importmap
-        .map(|m| {
-            m.iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default()
-        .into();
+    let importmap: Arc<Importmap> = Arc::new(opts.importmap.cloned().unwrap_or_default());
     let root_for_resolve = Arc::new(root.clone());
     let is_external = rolldown::IsExternal::Fn(Some(Arc::new(
         move |specifier: &str, _importer: Option<&str>, resolved: bool| {
             let external_list = Arc::clone(&external_list);
             let external_paths = Arc::clone(&external_paths);
-            let map_pairs = Arc::clone(&map_pairs);
+            let importmap = Arc::clone(&importmap);
             let root = Arc::clone(&root_for_resolve);
             let specifier = specifier.to_string();
             Box::pin(async move {
@@ -397,7 +362,7 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
                 if matches_external(&external_list, &specifier) {
                     return Ok(true);
                 }
-                if let Some(url) = importmap_resolve(&map_pairs, &specifier) {
+                if let Some(url) = importmap.resolve(&specifier) {
                     return Ok(matches_external(&external_list, &url));
                 }
                 Ok(false)

@@ -87,6 +87,7 @@ Dev::new().root("web").serve("127.0.0.1:8080".parse()?).await?;
 ```
 
 Both layer over the lower-level `build(&BuildOptions { … })` / `dev::serve_with`, still public for fine-grained use. For the full `build.rs` / runtime API see the **[API docs][docs.rs]**, the feature flags included.
+A host checking emitted JavaScript itself reads imports with `imports::read_module`, as the build does, and maps bare specifiers with `Importmap::resolve`.
 The behavior policies (HTML, duplicate outputs, the output directory, symlinks): [docs/POLICIES.md](docs/POLICIES.md).
 
 ## GitHub Actions

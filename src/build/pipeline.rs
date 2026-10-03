@@ -399,7 +399,7 @@ fn remove_vendor_maps(dir: &Path) -> Result<()> {
 
 /// The one vendored package that comes from the pipeline itself rather than
 /// `BuildOptions::specs`: the oxc transform-helper runtime.
-const OXC_RUNTIME_PACKAGE: &str = "@oxc-project/runtime";
+const OXC_RUNTIME_PACKAGE: &str = crate::module_graph::RUNTIME_MODULE;
 
 /// `out` may be replaced only when this build can own it: absent, empty, or marked as
 /// a previous build's output. Anything else is someone else's directory — the current

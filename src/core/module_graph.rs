@@ -2,11 +2,12 @@
 //!
 //! Produced where each file is handled — the TypeScript transform captures its imports
 //! from the AST it just built (see [`crate::typescript`]), and the static-copy step
-//! reads verbatim `.js` as it copies — so the build never re-reads the output tree to
-//! reconstruct them. That re-reading is what made the previous text scan fragile: it
-//! ran against minified output whose spacing its matcher didn't expect. Reading the
-//! specifiers structurally, at transform time, removes both that fragility and the
-//! false positives from `import`/`from` text inside comments or strings.
+//! reads verbatim `.js` as it copies, both via [`crate::imports`]. The build never
+//! re-reads the output tree to reconstruct them. That re-reading is what made the
+//! previous text scan fragile: it ran against minified output whose spacing its matcher
+//! didn't expect. Reading the specifiers structurally, at transform time, removes both
+//! that fragility and the false positives from `import`/`from` text inside comments or
+//! strings.
 //!
 //! Scope: the graph describes the JavaScript the current build's steps emitted —
 //! transform outputs, copied `.js`/`.mjs`, and JavaScript rendered from `*.tera` —
@@ -140,7 +141,8 @@ pub fn classify(spec: &str) -> SpecifierClass {
     }
 }
 
-fn is_runtime_import(spec: &str) -> bool {
+/// The runtime package itself or a path under it.
+pub(crate) fn is_runtime_import(spec: &str) -> bool {
     spec == RUNTIME_MODULE || spec.starts_with(&format!("{RUNTIME_MODULE}/"))
 }
 
@@ -233,34 +235,30 @@ fn imports_from_source_ast(
     js: &str,
     module_only: bool,
 ) -> std::result::Result<SourceImports, String> {
+    use crate::imports;
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
-    let mut imports = Vec::new();
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, js, SourceType::mjs()).parse();
-    if !parsed.diagnostics.has_errors() {
-        static_from_program(&parsed.program, &mut imports);
-        dynamic_from_program(&parsed.program, &mut imports);
+    if !parsed.fatal_error && !parsed.diagnostics.has_errors() {
         return Ok(SourceImports {
-            imports,
+            imports: graph_imports(imports::from_program(&parsed.program)),
             parsed: true,
         });
     }
     if module_only {
-        let first = parsed
-            .diagnostics
-            .iter()
-            .next()
-            .map(|d| format!("{d:?}"))
-            .unwrap_or_default();
-        return Err(format!("does not parse as an ES module: {first}"));
+        return Err(format!(
+            "does not parse as an ES module: {}",
+            imports::first_parse_error(js, &parsed)
+        ));
     }
     let script = Parser::new(&allocator, js, SourceType::script()).parse();
-    if !script.diagnostics.has_errors() {
-        dynamic_from_program(&script.program, &mut imports);
+    if !script.fatal_error && !script.diagnostics.has_errors() {
+        let mut read = imports::ModuleImports::default();
+        imports::walk_program(&script.program, &mut read);
         return Ok(SourceImports {
-            imports,
+            imports: graph_imports(read),
             parsed: true,
         });
     }
@@ -270,65 +268,22 @@ fn imports_from_source_ast(
     })
 }
 
-/// Static `import` / `export … from` specifiers from a parsed program's top-level module
-/// statements. Reading them from the AST is spacing-agnostic (so minified output is
-/// covered) and never mistakes `import`/`from` text in a comment or string for an import.
+/// Call on the final AST, so an import minification dropped is not recorded.
 #[cfg(feature = "typescript")]
-pub fn static_from_program(program: &oxc_ast::ast::Program, imports: &mut Vec<ModuleImport>) {
-    use oxc_ast::ast::Statement;
-    for stmt in &program.body {
-        let source = match stmt {
-            Statement::ImportDeclaration(decl) => Some(decl.source.value.as_str()),
-            Statement::ExportAllDeclaration(decl) => Some(decl.source.value.as_str()),
-            Statement::ExportFromDeclaration(decl) => Some(decl.source.value.as_str()),
-            _ => None,
-        };
-        if let Some(spec) = source {
-            imports.push(ModuleImport::new(spec.to_string(), false));
-        }
-    }
+pub(crate) fn imports_from_program(program: &oxc_ast::ast::Program) -> Vec<ModuleImport> {
+    graph_imports(crate::imports::from_program(program))
 }
 
-/// Dynamic `import("…")` specifiers with a string-literal argument, read by walking the
-/// transformed AST — so a nested or minified `import(...)` is found the same as a
-/// top-level one, with no dependence on emitted-text spacing. A computed argument
-/// (`import(url)`) names no static module, so there is nothing to record.
+/// The reader's imports as graph records; its counts have none.
 #[cfg(feature = "typescript")]
-pub fn dynamic_from_program(program: &oxc_ast::ast::Program, imports: &mut Vec<ModuleImport>) {
-    use oxc_ast_visit::Visit;
-    DynamicImports { imports }.visit_program(program);
-}
-
-/// Records the string-literal specifier of every dynamic `import()` it meets, anywhere
-/// in the tree (in a callback, a nested expression, …), not just at the top level.
-#[cfg(feature = "typescript")]
-struct DynamicImports<'i> {
-    imports: &'i mut Vec<ModuleImport>,
-}
-
-#[cfg(feature = "typescript")]
-impl<'a> oxc_ast_visit::Visit<'a> for DynamicImports<'_> {
-    fn visit_import_expression(&mut self, expr: &oxc_ast::ast::ImportExpression<'a>) {
-        use oxc_ast::ast::Expression;
-        // A string literal and a no-substitution template name the module statically —
-        // the browser resolves `import(`lit`)` exactly like `import("lit")`. A computed
-        // specifier (`import(url)`, `import(`pkg/${x}`)`) names none.
-        match &expr.source {
-            Expression::StringLiteral(spec) => self
-                .imports
-                .push(ModuleImport::new(spec.value.as_str().to_string(), true)),
-            Expression::TemplateLiteral(tpl) if tpl.is_no_substitution_template() => {
-                if let Some(quasi) = tpl.single_quasi() {
-                    self.imports
-                        .push(ModuleImport::new(quasi.as_str().to_string(), true));
-                }
-            }
-            _ => {}
-        }
-        // Descend into the call's own children too — a dynamic import can nest inside
-        // another's specifier expression.
-        oxc_ast_visit::walk::walk_import_expression(self, expr);
-    }
+fn graph_imports(read: crate::imports::ModuleImports) -> Vec<ModuleImport> {
+    read.imports
+        .into_iter()
+        .map(|import| {
+            let dynamic = import.kind == crate::imports::ImportKind::Dynamic;
+            ModuleImport::new(import.specifier, dynamic)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -617,7 +572,13 @@ mod tests {
         // caller to surface, not a silent empty import set. (`await` cannot be an
         // identifier in module code.)
         let err = imports_from_source("var await = 1;", true).unwrap_err();
-        assert!(err.contains("does not parse as an ES module"), "got: {err}");
+        assert!(
+            err.starts_with("does not parse as an ES module: "),
+            "got: {err}"
+        );
+        // Not the diagnostic's debug dump.
+        assert!(err.ends_with(" at 1:5"), "got: {err}");
+        assert!(!err.contains("OxcDiagnostic"), "got: {err}");
     }
 
     #[cfg(feature = "typescript")]

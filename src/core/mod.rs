@@ -7,9 +7,12 @@
 //! This is the counterpart to the feature-gated `processors` (which transform your
 //! source) and the build/serve toolchain (which delivers the result): everything here
 //! vendors and composes the inputs.
+//! `imports` alone needs a feature: `typescript`, for the parser.
 
 pub mod env;
 pub mod importmap;
+#[cfg(feature = "typescript")]
+pub mod imports;
 pub mod module_graph;
 pub mod mount;
 pub mod npm_link;

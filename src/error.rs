@@ -36,7 +36,8 @@ pub enum Error {
     I18n(String),
     /// Icon (favicon / app-icon) generation failure.
     Icons(String),
-    /// `build` pipeline failure (e.g. an emitted module imports an unresolved bare specifier).
+    /// `build` pipeline failure (e.g. an emitted module imports an unresolved bare specifier),
+    /// or a source `imports::read_module` cannot parse.
     Build(String),
     /// Composition (`Mount`) / tsconfig generation failure.
     Compose(String),

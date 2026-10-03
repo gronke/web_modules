@@ -230,9 +230,7 @@ pub(crate) fn rewrite_js_capturing(
     });
     let legal = collect_legal(&ret.legal_comments, source);
 
-    let mut imports = Vec::new();
-    crate::module_graph::static_from_program(&program, &mut imports);
-    crate::module_graph::dynamic_from_program(&program, &mut imports);
+    let imports = crate::module_graph::imports_from_program(&program);
 
     Ok(TranspileOutput {
         code,
@@ -522,9 +520,7 @@ pub(crate) fn compile_str_capturing(
     // rewritten it: dead-code elimination can drop an import the transform still carried,
     // and the graph must describe the code that ships. Still structural — the emitted
     // text is never scanned.
-    let mut imports = Vec::new();
-    crate::module_graph::static_from_program(&program, &mut imports);
-    crate::module_graph::dynamic_from_program(&program, &mut imports);
+    let imports = crate::module_graph::imports_from_program(&program);
 
     Ok(TranspileOutput {
         code,

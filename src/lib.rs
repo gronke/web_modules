@@ -15,6 +15,8 @@
 //!   tree (via `npm-utils`) and accumulate the import map.
 //! - [`importmap`]: a deterministic import-map composer (build, merge fragments,
 //!   render the `<script type="importmap">`).
+//! - [`imports`] (feature `typescript`): one ES module's imports, as the build reads
+//!   them.
 //!
 //! **Processors** (applied to your source and assets):
 //! - [`typescript`]: TypeScript and modern JS → browser JS via oxc, with legacy
@@ -69,6 +71,9 @@ mod core;
 pub use core::mount::Mount;
 pub use core::symlinks::SymlinkMode;
 pub use core::{env, importmap, mount, reject, static_files, symlinks, tsconfig, vendor, walk};
+// Public, unlike the graph built on it.
+#[cfg(feature = "typescript")]
+pub use core::imports;
 // Crate-internal for now: the graph's overwrite/ownership semantics are still
 // settling, so it is not part of the public API yet.
 pub(crate) use core::module_graph;

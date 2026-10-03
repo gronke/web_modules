@@ -31,6 +31,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Added
 
+- `imports::read_module` (feature `typescript`): one ES module's imports, computed `import()` calls and decorators.
 - `Importmap::resolve`: the address a bare specifier maps to, or `None` where the browser refuses it.
 - `web_modules::live`: the live-reload hub behind the dev server, for hosts with their own compilers or watchers: `LiveReload::watch(mounts)` / `::new`, `record_dependencies(url, paths)`, `notify(path)`, `publish(change)`, `router()` / `events_router()`, `script_tag()` / `meta_tag()`, `inject_script(router, prefix)`.
   The stream says what changed as a kind and a served URL, never as a filesystem path; the browser client swaps a changed `<link rel="stylesheet">` without a flash and dispatches `web-modules:css-reloaded`.
@@ -67,6 +68,9 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Fixed
 
+- An `.mjs` parse error names the parser's message and position.
+- `import(("./x.js"))` joins the module graph.
+- A lone surrogate in a specifier reads as U+FFFD.
 - A stylesheet that is only reached through another stylesheet's imports — recorded as a dependency, never compiled as an entry — publishes its dependents alone, and an edit outside every mount that the dependency index attributes to stylesheets (a vendored partial on a load path) hot-swaps them instead of also reloading the page.
   Both cases previously published a URL no `<link>` carried, which the client turned into a refresh of every stylesheet.
 - The live client ignores a named stylesheet that no `<link>` on the page carries (only an unattributed change refreshes every stylesheet) and supersedes a swap still in flight for the same link, so two changes for one stylesheet never leave two `<link>` elements behind.

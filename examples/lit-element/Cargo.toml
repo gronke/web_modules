@@ -17,3 +17,6 @@ include_dir = "0.7"
 [build-dependencies]
 # Build-time baking needs the compilers + Tera (renders web/index.html.tera) — no axum/tokio.
 web_modules = { path = "../..", default-features = false, features = ["typescript", "scss", "tera"] }
+# e2e/resolution.json for tests/importmap.spec.ts.
+serde_json = "1"
+url = "2"

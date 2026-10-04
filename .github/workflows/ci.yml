@@ -272,15 +272,16 @@ jobs:
         env:
           E2E_SERVER: ${{ github.workspace }}/e2e-bins/${{ matrix.example }}
           PW_CACHE_HIT: ${{ steps.pw-cache.outputs.cache-hit }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           npm ci
           npm run test:types
           # `--with-deps` shells out to apt, and only the browser is cached — so on a cache hit the
           # apt round bought nothing and cost the happy path a minute apiece, three jobs in
           # parallel. It is also how a stalled archive.ubuntu.com burned 25 minutes here. The
-          # runner image already carries what headless chromium needs; install the system libraries
-          # only when the browser itself has to be fetched.
-          if [ "$PW_CACHE_HIT" = "true" ]; then
+          # GitHub-hosted image already carries what headless chromium needs; the self-hosted tier
+          # does not (libnspr4), and the browser cache is shared across both.
+          if [ "$PW_CACHE_HIT" = "true" ] && [ "$RUNNER_ENVIRONMENT" = "github-hosted" ]; then
             npx playwright install chromium
           else
             npx playwright install --with-deps chromium

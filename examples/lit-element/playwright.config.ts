@@ -2,6 +2,7 @@ import { defineConfig, devices } from '@playwright/test';
 
 const PORT = 8080;
 const baseURL = `http://127.0.0.1:${PORT}`;
+const parity = /importmap-parity\.spec\.ts/;
 
 // Tests the example exactly as shipped: the frontend baked by `build.rs` and served
 // *embedded* in the binary — no live-reload, no on-the-fly compilation — so runs are
@@ -18,7 +19,16 @@ export default defineConfig({
     baseURL,
     trace: 'on-first-retry',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    // Opt-in: the import-map table in the other engines.
+    ...(process.env.E2E_ALL_BROWSERS
+      ? [
+          { name: 'firefox', use: { ...devices['Desktop Firefox'] }, testMatch: parity },
+          { name: 'webkit', use: { ...devices['Desktop Safari'] }, testMatch: parity },
+        ]
+      : []),
+  ],
   webServer: {
     // CI runs the prebuilt binary ($E2E_SERVER, an absolute path from the build job's artifact);
     // locally it falls back to `cargo run`.

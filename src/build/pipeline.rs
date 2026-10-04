@@ -961,6 +961,12 @@ fn build_into(stage: &Path, previous: &Path, opts: &BuildOptions<'_>) -> Result<
     // applies to a non-vendored build: importing a bare specifier you didn't vendor
     // is a real error. The generated map is the only validation target: the build
     // never reads a page back, so a hand-authored `index.html` owns its inline map.
+    // A bundled page ships no map, so there it is read as the staged files it names.
+    let importmap = if bundling {
+        staged_importmap(&importmap, opts.mount)
+    } else {
+        importmap
+    };
     let unresolved: Vec<(String, String)> = graph
         .unresolved(&importmap)
         .into_iter()
@@ -1066,10 +1072,26 @@ fn emit_winner(
     Ok(())
 }
 
+/// `map` with the mount read as `/web_modules`, the URL of the staged vendored tree, so a
+/// subpath mount (`/repo/web_modules`, GitHub project pages) or a relative one still names
+/// the files `bundle_stage` loads.
+fn staged_importmap(map: &crate::importmap::Importmap, mount: &str) -> crate::importmap::Importmap {
+    let mut staged = crate::importmap::Importmap::new();
+    for (spec, url) in map.iter() {
+        let value = url
+            .strip_prefix(mount)
+            .map(|rest| format!("/web_modules{rest}"))
+            .unwrap_or_else(|| url.to_string());
+        staged.insert(spec, value);
+    }
+    staged
+}
+
 /// Fold the validated stage per entry point: rolldown bundles in place — its single
 /// pass applies minify, the comment policy and source maps to everything it emits —
 /// then `web_modules/`, `importmap.json` and every inlined module leave the tree,
 /// and the non-bundled survivors get the output rewrite emission deferred.
+/// `importmap` is the [staged](staged_importmap) one.
 #[cfg(feature = "bundle")]
 fn bundle_stage(
     stage: &Path,
@@ -1093,23 +1115,11 @@ fn bundle_stage(
         }
     }
 
-    // The bundler's alias resolver expects URL = `/` + stage-relative path; a subpath
-    // mount (`/repo/web_modules`, GitHub project pages) or a relative one is
-    // normalized here so resolution still lands in the staged tree.
-    let mut normalized = crate::importmap::Importmap::new();
-    for (spec, url) in importmap.iter() {
-        let value = url
-            .strip_prefix(opts.mount)
-            .map(|rest| format!("/web_modules{rest}"))
-            .unwrap_or_else(|| url.to_string());
-        normalized.insert(spec, &value);
-    }
-
     let out = super::bundle::bundle_split(&super::bundle::SplitBundleOptions {
         entries,
         root: stage,
         out_dir: stage,
-        importmap: Some(&normalized),
+        importmap: Some(importmap),
         external: &[],
         chunk_filenames: "chunks/[name]-[hash].js",
         minify: opts.output.minify,

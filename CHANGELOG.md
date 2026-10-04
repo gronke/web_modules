@@ -32,7 +32,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 ### Added
 
 - `imports::read_module` (feature `typescript`): one ES module's imports, computed `import()` calls and decorators.
-- `Importmap::resolve`: the address a bare specifier maps to, or `None` where the browser refuses it.
+- `Importmap::resolve`: the URL the browser fetches for a bare specifier, or `None` where it refuses.
 - `web_modules::live`: the live-reload hub behind the dev server, for hosts with their own compilers or watchers: `LiveReload::watch(mounts)` / `::new`, `record_dependencies(url, paths)`, `notify(path)`, `publish(change)`, `router()` / `events_router()`, `script_tag()` / `meta_tag()`, `inject_script(router, prefix)`.
   The stream says what changed as a kind and a served URL, never as a filesystem path; the browser client swaps a changed `<link rel="stylesheet">` without a flash and dispatches `web-modules:css-reloaded`.
 - `scss::compile_file_tracked`: `compile_file` plus the list of files the compile read (the entry and every partial), for caches and dependency maps.
@@ -78,7 +78,7 @@ Per-release notes are also published on each [GitHub Release](https://github.com
   References are read through the CSS tokenizer (`cssparser`), so a `url(` inside a comment or a string never counts as one.
 - The dev server served a stale stylesheet after editing a partial: its cache was keyed on the entry's mtime alone.
   A compiled stylesheet now revalidates every file it read.
-- The build's import check refuses what the browser refuses.
+- The build's import check refuses what the browser refuses; a relative `--mount` needs `./` unless `--bundle`.
 
 ## [0.7.0] - 2026-08-21
 

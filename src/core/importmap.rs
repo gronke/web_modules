@@ -19,19 +19,26 @@ use std::fs;
 use std::path::Path;
 use std::sync::LazyLock;
 
-use url::Url;
+use url::{Position, Url};
 
 use crate::{Error, Result};
 
-/// Base for the map's URLs, which carry none; a special scheme, so `\` splits like `/`.
+/// The page the map's relative URLs are read against: the site root, on a special scheme
+/// so `\` splits like `/`.
 static ADDRESS_BASE: LazyLock<Url> =
     LazyLock::new(|| Url::parse("http://importmap.invalid/").expect("a valid base URL"));
+
+/// The same root on https, which keeps the `:80` an http page drops.
+static HTTPS_BASE: LazyLock<Url> =
+    LazyLock::new(|| Url::parse("https://importmap.invalid/").expect("a valid base URL"));
 
 /// An ES module import map (`{ "imports": { … } }`).
 ///
 /// This is the imports-only dialect the build emits and validates — not a WHATWG
-/// import-map processor. `scopes`, base-URL resolution and multi-map merging are out
-/// of scope, because the build only ever interprets the map it generated itself.
+/// import-map processor. `scopes` and multi-map merging are out of scope, because the
+/// build only ever interprets the map it generated itself; relative URLs are read against
+/// the site root (see [`resolve`](Self::resolve)).
+/// URL-like keys and specifiers (`/x/`, `./x/`, `https://…`) are compared as written.
 /// The struct is the wire shape: serde derives both directions of the
 /// `{ "imports": { … } }` document, so parsing and printing cannot drift apart.
 /// Unknown top-level keys (`scopes`, `integrity`, …) are ignored on read.
@@ -94,9 +101,14 @@ impl Importmap {
         self.resolve(specifier).is_some()
     }
 
-    /// The address `specifier` maps to: its exact key's URL, or the longest `/`-key's URL
-    /// with the rest appended, as written, not normalized.
-    /// `None` where no key matches or the browser refuses the match.
+    /// The URL the browser fetches for a bare `specifier`, `None` where it throws: the exact
+    /// key's address, else the longest `/`-key's with the rest joined on.
+    /// Normalized and percent-encoded, as read on an http page at the site root; origin-relative
+    /// where the map's URL is, and a `//` URL keeps the port it names.
+    /// To read it as a file path, decode it per segment and refuse a segment that decodes to
+    /// `.` or `..` or holds `/` or `\`.
+    /// A rest that climbs out once `\` splits like `/` is refused on any scheme, as Chromium
+    /// and WebKit refuse it.
     ///
     /// ```
     /// use web_modules::importmap::Importmap;
@@ -115,23 +127,45 @@ impl Importmap {
     /// ```
     pub fn resolve(&self, specifier: &str) -> Option<String> {
         let (key, url) = self.entry(specifier)?;
-        let rest = &specifier[key.len()..];
-        // The browser's checks, on the URLs it would parse.
-        let address = ADDRESS_BASE.join(url).ok()?;
+        let relative = is_relative(url);
+        let address = if relative {
+            read_relative(url)
+        } else {
+            Url::parse(url).ok()
+        }?;
         if key.ends_with('/') && !address.as_str().ends_with('/') {
             return None;
         }
-        if !rest.is_empty() {
-            let target = address.join(rest).ok()?;
-            if !target.as_str().starts_with(address.as_str()) {
-                return None;
+        let target = match &specifier[key.len()..] {
+            "" => address,
+            rest => {
+                let under = |rest: &str| {
+                    let target = address.join(rest).ok()?;
+                    target
+                        .as_str()
+                        .starts_with(address.as_str())
+                        .then_some(target)
+                };
+                if rest.contains('\\') {
+                    under(&rest.replace('\\', "/"))?;
+                }
+                under(rest)?
             }
-        }
-        Some(format!("{url}{rest}"))
+        };
+        Some(if !relative {
+            target.into()
+        } else if target[..Position::BeforePath] == ADDRESS_BASE[..Position::BeforePath] {
+            target[Position::BeforePath..].to_string()
+        } else {
+            format!("//{}", &target[Position::BeforeUsername..])
+        })
     }
 
-    /// The exact key, else the longest prefix key.
+    /// The exact key, else the longest prefix key; the browser drops an empty key.
     fn entry(&self, specifier: &str) -> Option<(&str, &str)> {
+        if specifier.is_empty() {
+            return None;
+        }
         if let Some((key, url)) = self.imports.get_key_value(specifier) {
             return Some((key, url));
         }
@@ -182,6 +216,24 @@ impl Importmap {
         fs::write(path, self.to_json())?;
         Ok(())
     }
+}
+
+/// Whether the browser reads `url` against the page: anything else must be absolute.
+fn is_relative(url: &str) -> bool {
+    url.starts_with('/') || url.starts_with("./") || url.starts_with("../")
+}
+
+/// A relative `url` read at the site root; a port the page's scheme may call default stays.
+fn read_relative(url: &str) -> Option<Url> {
+    let http = ADDRESS_BASE.join(url).ok()?;
+    if http.port().is_none() {
+        if let Ok(https) = HTTPS_BASE.join(url) {
+            if https.port().is_some() {
+                return Some(https);
+            }
+        }
+    }
+    Some(http)
 }
 
 /// Escape JSON for embedding in an HTML `<script>` element. Script data can only be
@@ -311,6 +363,7 @@ mod tests {
             .insert("pkg/", "/pkg/")
             .insert("pkg/sub/", "/pkg-sub")
             .insert("cdn/", "https://cdn.example/pkg/")
+            .insert("ns/", "foo://host/ns/")
             .insert("broken", "http://[::1");
         // Climbing above the key's URL, however spelled.
         for specifier in [
@@ -322,6 +375,7 @@ mod tests {
             "lit///evil.example/x.js",
             "lit/https://evil.example/x.js",
             "cdn/../x.js",
+            "ns/..\\x.js",
         ] {
             assert_eq!(map.resolve(specifier), None, "{specifier}");
             assert!(!map.resolves(specifier), "{specifier}");
@@ -333,13 +387,53 @@ mod tests {
         assert_eq!(map.resolve("broken"), None);
         assert_eq!(
             map.resolve("lit/a/../b.js").as_deref(),
-            Some("/web_modules/lit/a/../b.js")
+            Some("/web_modules/lit/b.js")
         );
         assert_eq!(
             map.resolve("cdn/x.js").as_deref(),
             Some("https://cdn.example/pkg/x.js")
         );
         assert_eq!(map.resolve("pkg/x.js").as_deref(), Some("/pkg/x.js"));
+    }
+
+    #[test]
+    fn resolve_reads_addresses_as_the_browser_does() {
+        let mut map = Importmap::new();
+        map.insert("dot/", "/web_modules/dot/.")
+            .insert("up/", "/web_modules/up/..")
+            .insert("dotrel/", "./web_modules/dotrel/")
+            .insert("proto/", "//cdn.example/proto/")
+            .insert("p80/", "//cdn.example:80/p80/")
+            .insert("p443/", "//cdn.example:443/p443/")
+            .insert("enc/", "/web_modules/ü nicode/")
+            .insert("rel/", "web_modules/rel/")
+            .insert("lead/", " /web_modules/lead/");
+        for (specifier, address) in [
+            ("dot/", "/web_modules/dot/"),
+            ("dot/x.js", "/web_modules/dot/x.js"),
+            ("up/x.js", "/web_modules/x.js"),
+            ("dotrel/x.js", "/web_modules/dotrel/x.js"),
+            ("proto/x.js", "//cdn.example/proto/x.js"),
+            ("p80/x.js", "//cdn.example:80/p80/x.js"),
+            ("p443/x.js", "//cdn.example:443/p443/x.js"),
+            ("enc/a b.js", "/web_modules/%C3%BC%20nicode/a%20b.js"),
+        ] {
+            assert_eq!(
+                map.resolve(specifier).as_deref(),
+                Some(address),
+                "{specifier}"
+            );
+        }
+        // Neither absolute nor `/`, `./` or `../`.
+        assert_eq!(map.resolve("rel/x.js"), None);
+        assert_eq!(map.resolve("lead/x.js"), None);
+    }
+
+    #[test]
+    fn an_empty_key_is_no_key() {
+        let mut map = Importmap::new();
+        map.insert("", "/empty.js");
+        assert_eq!(map.resolve(""), None);
     }
 
     #[test]

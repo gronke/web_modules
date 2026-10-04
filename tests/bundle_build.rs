@@ -287,3 +287,42 @@ fn bundling_inlines_vendored_bare_imports_and_guards_orphans() {
         app.len()
     );
 }
+
+/// lit and the packages it imports, since vendoring is not transitive.
+fn lit() -> Vec<web_modules::vendor::PackageSpec> {
+    [
+        ("lit", "^3"),
+        ("lit-html", "^3"),
+        ("lit-element", "^4"),
+        ("@lit/reactive-element", "^2"),
+    ]
+    .map(|(name, range)| web_modules::vendor::PackageSpec::npm(name, range))
+    .into()
+}
+
+#[cfg(feature = "typescript")]
+#[test]
+#[ignore = "network: downloads lit from the npm registry"]
+fn bundling_takes_a_relative_mount() {
+    // The browser would refuse `web_modules/…`, but a bundled page ships no import map.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("web");
+    write(
+        &root,
+        "app.js",
+        "import { html } from \"lit\";\nconsole.log(html`x`);\n",
+    );
+    let out = dir.path().join("out");
+    let specs = lit();
+    let mut o = opts(&root, &out, &[]);
+    o.specs = &specs;
+    o.mount = "web_modules";
+    build(&o).unwrap();
+    let app = std::fs::read_to_string(out.join("app.js")).unwrap();
+    let read = web_modules::imports::read_module(&app).unwrap();
+    assert!(
+        read.imports.is_empty(),
+        "lit is inlined; got {:?}",
+        read.imports
+    );
+}

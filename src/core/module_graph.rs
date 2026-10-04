@@ -350,6 +350,29 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_reports_what_the_browser_refuses() {
+        let mut graph = ModuleGraph::new();
+        graph.insert(
+            "app.js",
+            vec![
+                ModuleImport::new("lit/x.js".into(), false),
+                ModuleImport::new("lit/../x.js".into(), false),
+                ModuleImport::new("bad/x.js".into(), true),
+            ],
+        );
+        let mut map = crate::importmap::Importmap::new();
+        map.insert("lit/", "/web_modules/lit/")
+            .insert("bad/", "/vendor/bad");
+        assert_eq!(
+            graph.unresolved(&map),
+            [
+                ("app.js".to_string(), "lit/../x.js".to_string()),
+                ("app.js".to_string(), "bad/x.js".to_string()),
+            ]
+        );
+    }
+
+    #[test]
     fn unresolved_ignores_traversing_relative_and_absolute_specifiers() {
         // A relative or absolute specifier is classified structurally and copied through verbatim;
         // it is never turned into a filesystem path, so a traversing import is inert at build time

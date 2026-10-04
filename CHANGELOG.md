@@ -79,6 +79,8 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 - The dev server served a stale stylesheet after editing a partial: its cache was keyed on the entry's mtime alone.
   A compiled stylesheet now revalidates every file it read.
 - The build's import check refuses what the browser refuses; a relative `--mount` needs `./` unless `--bundle`.
+- `bundle_split` and `--bundle` load a mapped specifier from the URL the browser fetches, and fail on one the map refuses or sends off-site.
+- A `--bundle` build fails on a bare import left in its output.
 
 ## [0.7.0] - 2026-08-21
 

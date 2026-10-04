@@ -405,3 +405,239 @@ fn split_refuses_a_relative_import_escaping_root() {
     };
     assert!(err.to_string().contains("outside the bundle root"), "{err}");
 }
+
+/// Bundle `app.js` under `root` with `map`, returning the emitted JS concatenated.
+fn split_app(root: &Path, map: &Importmap, external: &[String]) -> web_modules::Result<String> {
+    let out = root.parent().unwrap().join("out");
+    let _ = std::fs::remove_dir_all(&out);
+    bundle_split(&SplitBundleOptions {
+        entries: &[PathBuf::from("app.js")],
+        root,
+        out_dir: &out,
+        importmap: Some(map),
+        external,
+        chunk_filenames: "chunks/[name]-[hash].js",
+        minify: false,
+        sourcemap: false,
+        comments: web_modules::Comments::Keep,
+    })?;
+    Ok(walkdir::WalkDir::new(&out)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "js"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap())
+        .collect())
+}
+
+fn write_all(root: &Path, files: &[(&str, &str)]) {
+    for (rel, content) in files {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+}
+
+fn marker(name: &str) -> String {
+    format!("export default (globalThis.__m ?? '{name}').length;\n")
+}
+
+#[test]
+fn importmap_specifiers_load_what_the_browser_loads() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("dist");
+    write_all(
+        &root,
+        &[
+            (
+                "app.js",
+                "import a from '@shell/components/button.js';\n\
+                 import b from 'pkg/index.js';\n\
+                 export const v = a + b;\n",
+            ),
+            ("components/button.js", &marker("MARKER_COMPONENTS")),
+            ("shell/components/button.js", &marker("MARKER_DECOY_SHELL")),
+            ("elsewhere.js", &marker("MARKER_EXACT")),
+            ("pkg/index.js", &marker("MARKER_DECOY_PKG")),
+        ],
+    );
+    let mut map = Importmap::new();
+    // Sorted, `@shell/` and `pkg/` come first.
+    map.insert("@shell/", "/shell/")
+        .insert("@shell/components/", "/components/")
+        .insert("pkg/", "/pkg/")
+        .insert("pkg/index.js", "/elsewhere.js");
+
+    let all = split_app(&root, &map, &[]).unwrap();
+    assert!(all.contains("MARKER_COMPONENTS"), "{all}");
+    assert!(all.contains("MARKER_EXACT"), "{all}");
+    assert!(!all.contains("MARKER_DECOY"), "{all}");
+}
+
+#[test]
+fn split_refuses_a_specifier_the_import_map_refuses() {
+    for specifier in ["lit/../secret.js", "bad/x.js"] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("dist");
+        write_all(
+            &root,
+            &[
+                ("app.js", &format!("import '{specifier}';\n")),
+                ("web_modules/secret.js", &marker("MARKER_SECRET")),
+                ("vendor/bad/x.js", &marker("MARKER_BAD")),
+            ],
+        );
+        let mut map = Importmap::new();
+        map.insert("lit/", "/web_modules/lit/")
+            .insert("bad/", "/vendor/bad");
+
+        let err = match split_app(&root, &map, &[]) {
+            Ok(all) => panic!("{specifier} was bundled:\n{all}"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains(&format!("the import map refuses {specifier}")),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn split_never_falls_back_to_a_shorter_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("dist");
+    write_all(
+        &root,
+        &[
+            ("web_modules/lit/cdn/x.js", &marker("MARKER_DECOY_LIT")),
+            ("pkg/index.js", &marker("MARKER_DECOY_PKG")),
+        ],
+    );
+    let mut map = Importmap::new();
+    map.insert("lit/", "/web_modules/lit/")
+        .insert("lit/cdn/", "https://cdn.example/lit/")
+        .insert("pkg/", "/pkg/")
+        .insert("pkg/index.js", "https://cdn.example/x.js");
+    for specifier in ["lit/cdn/x.js", "pkg/index.js"] {
+        write_all(
+            &root,
+            &[(
+                "app.js",
+                &format!("export {{ default }} from '{specifier}';\n"),
+            )],
+        );
+        let err = match split_app(&root, &map, &[]) {
+            Ok(all) => panic!("{specifier} was bundled:\n{all}"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            err.contains(&format!("sends {specifier} off-site")),
+            "{err}"
+        );
+        // External, it is left to the browser.
+        let all = split_app(&root, &map, &["https://cdn.example/".to_string()]).unwrap();
+        assert!(all.contains(specifier) && !all.contains("MARKER"), "{all}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn split_loads_the_file_at_the_url_and_no_other() {
+    // A `*` in the root is no wildcard, and nothing probes for an extension.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("a*b").join("dist");
+    write_all(&root, &[("web_modules/lit/x.js", &marker("MARKER_X"))]);
+    let mut map = Importmap::new();
+    map.insert("lit/", "/web_modules/lit/");
+    write_all(
+        &root,
+        &[("app.js", "export { default } from 'lit/x.js';\n")],
+    );
+    let all = split_app(&root, &map, &[]).unwrap();
+    assert!(all.contains("MARKER_X"), "{all}");
+    write_all(&root, &[("app.js", "export { default } from 'lit/x';\n")]);
+    if let Ok(all) = split_app(&root, &map, &[]) {
+        panic!("lit/x was bundled:\n{all}");
+    }
+}
+
+/// The table the browsers check, row by row: a site-root address inlines the file at its
+/// decoded path and no other, and any other answer inlines nothing.
+#[test]
+fn split_bundles_the_import_map_table_as_the_browser_loads_it() {
+    const TABLE: &str = include_str!("importmap_parity.json");
+    let map = Importmap::from_json_str(TABLE, "importmap_parity.json").unwrap();
+    let table: serde_json::Value = serde_json::from_str(TABLE).unwrap();
+    let keys: Vec<&String> = table["imports"].as_object().unwrap().keys().collect();
+    let cases = table["cases"].as_array().unwrap();
+
+    // The file a site-root address names; `None` for a directory or another site.
+    let file = |address: &str| -> Option<String> {
+        let path = address.strip_prefix('/').filter(|p| !p.starts_with('/'))?;
+        let path = path.split(['?', '#']).next().unwrap();
+        let segments: Vec<String> = path
+            .split('/')
+            .map(|s| {
+                let decoded = percent_encoding::percent_decode_str(s).decode_utf8();
+                decoded.unwrap().into_owned()
+            })
+            .collect();
+        (!segments.last()?.is_empty()).then(|| segments.join("/"))
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("dist");
+    let mut marks = BTreeMap::new();
+    for path in cases
+        .iter()
+        .filter_map(|c| c["address"].as_str().and_then(file))
+    {
+        let mark = format!("<MARK-{}>", marks.len());
+        marks.entry(path).or_insert(mark);
+    }
+    for (path, mark) in &marks {
+        write_all(&root, &[(path.as_str(), &marker(mark))]);
+    }
+
+    for case in cases {
+        let specifier = case["specifier"].as_str().unwrap();
+        let literal = serde_json::to_string(specifier).unwrap();
+        write_all(
+            &root,
+            &[("app.js", &format!("export {{ default }} from {literal};\n"))],
+        );
+        let bundled = split_app(&root, &map, &[]);
+        let inlined = |all: &String| all.matches("<MARK-").count();
+        match case["address"].as_str() {
+            Some(address) => match file(address) {
+                Some(path) => {
+                    let all = bundled.unwrap_or_else(|e| panic!("{specifier:?}: {e}"));
+                    assert!(
+                        all.contains(&marks[&path]) && inlined(&all) == 1,
+                        "{specifier:?} inlined other than {path}:\n{all}"
+                    );
+                }
+                None => {
+                    let off_site = !address.starts_with('/') || address.starts_with("//");
+                    let err = bundled
+                        .err()
+                        .unwrap_or_else(|| panic!("{specifier:?} bundled"));
+                    assert!(!off_site || err.to_string().contains("off-site"), "{err}");
+                }
+            },
+            // A matching key: the browser throws instead of trying a shorter one.
+            None if keys.iter().any(|k| {
+                !specifier.is_empty()
+                    && (*k == specifier || (k.ends_with('/') && specifier.starts_with(k.as_str())))
+            }) =>
+            {
+                let err = bundled
+                    .err()
+                    .unwrap_or_else(|| panic!("{specifier:?} bundled"));
+                assert!(err.to_string().contains("refuses"), "{err}");
+            }
+            None => assert!(
+                bundled.as_ref().map_or(true, |all| inlined(all) == 0),
+                "{specifier:?} inlined a file: {bundled:?}"
+            ),
+        }
+    }
+}

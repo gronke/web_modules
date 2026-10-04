@@ -247,7 +247,6 @@ fn bundling_works_inside_an_ambient_tokio_runtime() {
 #[test]
 #[ignore = "network: downloads lit from the npm registry"]
 fn bundling_inlines_vendored_bare_imports_and_guards_orphans() {
-    use web_modules::vendor::PackageSpec;
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("web");
     write(
@@ -261,7 +260,7 @@ fn bundling_inlines_vendored_bare_imports_and_guards_orphans() {
         "import { css } from \"lit\";\nconsole.log(css);\n",
     );
     let out = dir.path().join("out");
-    let specs = [PackageSpec::npm("lit", "^3")];
+    let specs = lit();
 
     // `extra.js` imports lit by bare specifier but is no entry: with the import map
     // gone it would break in the browser, so the build refuses and names it.
@@ -324,5 +323,27 @@ fn bundling_takes_a_relative_mount() {
         read.imports.is_empty(),
         "lit is inlined; got {:?}",
         read.imports
+    );
+}
+
+#[test]
+#[ignore = "network: downloads lit from the npm registry"]
+fn bundling_refuses_a_bare_import_the_bundle_keeps() {
+    // lit alone: no file answers its own imports of lit-html and the rest.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("web");
+    write(
+        &root,
+        "app.js",
+        "import { html } from \"lit\";\nconsole.log(html`x`);\n",
+    );
+    let out = dir.path().join("out");
+    let specs = [web_modules::vendor::PackageSpec::npm("lit", "^3")];
+    let mut o = opts(&root, &out, &[]);
+    o.specs = &specs;
+    let err = build(&o).unwrap_err().to_string();
+    assert!(
+        err.contains("app.js: import \"lit-html\"") && err.contains("--external"),
+        "got {err}"
     );
 }

@@ -51,6 +51,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rolldown::plugin::{
+    HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage, Plugin, PluginContext,
+};
+
 use crate::core::importmap::Importmap;
 use crate::{Error, Result};
 
@@ -176,9 +180,9 @@ pub struct SplitBundleOptions<'a> {
     pub root: &'a Path,
     /// Output directory; may equal `root` to bundle in place.
     pub out_dir: &'a Path,
-    /// Import map consulted at bundle time. A specifier that the map resolves to an absolute
-    /// URL path (`/…`) is loaded from the matching file under `root`; both exact entries and
-    /// trailing-`/` prefix entries apply, mirroring browser semantics.
+    /// Import map consulted at bundle time: a specifier loads the file under `root` at the
+    /// site-root URL [`Importmap::resolve`] gives it, and one the map refuses, or sends
+    /// off-site without being external, fails the bundle.
     pub importmap: Option<&'a Importmap>,
     /// Specifiers and URL-path prefixes to keep **external** (emitted verbatim for the
     /// browser's import map): an entry matches exactly, or by prefix when it ends with `/`.
@@ -264,6 +268,71 @@ fn matches_external(external: &[String], value: &str) -> bool {
     })
 }
 
+/// Loads a bare specifier the import map resolves from the file under `root` at that URL,
+/// so the bundle inlines what the browser would fetch: no other key, no extension probing.
+/// A specifier the map refuses, or sends off-site, fails the bundle.
+#[derive(Debug)]
+struct ImportmapResolver {
+    importmap: Arc<Importmap>,
+    root: PathBuf,
+}
+
+impl Plugin for ImportmapResolver {
+    fn name(&self) -> std::borrow::Cow<'static, str> {
+        "web_modules:importmap".into()
+    }
+
+    fn register_hook_usage(&self) -> HookUsage {
+        HookUsage::ResolveId
+    }
+
+    async fn resolve_id(
+        &self,
+        _ctx: &PluginContext,
+        args: &HookResolveIdArgs<'_>,
+    ) -> HookResolveIdReturn {
+        let specifier = args.specifier;
+        if specifier.starts_with(['.', '/']) {
+            return Ok(None);
+        }
+        let Some(url) = self.importmap.resolve(specifier) else {
+            if self.importmap.matches(specifier) {
+                // The browser throws on it.
+                return Err(Error::Bundle(format!("the import map refuses {specifier}")).into());
+            }
+            return Ok(None);
+        };
+        let Some(path) = url.strip_prefix('/').filter(|p| !p.starts_with('/')) else {
+            return Err(Error::Bundle(format!(
+                "the import map sends {specifier} off-site to {url}; mark it external"
+            ))
+            .into());
+        };
+        let file = site_file(&self.root, path).ok_or_else(|| {
+            Error::Bundle(format!(
+                "the import map sends {specifier} to {url}, which names no file under the bundle root"
+            ))
+        })?;
+        Ok(Some(HookResolveIdOutput::from_id(
+            file.to_string_lossy().into_owned(),
+        )))
+    }
+}
+
+/// The file under `root` at the site-root URL path `path`, decoded per segment; `None` for a
+/// segment that decodes to `.` or `..`, holds a separator, or is no UTF-8.
+fn site_file(root: &Path, path: &str) -> Option<PathBuf> {
+    let path = path.split(['?', '#']).next().unwrap_or_default();
+    path.split('/')
+        .try_fold(root.to_path_buf(), |file, segment| {
+            let segment = percent_encoding::percent_decode_str(segment)
+                .decode_utf8()
+                .ok()?;
+            let plain = !matches!(&*segment, "." | "..") && !segment.contains(['/', '\\']);
+            plain.then(|| file.join(&*segment))
+        })
+}
+
 async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundleOutput> {
     let root = opts
         .root
@@ -285,9 +354,8 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
         })
         .collect::<Vec<_>>();
 
-    // External decisions + import-map resolution live in one closure: a specifier is external
-    // when it (or the URL the import map gives it) matches the external list; otherwise a
-    // mapped URL under `/` is rewritten to the file under `root` and gets bundled.
+    // External decisions live in one closure: a specifier is external when it (or the URL the
+    // import map gives it) matches the external list; `ImportmapResolver` loads the rest.
     let external_list: Arc<[String]> = opts.external.to_vec().into();
     // Externality also holds by RESOLVED LOCATION: a relative import that lands on an
     // external file's location (an entry importing '../config.js') must stay external too,
@@ -308,6 +376,10 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
         .collect::<Vec<_>>()
         .into();
     let importmap: Arc<Importmap> = Arc::new(opts.importmap.cloned().unwrap_or_default());
+    let resolver = ImportmapResolver {
+        importmap: Arc::clone(&importmap),
+        root: root.clone(),
+    };
     let root_for_resolve = Arc::new(root.clone());
     let is_external = rolldown::IsExternal::Fn(Some(Arc::new(
         move |specifier: &str, _importer: Option<&str>, resolved: bool| {
@@ -362,32 +434,12 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
                 if matches_external(&external_list, &specifier) {
                     return Ok(true);
                 }
-                if let Some(url) = importmap.resolve(&specifier) {
-                    return Ok(matches_external(&external_list, &url));
-                }
-                Ok(false)
+                Ok(importmap
+                    .resolve(&specifier)
+                    .is_some_and(|url| matches_external(&external_list, &url)))
             })
         },
     )));
-
-    // Import-map alias: rewrite each map entry to its file path under `root` so rolldown's
-    // resolver loads the same file the browser would fetch. External entries are excluded —
-    // the closure above already keeps them out of the graph.
-    let alias = opts.importmap.map(|map| {
-        map.iter()
-            .filter(|(spec, url)| {
-                !matches_external(opts.external, spec) && !matches_external(opts.external, url)
-            })
-            .filter_map(|(spec, url)| {
-                let path = url.strip_prefix('/')?;
-                let target = root.join(path).to_string_lossy().to_string();
-                Some((
-                    spec.strip_suffix('/').unwrap_or(spec).to_string(),
-                    vec![Some(target)],
-                ))
-            })
-            .collect::<Vec<_>>()
-    });
 
     // Comment policy → rolldown's printer knobs. Normal comments never survive
     // bundling; rolldown has no collect/link mode, so `Collect` degrades to inline
@@ -415,7 +467,7 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
         ),
     };
 
-    let mut bundler = rolldown::Bundler::new(rolldown::BundlerOptions {
+    let options = rolldown::BundlerOptions {
         input: Some(input),
         cwd: Some(root.clone()),
         format: Some(rolldown::OutputFormat::Esm),
@@ -423,10 +475,6 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
         entry_filenames: Some("[name].js".to_string().into()),
         chunk_filenames: Some(opts.chunk_filenames.to_string().into()),
         external: Some(is_external),
-        resolve: alias.map(|alias| rolldown::ResolveOptions {
-            alias: Some(alias),
-            ..Default::default()
-        }),
         minify: Some(opts.minify.into()),
         sourcemap: opts
             .sourcemap
@@ -434,8 +482,9 @@ async fn bundle_split_async(opts: &SplitBundleOptions<'_>) -> Result<SplitBundle
         comments: Some(comments),
         legal_comments: Some(legal_comments),
         ..Default::default()
-    })
-    .map_err(|e| Error::Bundle(format!("{e:?}")))?;
+    };
+    let mut bundler = rolldown::Bundler::with_plugins(options, vec![Plugin::new_shared(resolver)])
+        .map_err(|e| Error::Bundle(format!("{e:?}")))?;
 
     let output = bundler
         .write()

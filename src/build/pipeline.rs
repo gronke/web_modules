@@ -1174,6 +1174,33 @@ fn bundle_stage(
         )));
     }
 
+    // Nor may the bundle itself: a bare import no staged file answered is still one.
+    let mut bundled = crate::module_graph::ModuleGraph::new();
+    for rel in out.emitted_js.iter().filter(|rel| {
+        let ext = rel.extension().and_then(|x| x.to_str()).unwrap_or("");
+        crate::module_graph::is_emitted_js(ext)
+    }) {
+        let source = std::fs::read_to_string(stage.join(rel))?;
+        let read = crate::module_graph::imports_from_source(&source, true)
+            .map_err(|e| Error::Build(format!("web-modules: {}: {e}", rel.display())))?;
+        bundled.insert(rel.clone(), read.imports);
+    }
+    let stranded: Vec<String> = bundled
+        .unresolved(&crate::importmap::Importmap::new())
+        .into_iter()
+        .filter(|(_, spec)| !is_external(&opts.processors.external, spec))
+        .map(|(file, spec)| format!("  {file}: import \"{spec}\""))
+        .collect();
+    if !stranded.is_empty() {
+        return Err(Error::Build(format!(
+            "web-modules: --bundle removes the import map, but the bundle still imports {} \
+             bare specifier(s) no vendored file answers - vendor them or mark them \
+             --external:\n{}",
+            stranded.len(),
+            stranded.join("\n")
+        )));
+    }
+
     // Non-bundled survivors get the output rewrite that emission deferred while
     // bundling (rolldown handled its own outputs, exempted via `emitted`). Their
     // maps reference the staged compiled modules — the same contract as the bundle's

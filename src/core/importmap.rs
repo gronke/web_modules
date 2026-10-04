@@ -161,6 +161,12 @@ impl Importmap {
         })
     }
 
+    /// Whether a key matches `specifier`, though the browser may refuse the match.
+    #[cfg(feature = "bundle")]
+    pub(crate) fn matches(&self, specifier: &str) -> bool {
+        self.entry(specifier).is_some()
+    }
+
     /// The exact key, else the longest prefix key; the browser drops an empty key.
     fn entry(&self, specifier: &str) -> Option<(&str, &str)> {
         if specifier.is_empty() {

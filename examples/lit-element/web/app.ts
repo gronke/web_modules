@@ -13,3 +13,8 @@ const card = document.querySelector('counter-card') as
   | null;
 await card?.updateComplete;
 card?.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((el) => new Tooltip(el));
+card?.addEventListener(
+  'counter-tick',
+  () => void import('./lazy.js').then((lazy) => lazy.note(card)),
+  { once: true },
+);

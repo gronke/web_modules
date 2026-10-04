@@ -40,6 +40,11 @@ jobs:
           command -v zstd >/dev/null || echo "::warning::zstd missing from the runner image; actions/cache will fall back to gzip"
           df -h /
 
+      - name: Rust toolchain
+        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+        with:
+          components: rustfmt clippy
+
       # Cargo cache via the shared first-party action: registry/git + a bounded `target/` (keyed on
       # Cargo.toml, no whole-target restore→save ratchet) with CARGO_INCREMENTAL defaulted off.
       # `prefix` keeps the build and tauri jobs in separate cache families.
@@ -328,6 +333,11 @@ jobs:
             libayatana-appindicator3-dev libxdo-dev libssl-dev \
             build-essential pkg-config file zstd
 
+      - name: Rust toolchain
+        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+        with:
+          components: rustfmt clippy
+
       # Cargo cache via the shared action — the tauri crate's own release `target/` (a separate dir
       # from the test job's workspace target), bounded and keyed on Cargo.toml; incremental off.
       # `-1` for the same reason as the build job: drop targets carrying pre-marker frontend output.
@@ -447,6 +457,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # the SemVer baseline derives from the tags
+      - name: Rust toolchain
+        uses: gronke/rust-ci/.github/actions/install-toolchain@main
       - uses: gronke/rust-ci/.github/actions/changelog@v1
         with:
           mode: check

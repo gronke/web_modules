@@ -1512,7 +1512,9 @@ name = "lit-element"
 version = "0.1.0"
 dependencies = [
  "include_dir",
+ "serde_json",
  "tokio",
+ "url",
  "web_modules",
 ]
 

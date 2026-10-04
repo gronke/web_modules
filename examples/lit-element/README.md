@@ -14,6 +14,7 @@ How it works:
 - **`build.rs`** calls `web_modules::build` to vendor the npm deps, transform
   `web/app.ts` and compile `web/styles.scss`, and render `index.html` (with the
   import map) into `$OUT_DIR/dist`.
+  It also writes `e2e/resolution.json` there, which ships at `/e2e/resolution.json` for `tests/importmap.spec.ts`.
 - **`main.rs`** embeds that tree with `include_dir!` and serves it via
   `Frontend::new(&DIST).source("web").auto()` — **live-reload** in debug (recompiles
   `web/*.ts`/`*.scss` on the fly, baked assets as fallback), **embedded** in `--release`.

@@ -23,6 +23,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Rust toolchain
+        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 

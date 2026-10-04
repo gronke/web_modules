@@ -24,6 +24,9 @@ jobs:
         with:
           fetch-depth: 0 # the merge-back needs history; the changelog coherence reads the tags
 
+      - name: Rust toolchain
+        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+
       - uses: gronke/rust-ci/.github/actions/cut-release@v1
         with:
           package: web_modules

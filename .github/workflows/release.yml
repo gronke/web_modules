@@ -83,6 +83,9 @@ jobs:
       # commit, or a signed release tag) in the go-live and attest jobs — not by a
       # signature gate on the tag itself.
 
+      - name: Rust toolchain
+        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+
       # verify: false — ci.yml already compiled this very commit; the gate is here for
       # packaging, tag/version coherence and the not-already-published probe.
       - name: Release readiness (version coherence · packaging · crates.io probe)
@@ -113,6 +116,9 @@ jobs:
     runs-on: ${{ vars.RUNNER_STANDARD || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Rust toolchain
+        uses: gronke/rust-ci/.github/actions/install-toolchain@main
 
       # CHANGELOG section → notes → draft pre-release → rc marker, one step; the
       # runbook lands in the step summary. Binaries build on the final tag, not
@@ -181,10 +187,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # windows-11-arm ships no Rust (actions/partner-runner-images#77); every other runner has
-      # one preinstalled. The shared rust-ci action bootstraps rustup when none is present.
-      - name: Ensure Rust toolchain (windows-11-arm ships none)
-        if: ${{ matrix.slug == 'windows-arm64' }}
+      # windows-11-arm ships no Rust (actions/partner-runner-images#77), and the self-hosted
+      # standard tier behind linux-x86_64 ships rustup without a default toolchain; the other
+      # runners have one preinstalled. The shared rust-ci action bootstraps rustup when none is present.
+      - name: Ensure Rust toolchain (windows-11-arm and the self-hosted tier)
+        if: ${{ matrix.slug == 'windows-arm64' || matrix.slug == 'linux-x86_64' }}
         uses: gronke/rust-ci/.github/actions/install-toolchain@main
 
       # The released binary is the complete CLI: `full` carries the rolldown `--bundle` path.

@@ -1,10 +1,17 @@
 import { test, expect, type Page } from '@playwright/test';
 
-// Collect console errors and failed/4xx-5xx responses for the duration of a test —
-// a vendored module that fails to resolve through the import map surfaces here.
-function watchForErrors(page: Page): { consoleErrors: string[]; failed: string[] } {
+// Collect console errors, uncaught errors and failed/4xx-5xx responses for the duration of
+// a test: a vendored module that fails to resolve through the import map surfaces here.
+function watchForErrors(page: Page): {
+  consoleErrors: string[];
+  pageErrors: string[];
+  failed: string[];
+} {
   const consoleErrors: string[] = [];
+  const pageErrors: string[] = [];
   const failed: string[] = [];
+  // A specifier the import map refuses throws a TypeError, which is no console message.
+  page.on('pageerror', (error) => pageErrors.push(error.message));
   page.on('console', (msg) => {
     if (msg.type() === 'error') consoleErrors.push(msg.text());
   });
@@ -12,12 +19,12 @@ function watchForErrors(page: Page): { consoleErrors: string[]; failed: string[]
   page.on('response', (res) => {
     if (res.status() >= 400) failed.push(`${res.status()} ${res.url()}`);
   });
-  return { consoleErrors, failed };
+  return { consoleErrors, pageErrors, failed };
 }
 
 test.describe('counter-card · Lit + Bootstrap, vendored by web-modules', () => {
   test('renders, increments, and loads every module from the import map', async ({ page }) => {
-    const { consoleErrors, failed } = watchForErrors(page);
+    const { consoleErrors, pageErrors, failed } = watchForErrors(page);
 
     await page.goto('/');
 
@@ -28,9 +35,12 @@ test.describe('counter-card · Lit + Bootstrap, vendored by web-modules', () => 
 
     await page.getByRole('button', { name: 'Increment' }).click();
     await expect(count).toHaveText('4');
+    // The click loaded lazy.js, which loaded class-map through the map's `lit/` key.
+    await expect(page.locator('[data-lazy]')).toHaveText('Loaded on demand with import()');
 
     expect(failed, `failed requests:\n${failed.join('\n')}`).toEqual([]);
     expect(consoleErrors, `console errors:\n${consoleErrors.join('\n')}`).toEqual([]);
+    expect(pageErrors, `uncaught errors:\n${pageErrors.join('\n')}`).toEqual([]);
   });
 
   test('Bootstrap tooltip opens below the button so the number stays readable', async ({ page }) => {

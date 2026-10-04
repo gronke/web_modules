@@ -20,4 +20,6 @@ How it works:
 - `web/app.ts` — a Lit component (TypeScript, static reactive `properties`,
   decorator-free, so the output needs no runtime helpers). Uses Bootstrap's `Tooltip`
   (Bootstrap JS + Popper, via the import map).
+- `web/lazy.ts`: loaded on the first click with `import('./lazy.js')`; its own
+  ``import(`lit/directives/class-map.js`)`` resolves through the import map's `lit/` key.
 - `@webcomponents/webcomponentsjs` is loaded as a classic-script polyfill fallback.

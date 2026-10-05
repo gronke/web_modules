@@ -33,7 +33,7 @@ fn parse_xliff_inner(xml: &str) -> std::result::Result<Vec<Unit>, Box<dyn std::e
     loop {
         match reader.read_event()? {
             Event::Start(e) => match e.name().as_ref() {
-                b"trans-unit" => {
+                "trans-unit" => {
                     id = e
                         .try_get_attribute("id")?
                         .map(|a| {
@@ -44,12 +44,12 @@ fn parse_xliff_inner(xml: &str) -> std::result::Result<Vec<Unit>, Box<dyn std::e
                     source.clear();
                     target.clear();
                 }
-                b"source" => in_source = true,
-                b"target" => in_target = true,
+                "source" => in_source = true,
+                "target" => in_target = true,
                 _ => {}
             },
             Event::Text(t) => {
-                let text = t.xml_content(XmlVersion::Implicit1_0)?;
+                let text = t.xml_content(XmlVersion::Implicit1_0);
                 if in_source {
                     source.push_str(&text);
                 } else if in_target {
@@ -57,9 +57,9 @@ fn parse_xliff_inner(xml: &str) -> std::result::Result<Vec<Unit>, Box<dyn std::e
                 }
             }
             Event::End(e) => match e.name().as_ref() {
-                b"source" => in_source = false,
-                b"target" => in_target = false,
-                b"trans-unit" => {
+                "source" => in_source = false,
+                "target" => in_target = false,
+                "trans-unit" => {
                     if let Some(id) = id.take() {
                         units.push(Unit {
                             id,

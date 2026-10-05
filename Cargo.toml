@@ -11,7 +11,7 @@ keywords = ["typescript", "esm", "importmap", "web_modules", "buildless"]
 license = "MIT"
 edition = "2021"
 # MSRV tracks oxc (the transform/minify toolchain), which raises it as it evolves.
-rust-version = "1.95"
+rust-version = "1.96"
 # Leading slashes anchor to the crate root — bare patterns (gitignore semantics) match at any
 # depth and would pull in stray files like examples/tauri/README.md.
 include = ["/src/**/*.rs", "/src/serve/live.js", "/Cargo.toml", "/README.md", "/LICENSE"]
@@ -105,7 +105,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # `tsconfig.json` is JSONC: comments and trailing commas that `serde_json` rejects.
 # Zero required dependencies of its own; the `serde` feature yields a `serde_json::Value`.
-jsonc-parser = { version = "0.33", default-features = false, features = ["serde"] }
+jsonc-parser = { version = "0.34", default-features = false, features = ["serde"] }
 walkdir = "2"
 semver = "1"
 # The WHATWG URL parser — module-specifier classification asks it whether a specifier
@@ -115,33 +115,33 @@ url = "2"
 # token of its own, so comments and strings can never be misread as references.
 # Core rather than feature-gated: vendoring is the always-on core, and the tree
 # it adds is small (cssparser-macros, dtoa-short, itoa, phf, smallvec).
-cssparser = "0.37"
+cssparser = "0.38"
 # Decode a stylesheet reference's percent-escapes before resolving it as a
 # package path (already in the tree via `url`).
 percent-encoding = "2"
 
 # oxc toolchain (TypeScript transform + minify). Optional; pulled by `typescript`/`minify`.
-oxc_allocator = { version = "0.138", optional = true }
-oxc_ast = { version = "0.138", optional = true }
-oxc_ast_visit = { version = "0.138", optional = true }
-oxc_parser = { version = "0.138", optional = true }
-oxc_semantic = { version = "0.138", optional = true }
-oxc_transformer = { version = "0.138", optional = true }
-oxc_codegen = { version = "0.138", optional = true }
-oxc_span = { version = "0.138", optional = true }
-oxc_minifier = { version = "0.138", optional = true }
-oxc_isolated_declarations = { version = "0.138", optional = true }
+oxc_allocator = { version = "0.152", optional = true }
+oxc_ast = { version = "0.152", optional = true }
+oxc_ast_visit = { version = "0.152", optional = true }
+oxc_parser = { version = "0.152", optional = true }
+oxc_semantic = { version = "0.152", optional = true }
+oxc_transformer = { version = "0.152", optional = true }
+oxc_codegen = { version = "0.152", optional = true }
+oxc_span = { version = "0.152", optional = true }
+oxc_minifier = { version = "0.152", optional = true }
+oxc_isolated_declarations = { version = "0.152", optional = true }
 
 # SCSS + templating. grass is used as a library only (SCSS→CSS); `default-features = false` drops its
 # `commandline` default (a clap-based CLI we never invoke) so the lean default/library path stays free
 # of the clap stack. `random` is kept (it's in grass's default — Sass `random()`), so SCSS is unchanged.
 grass = { version = "0.13", optional = true, default-features = false, features = ["random"] }
-tera = { version = "1", optional = true }
+tera = { version = "2", optional = true }
 
 # Icons (favicon / app icons) + i18n (XLIFF).
 image = { version = "0.25", default-features = false, features = ["png"], optional = true }
 ico = { version = "0.5", optional = true }
-quick-xml = { version = "0.41", optional = true }
+quick-xml = { version = "0.42", optional = true }
 flate2 = { version = "1", optional = true }
 
 # Axum server integration (embedded serving + dev server) + CLI. Optional; off the

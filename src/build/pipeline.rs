@@ -1231,7 +1231,7 @@ fn rewrite_npm_asset(
 /// The runtime version to vendor, pinned exactly and tracking the oxc toolchain in
 /// `Cargo.toml` (bump the two together). An exact pin keeps a decorator in an untrusted
 /// source from resolving a floating, newest-published package at build time.
-const OXC_RUNTIME_VERSION: &str = "0.138.0";
+const OXC_RUNTIME_VERSION: &str = "0.152.0";
 
 /// Vendor the oxc transform runtime (`@oxc-project/runtime`) so the helper imports the
 /// transform injected — e.g. the legacy-decorator `@oxc-project/runtime/helpers/decorate`

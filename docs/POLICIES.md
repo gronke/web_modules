@@ -8,6 +8,7 @@ The CLI flag reference: [CLI.md](CLI.md).
 
 The build never reads or rewrites your HTML.
 Pages are generated only where you opt in: a `*.tera` template (rendered with the generated import map as `{{ importmap }}`), or the `--html` / `--template` fallback when no source provides an `index.html`.
+Templates render through Tera 2: a variable the context does not define fails the render instead of printing empty, and the build's context defines only `importmap`.
 The generated import map is the contract (`importmap.json`, the `{{ importmap }}` Tera variable, the `{importmap}` placeholder), and it is the only map the unresolved-import check validates against; a hand-authored page owns its inline map.
 Template-rendered JavaScript joins the module graph and is validated like any emitted module, with one ordering rule: runtime-helper vendoring is decided before templates render, so an `@oxc-project/runtime` import that appears only in template-rendered JavaScript fails the check rather than vendoring the runtime.
 Put such code in a `.ts` / `.js` source.

@@ -1427,8 +1427,7 @@ fn prune_level(
 /// neither can be misread as a reference. `url("quoted")` tokenizes as a
 /// function whose argument is the string.
 fn url_targets(css: &str) -> Vec<String> {
-    let mut input = cssparser::ParserInput::new(css);
-    let mut parser = cssparser::Parser::new(&mut input);
+    let mut parser = cssparser::Parser::new(css);
     let mut out = Vec::new();
     collect_url_tokens(&mut parser, &mut out);
     out
@@ -1436,7 +1435,7 @@ fn url_targets(css: &str) -> Vec<String> {
 
 /// Walk every token, descending into blocks and functions (style bodies,
 /// `@media`, `image-set(...)`), collecting url targets.
-fn collect_url_tokens(parser: &mut cssparser::Parser<'_, '_>, out: &mut Vec<String>) {
+fn collect_url_tokens(parser: &mut cssparser::Parser<'_>, out: &mut Vec<String>) {
     use cssparser::Token;
     while let Ok(token) = parser.next().cloned() {
         match token {
@@ -1446,7 +1445,7 @@ fn collect_url_tokens(parser: &mut cssparser::Parser<'_, '_>, out: &mut Vec<Stri
                     if let Ok(Token::QuotedString(target)) = args.next() {
                         out.push(target.to_string());
                     }
-                    Ok::<(), cssparser::ParseError<'_, ()>>(())
+                    Ok::<(), cssparser::ParseError<()>>(())
                 });
             }
             Token::Function(_)
@@ -1455,7 +1454,7 @@ fn collect_url_tokens(parser: &mut cssparser::Parser<'_, '_>, out: &mut Vec<Stri
             | Token::CurlyBracketBlock => {
                 let _ = parser.parse_nested_block(|inner| {
                     collect_url_tokens(inner, out);
-                    Ok::<(), cssparser::ParseError<'_, ()>>(())
+                    Ok::<(), cssparser::ParseError<()>>(())
                 });
             }
             _ => {}

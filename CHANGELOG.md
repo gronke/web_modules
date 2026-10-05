@@ -9,6 +9,9 @@ Per-release notes are also published on each [GitHub Release](https://github.com
 
 ### Changed
 
+- **Breaking:** oxc 0.152 (MSRV follows to Rust 1.96), tera 2.4, cssparser 0.38, quick-xml 0.42, jsonc-parser 0.34; `@oxc-project/runtime` vendors at 0.152.0.
+  The direct and rolldown-bundled oxc trees now unify on one version.
+  Tera 2 fails template renders on undefined variables (Tera 1 printed empty).
 - **Breaking:** `Processors` gained `external`, `dts` and `library`; a struct literal without `..Default::default()` no longer compiles.
 - The dev server's live reload hot-swaps stylesheets in place instead of reloading the page, and streams every change over SSE (`/_web_modules/live/events`) to a client of its own (`/_web_modules/live/live.js`); `tower-livereload` is gone.
   Non-stylesheet changes still reload the page by default; `--live-reload css` (`Dev::live_reload(ReloadMode::Css)`) turns that into a console note, `--no-live-reload` (`ReloadMode::Off`) serves without watcher, stream and client.

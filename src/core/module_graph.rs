@@ -280,9 +280,7 @@ pub fn static_from_program(program: &oxc_ast::ast::Program, imports: &mut Vec<Mo
         let source = match stmt {
             Statement::ImportDeclaration(decl) => Some(decl.source.value.as_str()),
             Statement::ExportAllDeclaration(decl) => Some(decl.source.value.as_str()),
-            Statement::ExportNamedDeclaration(decl) => {
-                decl.source.as_ref().map(|s| s.value.as_str())
-            }
+            Statement::ExportFromDeclaration(decl) => Some(decl.source.value.as_str()),
             _ => None,
         };
         if let Some(spec) = source {

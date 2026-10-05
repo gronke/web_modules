@@ -28,6 +28,11 @@
     "rel/": "web_modules/rel/",
     "relx": "web_modules/relx.js",
     "bs/": "\\web_modules\\bs\\",
+    "dotbs/": ".\\web_modules\\dotbs\\",
+    "drive/": "C:\\drive\\",
+    "drivex": "C:\\drive\\x.js",
+    "file/": "file:///srv/file/",
+    "filehost": "file://somefile",
     "": "/empty.js"
   },
   "cases": [
@@ -96,6 +101,13 @@
     {"specifier": "rel/x.js", "address": null, "why": "address relative without ./"},
     {"specifier": "relx", "address": null, "why": "address relative without ./"},
     {"specifier": "bs/x.js", "address": null, "why": "address starting with \\"},
+    {"specifier": "dotbs/x.js", "address": null, "why": "address starting with .\\, not ./"},
+    {"specifier": "drive/x.js", "address": null, "why": "C:\\ is the scheme c:, so the address does not end with /"},
+    {"specifier": "drivex", "address": "c:\\drive\\x.js", "why": "a drive letter is a scheme: an absolute URL, never a path"},
+    {"specifier": "file/x.js", "address": "file:///srv/file/x.js", "why": "a file: address is absolute like any scheme"},
+    {"specifier": "file/../x.js", "address": null, "why": "backtracking on file:"},
+    {"specifier": "file/..\\x.js", "address": null, "why": "\\ separates on file:, a special scheme"},
+    {"specifier": "filehost", "address": "file://somefile/", "firefox": "file:///", "why": "file://somefile is absolute: somefile is its host, which Firefox drops"},
     {"specifier": "", "address": null, "why": "the empty key is no key"}
   ]
 }

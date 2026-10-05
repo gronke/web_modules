@@ -224,7 +224,9 @@ impl Importmap {
     }
 }
 
-/// Whether the browser reads `url` against the page: anything else must be absolute.
+/// Whether the browser reads `url` against the page: the import maps spec counts `/`, `./` and
+/// `../`, nothing else. `\x`, `.\x` and `x/` are not URL-like, so the browser drops the entry;
+/// `C:\x` is an absolute URL on the scheme `c`, and `file:` is absolute.
 fn is_relative(url: &str) -> bool {
     url.starts_with('/') || url.starts_with("./") || url.starts_with("../")
 }
@@ -413,7 +415,12 @@ mod tests {
             .insert("p443/", "//cdn.example:443/p443/")
             .insert("enc/", "/web_modules/ü nicode/")
             .insert("rel/", "web_modules/rel/")
-            .insert("lead/", " /web_modules/lead/");
+            .insert("lead/", " /web_modules/lead/")
+            .insert("dotbs/", ".\\web_modules\\dotbs\\")
+            .insert("drive/", "C:\\drive\\")
+            .insert("drivex", "C:\\drive\\x.js")
+            .insert("file/", "file:///srv/file/")
+            .insert("filehost", "file://somefile");
         for (specifier, address) in [
             ("dot/", "/web_modules/dot/"),
             ("dot/x.js", "/web_modules/dot/x.js"),
@@ -423,6 +430,9 @@ mod tests {
             ("p80/x.js", "//cdn.example:80/p80/x.js"),
             ("p443/x.js", "//cdn.example:443/p443/x.js"),
             ("enc/a b.js", "/web_modules/%C3%BC%20nicode/a%20b.js"),
+            ("drivex", "c:\\drive\\x.js"),
+            ("file/x.js", "file:///srv/file/x.js"),
+            ("filehost", "file://somefile/"),
         ] {
             assert_eq!(
                 map.resolve(specifier).as_deref(),
@@ -433,6 +443,10 @@ mod tests {
         // Neither absolute nor `/`, `./` or `../`.
         assert_eq!(map.resolve("rel/x.js"), None);
         assert_eq!(map.resolve("lead/x.js"), None);
+        assert_eq!(map.resolve("dotbs/x.js"), None);
+        // `C:\` is the scheme `c`, so no `/` ends the address; `file:` joins like `http:`.
+        assert_eq!(map.resolve("drive/x.js"), None);
+        assert_eq!(map.resolve("file/../x.js"), None);
     }
 
     #[test]

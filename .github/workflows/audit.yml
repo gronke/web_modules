@@ -27,7 +27,8 @@ jobs:
         uses: gronke/rust-ci/.github/actions/install-toolchain@main
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        # The self-hosted tier already carries cargo-audit.
+        run: command -v cargo-audit >/dev/null || cargo install cargo-audit --locked
 
       - name: Audit the locked tree
         run: cargo audit

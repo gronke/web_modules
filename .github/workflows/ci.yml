@@ -41,7 +41,7 @@ jobs:
           df -h /
 
       - name: Rust toolchain
-        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+        uses: gronke/ci/.github/actions/rust/install-toolchain@v3.0.0
         with:
           components: rustfmt clippy
 
@@ -52,7 +52,7 @@ jobs:
       # `.web-modules-out` marker: the staged build refuses to replace an unmarked output, and
       # `restore-keys` would keep resurrecting the old target under the same prefix.
       - name: Rust cache
-        uses: gronke/rust-ci/.github/actions/rust-cache@main
+        uses: gronke/ci/.github/actions/rust/rust-cache@v3.0.0
         with:
           prefix: build-1
           cache-target: "true"
@@ -223,7 +223,7 @@ jobs:
       # the workspace cold across each of the feature sets above. Saving on main only keeps pull
       # requests as pure consumers of what a main build leaves behind.
       - name: Save Rust cache
-        uses: gronke/rust-ci/.github/actions/rust-cache-save@main
+        uses: gronke/ci/.github/actions/rust/rust-cache-save@v3.0.0
         with:
           save: ${{ github.ref == 'refs/heads/main' }}
 
@@ -334,7 +334,7 @@ jobs:
             build-essential pkg-config file zstd
 
       - name: Rust toolchain
-        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+        uses: gronke/ci/.github/actions/rust/install-toolchain@v3.0.0
         with:
           components: rustfmt clippy
 
@@ -342,7 +342,7 @@ jobs:
       # from the test job's workspace target), bounded and keyed on Cargo.toml; incremental off.
       # `-1` for the same reason as the build job: drop targets carrying pre-marker frontend output.
       - name: Rust cache
-        uses: gronke/rust-ci/.github/actions/rust-cache@main
+        uses: gronke/ci/.github/actions/rust/rust-cache@v3.0.0
         with:
           prefix: tauri-1
           cache-target: "true"
@@ -392,7 +392,7 @@ jobs:
       # `lean`, not `full`: the declared MSRV tracks oxc, and `bundle`'s rolldown tree declares no
       # rust-version of its own, so its true MSRV is unknown and must not gate ours.
       - name: Check on the declared MSRV
-        uses: gronke/rust-ci/.github/actions/msrv@main
+        uses: gronke/ci/.github/actions/rust/msrv@v3.0.0
         with:
           package: web_modules
           features: --features lean
@@ -458,8 +458,8 @@ jobs:
         with:
           fetch-depth: 0 # the SemVer baseline derives from the tags
       - name: Rust toolchain
-        uses: gronke/rust-ci/.github/actions/install-toolchain@main
-      - uses: gronke/rust-ci/.github/actions/changelog@v1
+        uses: gronke/ci/.github/actions/rust/install-toolchain@v3.0.0
+      - uses: gronke/ci/.github/actions/changelog@v3.0.0
         with:
           mode: check
           package: web_modules

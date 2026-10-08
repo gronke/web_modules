@@ -1,4 +1,4 @@
-# The release pipeline (gronke/rust-ci release flow). Two paths through one workflow:
+# The release pipeline (gronke/ci release flow, the v1 actions). Two paths through one workflow:
 #
 #   candidate  push to release/v<version> (created by cut.yml) → gate → draft: render the
 #              CHANGELOG section into a draft pre-release + push an unsigned v<version>-rcN
@@ -18,7 +18,7 @@
 #
 # The signing key never enters CI: the pipeline only pushes the unsigned rc marker and the
 # unsigned moving major, both excluded from the tag-signing ruleset (import the templates
-# from gronke/rust-ci's .github/rulesets/).
+# from gronke/ci's .github/rulesets/ at v1.8.0).
 name: release
 
 on:
@@ -84,12 +84,12 @@ jobs:
       # signature gate on the tag itself.
 
       - name: Rust toolchain
-        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+        uses: gronke/ci/.github/actions/rust/install-toolchain@v3.0.0
 
       # verify: false — ci.yml already compiled this very commit; the gate is here for
       # packaging, tag/version coherence and the not-already-published probe.
       - name: Release readiness (version coherence · packaging · crates.io probe)
-        uses: gronke/rust-ci/.github/actions/check-release-readiness@v1
+        uses: gronke/ci/.github/actions/check-release-readiness@v1.8.0
         with:
           package: web_modules
           expected-version: ${{ steps.expect.outputs.version }}
@@ -99,7 +99,7 @@ jobs:
       # candidate build sealed fails here, before the binary matrix runs.
       - name: The tag must seal the newest candidate marker
         if: ${{ github.ref_type == 'tag' && github.event_name == 'push' }}
-        uses: gronke/rust-ci/.github/actions/publish-draft-release@v1
+        uses: gronke/ci/.github/actions/publish-draft-release@v1.8.0
         with:
           version: ${{ steps.expect.outputs.version }}
           seal-only: "true"
@@ -118,18 +118,18 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Rust toolchain
-        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+        uses: gronke/ci/.github/actions/rust/install-toolchain@v3.0.0
 
       # CHANGELOG section → notes → draft pre-release → rc marker, one step; the
       # runbook lands in the step summary. Binaries build on the final tag, not
       # per candidate — six native runners per review iteration buy nothing.
-      - uses: gronke/rust-ci/.github/actions/draft-release@v1
+      - uses: gronke/ci/.github/actions/draft-release@v1.8.0
         id: draft
         with:
           version: ${{ needs.gate.outputs.version }}
           package: web_modules
 
-      - uses: gronke/rust-ci/.github/actions/release-guidance@v1
+      - uses: gronke/ci/.github/actions/release-guidance@v1.8.0
         with:
           version: ${{ needs.gate.outputs.version }}
           marker-tag: ${{ steps.draft.outputs.marker }}
@@ -189,10 +189,10 @@ jobs:
 
       # windows-11-arm ships no Rust (actions/partner-runner-images#77), and the self-hosted
       # standard tier behind linux-x86_64 ships rustup without a default toolchain; the other
-      # runners have one preinstalled. The shared rust-ci action bootstraps rustup when none is present.
+      # runners have one preinstalled. The shared gronke/ci action bootstraps rustup when none is present.
       - name: Ensure Rust toolchain (windows-11-arm and the self-hosted tier)
         if: ${{ matrix.slug == 'windows-arm64' || matrix.slug == 'linux-x86_64' }}
-        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+        uses: gronke/ci/.github/actions/rust/install-toolchain@v3.0.0
 
       # The released binary is the complete CLI: `full` carries the rolldown `--bundle` path.
       # Built in release mode and reproducibly; `--locked` uses the committed Cargo.lock.
@@ -295,7 +295,7 @@ jobs:
 
       # Re-seals (idempotent), leaves the already-published release alone, and moves
       # v0 to the highest stable 0.x.
-      - uses: gronke/rust-ci/.github/actions/publish-draft-release@v1
+      - uses: gronke/ci/.github/actions/publish-draft-release@v1.8.0
         with:
           version: ${{ needs.gate.outputs.version }}
           tag-sha: ${{ github.sha }}
@@ -305,7 +305,7 @@ jobs:
       # tag satisfies it today, and a v*-sig companion on the same commit would
       # too. Unsigned, the publish step rehearses instead of uploading.
       - id: sig
-        uses: gronke/rust-ci/.github/actions/require-signed-release@v1
+        uses: gronke/ci/.github/actions/require-signed-release@v1.8.0
         with:
           version: ${{ needs.gate.outputs.version }}
           attestation-tags: "v*-sig"
@@ -316,7 +316,7 @@ jobs:
       - if: steps.sig.outputs.signed == 'true'
         id: cratesio-auth
         uses: rust-lang/crates-io-auth-action@v1
-      - uses: gronke/rust-ci/.github/actions/cargo-publish@v1
+      - uses: gronke/ci/.github/actions/cargo-publish@v1.8.0
         with:
           package: web_modules
           publish: ${{ steps.sig.outputs.signed }}
@@ -347,7 +347,7 @@ jobs:
       # does not publish drafts. `version` and `release-tag` come back out.
       - name: The companion must seal a published release
         id: release
-        uses: gronke/rust-ci/.github/actions/require-signed-release@v1
+        uses: gronke/ci/.github/actions/require-signed-release@v1.8.0
         with:
           attestation-tag: ${{ github.ref_name }}
           require-published: "true"
@@ -375,7 +375,7 @@ jobs:
       # catches up if the go-live never ran. Releases cut before the sealed
       # pipeline carry no candidate markers and fail here — nothing to
       # complete for them; their crates were published by hand.
-      - uses: gronke/rust-ci/.github/actions/publish-draft-release@v1
+      - uses: gronke/ci/.github/actions/publish-draft-release@v1.8.0
         with:
           version: ${{ steps.release.outputs.version }}
           tag-sha: ${{ github.sha }}
@@ -386,7 +386,7 @@ jobs:
       - if: steps.release.outputs.signed == 'true'
         id: cratesio-auth
         uses: rust-lang/crates-io-auth-action@v1
-      - uses: gronke/rust-ci/.github/actions/cargo-publish@v1
+      - uses: gronke/ci/.github/actions/cargo-publish@v1.8.0
         with:
           package: web_modules
           publish: ${{ steps.release.outputs.signed }}

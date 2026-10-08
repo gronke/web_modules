@@ -1,7 +1,7 @@
 # Maintaining web_modules
 
 What a maintainer of this repository — or of a fork — has to have, has to configure once, and does on each release.
-The release flow itself is [gronke/rust-ci](https://github.com/gronke/rust-ci)'s; its guide is [docs/release-flow.md](https://github.com/gronke/rust-ci/blob/main/docs/release-flow.md), and this document covers only what belongs to *this* repository.
+The release flow itself is [gronke/ci](https://github.com/gronke/ci)'s v1 flow; its guide is [docs/release-flow.md](https://github.com/gronke/ci/blob/v1.8.0/docs/release-flow.md), and this document covers only what belongs to *this* repository.
 
 ## What you need
 
@@ -36,13 +36,13 @@ REPO=gronke/web_modules
 ### Tag rulesets
 
 The pipeline pushes two kinds of tag with the workflow token: a `v<version>-rcN` candidate marker per candidate build, and the moving `v0`.
-Both are unsigned by nature, so the rulesets that protect release tags must exclude them — rust-ci's templates already do, and are importable as-is:
+Both are unsigned by nature, so the rulesets that protect release tags must exclude them — gronke/ci's templates at v1.8.0 already do, and are importable as-is:
 
 ```sh
 gh api "repos/$REPO/rulesets" --jq '.[].name'   # importing twice creates duplicates; look first
 
 for f in tags-signed tags-maintainer-only; do
-  curl -fsSL "https://raw.githubusercontent.com/gronke/rust-ci/v1/.github/rulesets/$f.json" \
+  curl -fsSL "https://raw.githubusercontent.com/gronke/ci/v1.8.0/.github/rulesets/$f.json" \
     | gh api "repos/$REPO/rulesets" --input - --jq '"imported: " + .name'
 done
 ```
@@ -206,7 +206,7 @@ The `tags-signed` ruleset covers `v*`, companions included, so an unsigned compa
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
-| `Can't find 'action.yml' … for action 'gronke/rust-ci/.github/actions/<name>@v1'` | The action exists on rust-ci's `main` but no release has moved `v1` yet | Release rust-ci, or pin the step to `@main` meanwhile |
+| `Can't find 'action.yml' … for action 'gronke/ci/.github/actions/<path>@<tag>'` | The pinned release has no action at that path; the Rust actions live under `rust/` since v3.0.0 | Pin the step to a release that has the action there |
 | Marker push rejected, `GH013` | A tag ruleset covers `v*-rc*` | Add the exclusions above |
 | `no candidate marker for v<version>` | The release was cut by hand, so no candidate build ever sealed a tree | Cut through `cut.yml`, or release from a commit predating the sealed flow |
 | Gate fails immediately on a tag | The tag sits on a commit whose workflow references something unreleased | Tag the commit you intend to release, and check what that commit's `release.yml` requires |

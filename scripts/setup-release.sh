@@ -23,7 +23,7 @@ OWNER="${REPO%/*}"
 NAME="${REPO#*/}"
 WORKFLOW="release.yml"
 ENVIRONMENT="crates-io"
-RULESET_BASE="https://raw.githubusercontent.com/gronke/rust-ci/v1/.github/rulesets"
+RULESET_BASE="https://raw.githubusercontent.com/gronke/ci/v1.8.0/.github/rulesets"
 
 say() { printf '%s\n' "$*"; }
 act() { # act <description> <command…> — describes under DRY_RUN, else runs quietly

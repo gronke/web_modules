@@ -24,7 +24,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Rust toolchain
-        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+        uses: gronke/ci/.github/actions/rust/install-toolchain@v3.0.0
 
       - name: Install cargo-audit
         # The self-hosted tier already carries cargo-audit.

@@ -1,4 +1,4 @@
-# Cut a release branch (gronke/rust-ci release flow). Dispatch with no inputs: the version
+# Cut a release branch (gronke/ci release flow, the v1 actions). Dispatch with no inputs: the version
 # comes from Cargo.toml. cut-release rewrites CHANGELOG.md's [Unreleased] section into the
 # released heading on a release/v<version> branch, opens the merge-back PR, and dispatches
 # the release pipeline for the first candidate run.
@@ -25,9 +25,9 @@ jobs:
           fetch-depth: 0 # the merge-back needs history; the changelog coherence reads the tags
 
       - name: Rust toolchain
-        uses: gronke/rust-ci/.github/actions/install-toolchain@main
+        uses: gronke/ci/.github/actions/rust/install-toolchain@v3.0.0
 
-      - uses: gronke/rust-ci/.github/actions/cut-release@v1
+      - uses: gronke/ci/.github/actions/cut-release@v1.8.0
         with:
           package: web_modules
           pipeline-workflow: release.yml

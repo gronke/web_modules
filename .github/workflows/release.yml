@@ -33,6 +33,11 @@ on:
   # fires no events.
   workflow_dispatch:
 
+# One release action at a time per ref: candidate pushes queue behind the draft in flight, nothing is cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 

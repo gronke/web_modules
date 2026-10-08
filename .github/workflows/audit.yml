@@ -14,6 +14,12 @@ on:
   workflow_dispatch:
 
 # Least-privilege: the audit only reads the repo; findings surface as the job result.
+
+# One audit per ref: a newer push or the next schedule cancels the run in flight.
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

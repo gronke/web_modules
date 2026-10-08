@@ -10,6 +10,11 @@ name: cut release
 on:
   workflow_dispatch:
 
+# One cut at a time; a cut in flight is never cancelled.
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
 permissions:
   contents: write # push the release branch
   pull-requests: write # open the merge-back PR
